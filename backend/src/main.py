@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
-from api.v1 import switches, lookup, history, discovery
+from api.v1 import switches, lookup, history, discovery, ipam
 from utils.logger import logger
 import os
 
@@ -32,6 +32,7 @@ app.include_router(switches.router, prefix=settings.API_V1_PREFIX)
 app.include_router(lookup.router, prefix=settings.API_V1_PREFIX)
 app.include_router(history.router, prefix=settings.API_V1_PREFIX)
 app.include_router(discovery.router, prefix=settings.API_V1_PREFIX)
+app.include_router(ipam.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.on_event("startup")

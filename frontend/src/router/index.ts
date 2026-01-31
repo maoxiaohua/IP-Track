@@ -3,6 +3,8 @@ import Home from '@/views/Home.vue'
 import Switches from '@/views/Switches.vue'
 import History from '@/views/History.vue'
 import Discovery from '@/views/Discovery.vue'
+import IPAM from '@/views/IPAM.vue'
+import SubnetDetail from '@/views/SubnetDetail.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -24,6 +26,18 @@ const router = createRouter({
       name: 'Discovery',
       component: Discovery,
       meta: { title: 'Batch Discovery' }
+    },
+    {
+      path: '/ipam',
+      name: 'IPAM',
+      component: IPAM,
+      meta: { title: 'IP Address Management' }
+    },
+    {
+      path: '/ipam/subnets/:id',
+      name: 'SubnetDetail',
+      component: SubnetDetail,
+      meta: { title: 'Subnet Detail' }
     },
     {
       path: '/history',

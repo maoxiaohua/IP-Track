@@ -17,6 +17,10 @@
               <el-icon><Setting /></el-icon>
               <span>Switches</span>
             </el-menu-item>
+            <el-menu-item index="/ipam">
+              <el-icon><Grid /></el-icon>
+              <span>IPAM</span>
+            </el-menu-item>
             <el-menu-item index="/discovery">
               <el-icon><Compass /></el-icon>
               <span>Batch Discovery</span>
