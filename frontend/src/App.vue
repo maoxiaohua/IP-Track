@@ -50,48 +50,92 @@ const activeRoute = computed(() => route.path)
 <style scoped>
 #app {
   min-height: 100vh;
-  background-color: #f5f7fa;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
 .el-header {
-  background-color: #409eff;
-  color: white;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  color: #303133;
   padding: 0;
+  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
+  position: sticky;
+  top: 0;
+  z-index: 1000;
 }
 
 .header-content {
   display: flex;
   align-items: center;
   height: 100%;
-  padding: 0 20px;
+  padding: 0 30px;
+  max-width: 1800px;
+  margin: 0 auto;
 }
 
 .header-content h1 {
   margin: 0;
-  margin-right: 40px;
-  font-size: 24px;
-  color: white;
+  margin-right: 50px;
+  font-size: 28px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -0.5px;
 }
 
 .el-menu {
   background-color: transparent;
   border: none;
+  flex: 1;
 }
 
 .el-menu-item {
-  color: white !important;
+  color: #606266 !important;
+  font-weight: 500;
+  border-radius: 8px;
+  margin: 0 4px;
+  transition: all 0.3s ease;
 }
 
 .el-menu-item:hover {
-  background-color: rgba(255, 255, 255, 0.1) !important;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%) !important;
+  color: #667eea !important;
+  transform: translateY(-2px);
 }
 
 .el-menu-item.is-active {
-  background-color: rgba(255, 255, 255, 0.2) !important;
-  border-bottom: 2px solid white !important;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+  color: white !important;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.el-menu-item .el-icon {
+  font-size: 18px;
+  margin-right: 6px;
 }
 
 .el-main {
-  padding: 20px;
+  padding: 30px;
+  max-width: 1800px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .header-content h1 {
+    font-size: 20px;
+    margin-right: 20px;
+  }
+
+  .el-menu-item span {
+    display: none;
+  }
+
+  .el-main {
+    padding: 15px;
+  }
 }
 </style>
