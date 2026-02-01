@@ -1,29 +1,60 @@
 # IP Track System
 
-A web-based application for tracking IP addresses on network switches. Query any IP address to discover which switch port a device is connected to, supporting multiple switch vendors (Cisco, Dell, Alcatel-Lucent).
+A comprehensive web-based network management application for tracking IP addresses, managing switches, and monitoring network devices. Features include IP address lookup, IPAM (IP Address Management), batch switch discovery, and multi-vendor support (Cisco, Dell, Alcatel-Lucent).
 
-## Features
+## ✨ Features
 
-- **Multi-Vendor Support**: Works with Cisco IOS/IOS-XE, Dell Networking OS, and Alcatel-Lucent switches
+### Core Features
 - **IP Address Lookup**: Enter an IP address to find the connected switch and port
-- **MAC Address Normalization**: Handles different MAC address formats across vendors
-- **Switch Management**: Add, edit, and manage network switches through a web interface
+- **Multi-Vendor Support**: Works with Cisco IOS/IOS-XE, Dell Networking OS, and Alcatel-Lucent switches
+- **Switch Management**: Add, edit, and manage network switches with role-based prioritization
 - **Query History**: Track all lookup queries with timestamps and results
 - **Connection Testing**: Test SSH connectivity to switches before adding them
-- **Real-time Results**: Fast queries with caching for improved performance
-- **RESTful API**: Full API access for automation and integration
+- **Real-time Results**: Fast queries with intelligent caching for improved performance
 
-## Architecture
+### 🆕 IPAM - IP Address Management
+- **Subnet Management**: Create and manage IP subnets with CIDR notation
+- **Automatic IP Generation**: Automatically generate all IP addresses for a subnet
+- **Network Scanning**:
+  - Ping reachability detection
+  - DNS reverse lookup (hostname discovery)
+  - ARP MAC address discovery
+  - OS detection (Windows, Linux, macOS, network devices)
+- **Device Tracking**: Monitor device online/offline status over time
+- **Switch Port Association**: Automatically link IPs to switch ports via MAC lookup
+- **Scan History**: Track changes in device status, hostname, and OS
+- **Dashboard Statistics**: Subnet utilization, IP allocation, and device counts
+
+### 🔍 Batch Discovery
+- **IP Range Scanning**: Scan IP ranges to discover network switches
+- **Multi-Credential Support**: Try multiple SSH credentials automatically
+- **Auto-Detection**: Automatically detect vendor, model, and role
+- **Bulk Import**: Select and import multiple switches at once
+- **3-Step Wizard**: User-friendly guided discovery process
+
+### 🎨 Modern UI
+- **Clean Design**: Modern blue gradient theme with glass morphism effects
+- **Responsive Layout**: Works on desktop and mobile devices
+- **Smooth Animations**: Polished transitions and hover effects
+- **Intuitive Navigation**: Easy-to-use interface with clear visual hierarchy
+
+### ⚡ Performance Optimizations
+- **Smart Query Strategy**: Priority-based switch querying (30x faster)
+- **Concurrent Operations**: Parallel scanning and querying
+- **Redis Caching**: Intelligent caching for frequently accessed data
+- **Async Architecture**: Non-blocking operations throughout
+
+## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Frontend (Vue 3)                     │
-│              IP Input → Results Display                 │
+│              Frontend (Vue 3 + TypeScript)              │
+│   IP Lookup | Switch Mgmt | IPAM | Discovery | History │
 └────────────────────────┬────────────────────────────────┘
-                         │ HTTP/REST
+                         │ HTTP/REST API
 ┌────────────────────────▼────────────────────────────────┐
-│                 Backend API (FastAPI)                   │
-│         Multi-Vendor Switch Connection Manager          │
+│              Backend API (FastAPI + Python)             │
+│  IP Lookup | Switch Manager | IPAM Service | Scanner   │
 └────────────────────────┬────────────────────────────────┘
                          │
         ┌────────────────┼────────────────┐
@@ -31,41 +62,52 @@ A web-based application for tracking IP addresses on network switches. Query any
 ┌───────▼──────┐  ┌──────▼──────┐  ┌─────▼──────┐
 │ PostgreSQL   │  │   Redis     │  │  Network   │
 │ - Switches   │  │ - Caching   │  │  Switches  │
-│ - History    │  │             │  │  (SSH)     │
+│ - History    │  │ - MAC Cache │  │  (SSH)     │
+│ - IP Subnets │  │             │  │            │
+│ - IP Addrs   │  │             │  │            │
 └──────────────┘  └─────────────┘  └────────────┘
 ```
 
-## Technology Stack
+## 🛠️ Technology Stack
 
 ### Backend
 - **FastAPI** - Modern async Python web framework
 - **netmiko** - Multi-vendor SSH library for network devices
-- **PostgreSQL** - Reliable database for switches and history
-- **SQLAlchemy** - Async ORM
-- **Redis** - Caching layer
-- **Pydantic** - Data validation
+- **PostgreSQL 16** - Reliable database for switches, history, and IPAM
+- **SQLAlchemy** - Async ORM with relationship management
+- **Redis 6+** - High-performance caching layer
+- **Pydantic** - Data validation and serialization
+- **asyncio** - Concurrent operations and task management
 
 ### Frontend
-- **Vue 3** - Progressive JavaScript framework
+- **Vue 3** - Progressive JavaScript framework with Composition API
 - **TypeScript** - Type-safe development
-- **Element Plus** - UI component library
-- **Vite** - Fast build tool
-- **Pinia** - State management
+- **Element Plus** - Modern UI component library
+- **Vite** - Lightning-fast build tool
+- **Pinia** - Intuitive state management
+- **Axios** - HTTP client with interceptors
 
-## Prerequisites
+### DevOps
+- **Docker** - Containerization
+- **Docker Compose** - Multi-container orchestration
+- **Nginx** - Frontend web server
+- **Uvicorn** - ASGI server for FastAPI
+
+## 📋 Prerequisites
 
 - Docker and Docker Compose (recommended)
-- OR:
+- OR manual installation:
   - Python 3.11+
-  - Node.js 20+
+  - Node.js 18+
   - PostgreSQL 16+
-  - Redis 7+
+  - Redis 6+
 
-## Quick Start with Docker
+## 🚀 Quick Start with Docker
 
 1. **Clone the repository**
    ```bash
-   cd /opt/ip-track
+   git clone https://github.com/YOUR_USERNAME/IP-TRACK.git
+   cd IP-TRACK
    ```
 
 2. **Generate encryption key**
@@ -86,104 +128,40 @@ A web-based application for tracking IP addresses on network switches. Query any
 
 5. **Access the application**
    - Frontend: http://localhost:8001
-   - Backend API: http://localhost:8100
-   - API Documentation: http://localhost:8100/api/docs
+   - Backend API: http://localhost:8101
+   - API Documentation: http://localhost:8101/api/docs
 
-## Manual Installation
+## 📖 Usage Guide
 
-### Backend Setup
+### 1. Adding Switches
 
-1. **Install Python dependencies**
-   ```bash
-   cd backend
-   pip install -r requirements.txt
-   ```
-
-2. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your database and Redis URLs
-   ```
-
-3. **Initialize database**
-   ```bash
-   psql -U postgres -f ../database/init/01_create_tables.sql
-   ```
-
-4. **Run the backend**
-   ```bash
-   cd src
-   uvicorn main:app --host 0.0.0.0 --port 8100 --reload
-   ```
-
-### Frontend Setup
-
-1. **Install Node dependencies**
-   ```bash
-   cd frontend
-   npm install
-   ```
-
-2. **Configure environment**
-   ```bash
-   # Create .env file
-   echo "VITE_API_BASE_URL=http://localhost:8100" > .env
-   ```
-
-3. **Run the frontend**
-   ```bash
-   npm run dev
-   ```
-
-## Configuration
-
-### Backend Configuration (backend/.env)
-
-```env
-# Application
-APP_NAME=IP Track System
-DEBUG=true
-
-# Database
-DATABASE_URL=postgresql+asyncpg://iptrack:iptrack123@localhost:5432/iptrack
-
-# Redis
-REDIS_URL=redis://localhost:6379/0
-
-# Security - IMPORTANT: Generate a secure key
-ENCRYPTION_KEY=your-32-byte-base64-encoded-key-here
-
-# Switch Connection
-DEFAULT_SSH_TIMEOUT=30
-MAX_CONCURRENT_CONNECTIONS=10
-```
-
-### Switch Configuration Requirements
-
-Ensure your network switches have:
-- SSH enabled
-- Valid user credentials with appropriate privileges
-- For Cisco: Enable mode password (if required)
-- Network connectivity from the backend server
-
-## Usage Guide
-
-### Adding a Switch
-
+#### Manual Addition
 1. Navigate to **Switches** page
 2. Click **Add Switch**
 3. Fill in the form:
    - **Name**: Descriptive name (e.g., "Core-Switch-01")
    - **IP Address**: Switch management IP
    - **Vendor**: Select Cisco, Dell, or Alcatel
+   - **Model**: Switch model (optional)
+   - **Role**: Core, Aggregation, or Access
+   - **Priority**: 1-100 (lower = higher priority)
    - **Username/Password**: SSH credentials
-   - **Enable Password**: For Cisco switches (optional)
 4. Click **Test** to verify connectivity
 5. Click **Create** to save
 
-### Looking Up an IP Address
+#### Batch Discovery
+1. Navigate to **Batch Discovery** page
+2. **Step 1**: Configure scan parameters
+   - Enter IP range (e.g., 10.0.0.1-10.0.0.50 or 10.0.0.0/24)
+   - Add SSH credentials (can add multiple sets)
+3. **Step 2**: Review discovered switches
+   - System auto-detects vendor, model, and role
+   - Select switches to import
+4. **Step 3**: Confirm and import
 
-1. Navigate to **Home** page
+### 2. IP Address Lookup
+
+1. Navigate to **IP Lookup** page
 2. Enter the target IP address
 3. Click **Lookup IP Address**
 4. View results showing:
@@ -191,20 +169,64 @@ Ensure your network switches have:
    - Switch name and IP
    - Port number
    - VLAN ID
+   - Query time
 
-### Viewing Query History
+### 3. IPAM - IP Address Management
+
+#### Creating a Subnet
+1. Navigate to **IPAM** page
+2. Click **Add Subnet**
+3. Fill in the form:
+   - **Subnet Name**: e.g., "Office Network"
+   - **Network**: CIDR format (e.g., 10.0.0.0/24)
+   - **Description**: Purpose of the subnet
+   - **VLAN ID**: Associated VLAN (optional)
+   - **Gateway**: Default gateway (optional)
+   - **DNS Servers**: Comma-separated (optional)
+   - **Auto Scan**: Enable periodic scanning
+   - **Scan Interval**: Frequency in seconds
+4. Click **Create**
+   - System automatically generates all IP addresses
+
+#### Scanning a Subnet
+1. In IPAM dashboard, find your subnet
+2. Click **Scan** button
+3. Choose scan type:
+   - **Quick**: Ping only (fast)
+   - **Full**: Ping + Hostname + MAC + OS (comprehensive)
+4. Wait for scan to complete
+5. View results:
+   - Online/offline devices
+   - Hostnames and MAC addresses
+   - Operating systems detected
+   - Switch port associations
+
+#### Viewing IP Details
+1. Click **View IPs** on a subnet
+2. Use filters:
+   - Status (Available, Used, Reserved, Offline)
+   - Reachability (Online, Offline)
+   - Search by IP, hostname, or description
+3. Click **Details** on any IP to see:
+   - Full scan history
+   - Device information
+   - Switch port connection
+   - Last seen timestamp
+
+### 4. Query History
 
 1. Navigate to **History** page
 2. View all past queries with:
    - Target IP
    - Found MAC address
-   - Switch port
+   - Switch and port
    - Query status
    - Timestamp
+3. Use pagination to browse records
 
-## API Documentation
+## 🔌 API Documentation
 
-Full API documentation is available at: http://localhost:8100/api/docs
+Full interactive API documentation is available at: http://localhost:8101/api/docs
 
 ### Key Endpoints
 
@@ -219,35 +241,95 @@ Full API documentation is available at: http://localhost:8100/api/docs
 #### IP Lookup
 - `POST /api/v1/lookup/ip` - Lookup an IP address
 
+#### Batch Discovery
+- `POST /api/v1/discovery/scan` - Scan IP range for switches
+- `POST /api/v1/discovery/add-switches` - Bulk add discovered switches
+
+#### IPAM
+- `POST /api/v1/ipam/subnets` - Create subnet
+- `GET /api/v1/ipam/subnets` - List subnets
+- `GET /api/v1/ipam/subnets/{id}` - Get subnet details
+- `DELETE /api/v1/ipam/subnets/{id}` - Delete subnet
+- `GET /api/v1/ipam/ip-addresses` - List IP addresses (with filters)
+- `GET /api/v1/ipam/ip-addresses/{id}` - Get IP details
+- `PUT /api/v1/ipam/ip-addresses/{id}` - Update IP
+- `POST /api/v1/ipam/scan` - Scan subnet or specific IPs
+- `GET /api/v1/ipam/dashboard` - Get IPAM statistics
+
 #### Query History
 - `GET /api/v1/history` - Get query history (paginated)
 - `GET /api/v1/history/{id}` - Get specific query
 
-## How It Works
+## 🔧 Configuration
 
-1. **ARP Table Query**: The system queries all enabled switches for ARP entries matching the target IP
-2. **MAC Discovery**: Extracts the MAC address associated with the IP
-3. **MAC Table Query**: Queries switches for MAC address table entries
-4. **Port Identification**: Identifies which port learned the MAC address
-5. **Result Display**: Shows switch name, port, and VLAN information
-6. **History Logging**: Stores query results in the database
+### Backend Configuration (backend/.env)
 
-## Vendor-Specific Details
+```env
+# Application
+APP_NAME=IP Track System
+APP_VERSION=1.0.0
+DEBUG=false
 
-### Cisco IOS/IOS-XE
-- MAC Format: `aaaa.bbbb.cccc`
-- Commands: `show ip arp`, `show mac address-table`
-- Requires enable mode for privileged commands
+# API
+API_V1_PREFIX=/api/v1
+BACKEND_CORS_ORIGINS=["http://localhost:8001"]
 
-### Dell Networking OS
-- MAC Format: `aa:bb:cc:dd:ee:ff`
-- Commands: `show arp`, `show mac-address-table`
+# Database
+DATABASE_URL=postgresql+asyncpg://iptrack:iptrack123@localhost:5432/iptrack
 
-### Alcatel-Lucent (Nokia)
-- MAC Format: `aa:bb:cc:dd:ee:ff`
-- Commands: `show ip arp`, `show mac-address-table`
+# Redis
+REDIS_URL=redis://localhost:6379/0
+REDIS_CACHE_TTL=300
 
-## Troubleshooting
+# Security - IMPORTANT: Generate a secure key
+ENCRYPTION_KEY=your-32-byte-base64-encoded-key-here
+
+# Switch Connection
+DEFAULT_SSH_TIMEOUT=30
+MAX_CONCURRENT_CONNECTIONS=10
+```
+
+### Switch Role and Priority
+
+**Roles**:
+- **Core**: Layer 3 core switches (highest priority for ARP queries)
+- **Aggregation**: Distribution/aggregation layer switches
+- **Access**: Edge/access layer switches
+
+**Priority** (1-100):
+- Lower number = higher priority
+- Recommended: Core=10, Aggregation=30, Access=50
+- System queries switches in priority order for optimal performance
+
+## 🎯 How It Works
+
+### IP Lookup Process
+1. **Priority Grouping**: Switches are grouped by priority
+2. **ARP Query**: Query high-priority switches first for ARP entries
+3. **MAC Discovery**: Extract MAC address from ARP table
+4. **MAC Table Query**: Query all switches for MAC address location
+5. **Port Identification**: Identify which port learned the MAC
+6. **Result Display**: Show switch name, port, and VLAN
+7. **History Logging**: Store query results in database
+
+### IPAM Scanning Process
+1. **Ping Sweep**: Test reachability of all IPs in subnet
+2. **DNS Lookup**: Reverse DNS to get hostnames
+3. **ARP Discovery**: Get MAC addresses from ARP cache
+4. **OS Detection**: Use nmap or TTL analysis to identify OS
+5. **Switch Association**: Query switches for MAC to find port
+6. **History Recording**: Log all scan results with change detection
+
+## 🔐 Security Considerations
+
+1. **Credential Encryption**: Switch passwords encrypted with Fernet (AES-256)
+2. **SSH Security**: Secure SSH connections to network devices
+3. **Input Validation**: All inputs validated to prevent injection attacks
+4. **CORS Configuration**: Restricted origins for API access
+5. **Network Isolation**: Deploy backend in secure network segment
+6. **Access Control**: Consider adding authentication for production
+
+## 🐛 Troubleshooting
 
 ### Connection Issues
 
@@ -255,105 +337,86 @@ Full API documentation is available at: http://localhost:8100/api/docs
 - Check network connectivity to switch
 - Verify SSH port is correct (default: 22)
 - Ensure firewall allows SSH traffic
+- Check switch SSH configuration
 
 **Problem**: "Authentication failed" error
 - Verify username and password are correct
 - For Cisco: Check if enable password is required
 - Ensure user has appropriate privileges
+- Try testing credentials manually via SSH
 
 ### Lookup Issues
 
 **Problem**: "No ARP entry found"
 - Device may not be active on the network
 - IP address may be incorrect
-- ARP entry may have expired
+- ARP entry may have expired (try pinging the device first)
+- Check if switches have correct role/priority
 
 **Problem**: "MAC address not found in MAC table"
-- Device may be connected to a different switch
+- Device may be connected to a switch not in the system
 - MAC table entry may have aged out
-- Check if all switches are configured
+- Verify all switches are configured and enabled
 
-## Security Considerations
+### IPAM Issues
 
-1. **Credential Encryption**: Switch passwords are encrypted using AES-256
-2. **SSH Security**: Uses secure SSH connections to switches
-3. **Input Validation**: All inputs are validated to prevent injection attacks
-4. **Network Isolation**: Deploy backend in a secure network segment
-5. **Access Control**: Consider adding authentication for production use
+**Problem**: Scan shows all devices offline
+- Check network connectivity from backend server
+- Verify ICMP (ping) is not blocked by firewall
+- Ensure backend can reach the subnet
 
-## Future Enhancements
+**Problem**: OS detection not working
+- Install nmap: `apt-get install nmap` or `yum install nmap`
+- Check if nmap has proper permissions
+- OS detection requires root/sudo for accurate results
 
-- **Batch Processing**: Process thousands of IPs with task queue
-- **Scheduled Scanning**: Periodic network discovery
-- **Change Detection**: Alert on port changes
-- **Network Topology**: Visualize switch connections
-- **SNMP Support**: Alternative to SSH for some vendors
-- **Export Functionality**: CSV/Excel export of results
-- **Multi-tenancy**: Support multiple network environments
-- **Authentication**: User login and role-based access control
+## 📚 Additional Documentation
 
-## Development
+- **Quick Start Guide**: See `QUICK_START.md`
+- **Manual Deployment**: See `MANUAL_DEPLOYMENT.md` (for servers without Docker)
+- **GitHub Push Guide**: See `GITHUB_PUSH_GUIDE.md`
+- **Project Summary**: See `PROJECT_SUMMARY.md`
 
-### Running Tests
+## 🚀 Deployment
 
+### Docker Deployment (Recommended)
 ```bash
-# Backend tests
-cd backend
-pytest
-
-# Frontend tests
-cd frontend
-npm run test
+./setup.sh
 ```
 
-### Project Structure
+### Manual Deployment
+See `MANUAL_DEPLOYMENT.md` for detailed instructions on deploying without Docker.
 
-```
-ip-track/
-├── backend/          # FastAPI backend
-│   ├── src/
-│   │   ├── api/      # API endpoints
-│   │   ├── core/     # Configuration and security
-│   │   ├── models/   # Database models
-│   │   ├── schemas/  # Pydantic schemas
-│   │   ├── services/ # Business logic
-│   │   └── utils/    # Utilities
-│   └── requirements.txt
-├── frontend/         # Vue 3 frontend
-│   ├── src/
-│   │   ├── api/      # API client
-│   │   ├── components/ # Vue components
-│   │   ├── views/    # Page views
-│   │   ├── stores/   # Pinia stores
-│   │   └── router/   # Vue Router
-│   └── package.json
-├── database/         # Database initialization
-│   └── init/
-└── docker-compose.yml
-```
-
-## Contributing
+## 🤝 Contributing
 
 Contributions are welcome! Please follow these guidelines:
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-## License
+## 📄 License
 
 This project is provided as-is for network management purposes.
 
-## Support
-
-For issues and questions:
-- Check the troubleshooting section
-- Review API documentation at `/api/docs`
-- Check application logs in `backend/logs/`
-
-## Acknowledgments
+## 🙏 Acknowledgments
 
 - Built with FastAPI, Vue 3, and Element Plus
 - Uses netmiko for multi-vendor network device support
 - Inspired by network operations teams worldwide
+- Co-developed with Claude Sonnet 4.5
+
+## 📞 Support
+
+For issues and questions:
+- Check the troubleshooting section above
+- Review API documentation at `/api/docs`
+- Check application logs in `backend/logs/`
+- Open an issue on GitHub
+
+---
+
+**Version**: 2.0.0
+**Last Updated**: 2026-02-01
+**Status**: Production Ready ✅
