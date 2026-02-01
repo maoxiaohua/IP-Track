@@ -1,15 +1,15 @@
 <template>
   <div class="switch-list">
     <el-table :data="switches" v-loading="loading" stripe style="width: 100%">
-      <el-table-column prop="name" label="Name" width="180" />
+      <el-table-column prop="name" label="Name" min-width="150" />
 
-      <el-table-column prop="ip_address" label="IP Address" width="150">
+      <el-table-column prop="ip_address" label="IP Address" width="140">
         <template #default="{ row }">
           <el-tag type="primary">{{ row.ip_address }}</el-tag>
         </template>
       </el-table-column>
 
-      <el-table-column prop="vendor" label="Vendor" width="120">
+      <el-table-column prop="vendor" label="Vendor" width="100">
         <template #default="{ row }">
           <el-tag
             :type="getVendorTagType(row.vendor)"
@@ -19,13 +19,13 @@
         </template>
       </el-table-column>
 
-      <el-table-column prop="model" label="Model" width="150">
+      <el-table-column prop="model" label="Model" min-width="120">
         <template #default="{ row }">
           {{ row.model || '-' }}
         </template>
       </el-table-column>
 
-      <el-table-column prop="role" label="Role" width="120">
+      <el-table-column prop="role" label="Role" width="100">
         <template #default="{ row }">
           <el-tag :type="getRoleTagType(row.role)">
             {{ getRoleLabel(row.role) }}
@@ -33,7 +33,7 @@
         </template>
       </el-table-column>
 
-      <el-table-column prop="priority" label="Priority" width="100">
+      <el-table-column prop="priority" label="Priority" width="90">
         <template #default="{ row }">
           <el-tag :type="getPriorityTagType(row.priority)">
             {{ row.priority }}
@@ -41,25 +41,19 @@
         </template>
       </el-table-column>
 
-      <el-table-column prop="ssh_port" label="SSH Port" width="100" />
+      <el-table-column prop="ssh_port" label="Port" width="70" />
 
-      <el-table-column prop="username" label="Username" width="120" />
+      <el-table-column prop="username" label="Username" width="110" />
 
-      <el-table-column prop="enabled" label="Status" width="100">
+      <el-table-column prop="enabled" label="Status" width="90">
         <template #default="{ row }">
-          <el-tag :type="row.enabled ? 'success' : 'info'">
-            {{ row.enabled ? 'Enabled' : 'Disabled' }}
+          <el-tag :type="row.enabled ? 'success' : 'info'" size="small">
+            {{ row.enabled ? 'On' : 'Off' }}
           </el-tag>
         </template>
       </el-table-column>
 
-      <el-table-column prop="created_at" label="Created" width="180">
-        <template #default="{ row }">
-          {{ formatDate(row.created_at) }}
-        </template>
-      </el-table-column>
-
-      <el-table-column label="Actions" width="200" fixed="right">
+      <el-table-column label="Actions" width="260" fixed="right">
         <template #default="{ row }">
           <el-button
             size="small"
@@ -152,5 +146,6 @@ const formatDate = (dateString: string) => {
 <style scoped>
 .switch-list {
   width: 100%;
+  overflow-x: auto;
 }
 </style>
