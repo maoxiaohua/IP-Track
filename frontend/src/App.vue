@@ -50,7 +50,7 @@ const activeRoute = computed(() => route.path)
 <style scoped>
 #app {
   min-height: 100vh;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, #124191 0%, #0099FF 100%);
 }
 
 .el-header {
@@ -58,7 +58,7 @@ const activeRoute = computed(() => route.path)
   backdrop-filter: blur(10px);
   color: #303133;
   padding: 0;
-  box-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 20px rgba(18, 65, 145, 0.1);
   position: sticky;
   top: 0;
   z-index: 1000;
@@ -78,7 +78,7 @@ const activeRoute = computed(() => route.path)
   margin-right: 50px;
   font-size: 28px;
   font-weight: 700;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, #124191 0%, #0099FF 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -100,15 +100,15 @@ const activeRoute = computed(() => route.path)
 }
 
 .el-menu-item:hover {
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%) !important;
-  color: #667eea !important;
+  background: linear-gradient(135deg, rgba(18, 65, 145, 0.1) 0%, rgba(0, 153, 255, 0.1) 100%) !important;
+  color: #124191 !important;
   transform: translateY(-2px);
 }
 
 .el-menu-item.is-active {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+  background: linear-gradient(135deg, #124191 0%, #0099FF 100%) !important;
   color: white !important;
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  box-shadow: 0 4px 12px rgba(18, 65, 145, 0.4);
 }
 
 .el-menu-item .el-icon {
