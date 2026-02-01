@@ -4,10 +4,14 @@
       <template #header>
         <div class="card-header">
           <h2>IPAM - IP 地址管理</h2>
-          <el-button type="primary" @click="showAddSubnetDialog = true">
-            <el-icon><Plus /></el-icon>
-            添加子网
-          </el-button>
+          <div>
+            <el-button type="success" @click="exportData" :icon="Download">
+              导出数据
+            </el-button>
+            <el-button type="primary" @click="showAddSubnetDialog = true" :icon="Plus">
+              添加子网
+            </el-button>
+          </div>
         </div>
       </template>
 
@@ -43,9 +47,29 @@
         </el-col>
       </el-row>
 
+      <!-- Charts -->
+      <el-row :gutter="20" style="margin-bottom: 20px">
+        <el-col :span="12">
+          <el-card shadow="hover">
+            <template #header>
+              <h3 style="margin: 0">IP 地址分布</h3>
+            </template>
+            <Chart :option="ipDistributionOption" height="300px" />
+          </el-card>
+        </el-col>
+        <el-col :span="12">
+          <el-card shadow="hover">
+            <template #header>
+              <h3 style="margin: 0">子网利用率</h3>
+            </template>
+            <Chart :option="subnetUtilizationOption" height="300px" />
+          </el-card>
+        </el-col>
+      </el-row>
+
       <!-- Subnets Table -->
       <el-table :data="subnets" v-loading="loading" stripe style="width: 100%">
-        <el-table-column prop="name" label="子网名称" width="180" />
+        <el-table-column prop="subnet_name" label="子网名称" width="180" />
 
         <el-table-column prop="network" label="网络" width="150">
           <template #default="{ row }">
@@ -103,7 +127,7 @@
               type="success"
               @click="scanSubnet(row)"
               :icon="Refresh"
-              :loading="scanning[row.id]"
+              :loading="scanning[row.subnet_id]"
             >
               扫描
             </el-button>
@@ -187,13 +211,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import {
-  Plus, Grid, Connection, Check, PieChart, View, Refresh, Delete
+  Plus, Grid, Connection, Check, PieChart, View, Refresh, Delete, Download
 } from '@element-plus/icons-vue'
 import axios from 'axios'
+import Chart from '@/components/Chart.vue'
+import { exportToExcel } from '@/utils/export'
 
 const router = useRouter()
 const loading = ref(false)
@@ -248,6 +274,78 @@ const subnetRules: FormRules = {
     }
   ]
 }
+
+// Chart options
+const ipDistributionOption = computed(() => ({
+  tooltip: {
+    trigger: 'item',
+    formatter: '{b}: {c} ({d}%)'
+  },
+  legend: {
+    orient: 'vertical',
+    left: 'left'
+  },
+  series: [
+    {
+      name: 'IP 分布',
+      type: 'pie',
+      radius: '50%',
+      data: [
+        { value: dashboard.value.used_ips, name: '已使用', itemStyle: { color: '#67c23a' } },
+        { value: dashboard.value.available_ips, name: '可用', itemStyle: { color: '#909399' } },
+        { value: dashboard.value.offline_ips, name: '离线', itemStyle: { color: '#f56c6c' } }
+      ],
+      emphasis: {
+        itemStyle: {
+          shadowBlur: 10,
+          shadowOffsetX: 0,
+          shadowColor: 'rgba(0, 0, 0, 0.5)'
+        }
+      }
+    }
+  ]
+}))
+
+const subnetUtilizationOption = computed(() => ({
+  tooltip: {
+    trigger: 'axis',
+    axisPointer: {
+      type: 'shadow'
+    }
+  },
+  xAxis: {
+    type: 'category',
+    data: subnets.value.map(s => s.subnet_name),
+    axisLabel: {
+      rotate: 45,
+      interval: 0
+    }
+  },
+  yAxis: {
+    type: 'value',
+    max: 100,
+    axisLabel: {
+      formatter: '{value}%'
+    }
+  },
+  series: [
+    {
+      name: '利用率',
+      type: 'bar',
+      data: subnets.value.map(s => ({
+        value: s.utilization_percent,
+        itemStyle: {
+          color: s.utilization_percent < 50 ? '#67c23a' : s.utilization_percent < 80 ? '#e6a23c' : '#f56c6c'
+        }
+      })),
+      label: {
+        show: true,
+        position: 'top',
+        formatter: '{c}%'
+      }
+    }
+  ]
+}))
 
 const loadDashboard = async () => {
   loading.value = true
@@ -343,6 +441,31 @@ const deleteSubnet = async (subnet: any) => {
   }
 }
 
+const exportData = () => {
+  if (subnets.value.length === 0) {
+    ElMessage.warning('没有数据可导出')
+    return
+  }
+
+  const exportData = subnets.value.map(subnet => ({
+    '子网名称': subnet.subnet_name,
+    '网络': subnet.network,
+    '总 IP 数': subnet.total_ips,
+    '已使用': subnet.used_ips,
+    '可用': subnet.available_ips,
+    '保留': subnet.reserved_ips,
+    '离线': subnet.offline_ips,
+    '利用率 (%)': subnet.utilization_percent,
+    '在线设备': subnet.reachable_count,
+    'VLAN': subnet.vlan_id || '-',
+    '最后扫描': subnet.last_scan_at ? formatDate(subnet.last_scan_at) : '从未扫描'
+  }))
+
+  const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
+  exportToExcel(exportData, `IPAM_子网统计_${timestamp}`, 'IPAM 数据')
+  ElMessage.success('数据导出成功')
+}
+
 const getUtilizationColor = (percent: number) => {
   if (percent < 50) return '#67c23a'
   if (percent < 80) return '#e6a23c'
@@ -373,7 +496,6 @@ onMounted(() => {
 
 .card-header h2 {
   margin: 0;
-  color: #303133;
 }
 
 .form-tip {

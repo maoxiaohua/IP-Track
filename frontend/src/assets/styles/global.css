@@ -66,6 +66,10 @@ body {
   margin: 0;
 }
 
+.el-card__header * {
+  color: white !important;
+}
+
 /* Button Enhancements */
 .el-button {
   border-radius: 6px;
