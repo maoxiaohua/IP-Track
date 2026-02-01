@@ -54,7 +54,7 @@
             <template #header>
               <h3 style="margin: 0">IP 地址分布</h3>
             </template>
-            <Chart :option="ipDistributionOption" height="300px" />
+            <Chart :option="ipDistributionOption" height="220px" />
           </el-card>
         </el-col>
         <el-col :span="12">
@@ -62,22 +62,22 @@
             <template #header>
               <h3 style="margin: 0">子网利用率</h3>
             </template>
-            <Chart :option="subnetUtilizationOption" height="300px" />
+            <Chart :option="subnetUtilizationOption" height="220px" />
           </el-card>
         </el-col>
       </el-row>
 
       <!-- Subnets Table -->
       <el-table :data="subnets" v-loading="loading" stripe style="width: 100%">
-        <el-table-column prop="subnet_name" label="子网名称" width="180" />
+        <el-table-column prop="subnet_name" label="子网名称" min-width="200" />
 
-        <el-table-column prop="network" label="网络" width="150">
+        <el-table-column prop="network" label="网络" width="160">
           <template #default="{ row }">
             <el-tag type="primary">{{ row.network }}</el-tag>
           </template>
         </el-table-column>
 
-        <el-table-column label="IP 统计" width="200">
+        <el-table-column label="IP 统计" width="220">
           <template #default="{ row }">
             <div style="font-size: 12px">
               <div>总数: {{ row.total_ips }}</div>
@@ -87,7 +87,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="利用率" width="150">
+        <el-table-column label="利用率" width="180">
           <template #default="{ row }">
             <el-progress
               :percentage="row.utilization_percent"
@@ -96,9 +96,9 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="vlan_id" label="VLAN" width="80" />
+        <el-table-column prop="vlan_id" label="VLAN" width="90" />
 
-        <el-table-column label="自动扫描" width="100">
+        <el-table-column label="自动扫描" width="110">
           <template #default="{ row }">
             <el-tag :type="row.auto_scan ? 'success' : 'info'" size="small">
               {{ row.auto_scan ? '启用' : '禁用' }}
@@ -106,7 +106,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="最后扫描" width="180">
+        <el-table-column label="最后扫描" min-width="200">
           <template #default="{ row }">
             {{ row.last_scan_at ? formatDate(row.last_scan_at) : '从未扫描' }}
           </template>
