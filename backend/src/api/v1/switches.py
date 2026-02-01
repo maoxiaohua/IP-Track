@@ -2,12 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
+from datetime import datetime
 from api.deps import get_db
 from models.switch import Switch
 from schemas.switch import SwitchCreate, SwitchUpdate, SwitchResponse, SwitchTestResponse
 from core.security import credential_encryption
 from services.switch_manager import switch_manager
 from utils.logger import logger
+from utils.network import ping_host, ping_multiple_hosts
 
 router = APIRouter(prefix="/switches", tags=["switches"])
 
@@ -239,3 +241,119 @@ async def test_switch_connection(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to test switch connection: {str(e)}"
         )
+
+
+@router.post("/{switch_id}/ping")
+async def ping_switch(
+    switch_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Ping a switch to check if it's reachable"""
+    try:
+        result = await db.execute(
+            select(Switch).where(Switch.id == switch_id)
+        )
+        switch = result.scalar_one_or_none()
+
+        if not switch:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Switch with ID {switch_id} not found"
+            )
+
+        # Ping the switch
+        ping_result = await ping_host(str(switch.ip_address), timeout=2)
+
+        # Update switch status
+        switch.is_reachable = ping_result["reachable"]
+        switch.last_check_at = datetime.utcnow()
+        switch.response_time_ms = ping_result.get("response_time_ms")
+
+        await db.commit()
+        await db.refresh(switch)
+
+        logger.info(f"Pinged switch {switch.name}: {'reachable' if ping_result['reachable'] else 'unreachable'}")
+
+        return {
+            "switch_id": switch.id,
+            "switch_name": switch.name,
+            "ip_address": str(switch.ip_address),
+            "reachable": ping_result["reachable"],
+            "response_time_ms": ping_result.get("response_time_ms"),
+            "last_check_at": switch.last_check_at
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error pinging switch: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to ping switch: {str(e)}"
+        )
+
+
+@router.post("/ping-all")
+async def ping_all_switches(
+    db: AsyncSession = Depends(get_db)
+):
+    """Ping all switches to check their status"""
+    try:
+        # Get all switches
+        result = await db.execute(select(Switch))
+        switches = result.scalars().all()
+
+        if not switches:
+            return {
+                "total": 0,
+                "reachable": 0,
+                "unreachable": 0,
+                "results": []
+            }
+
+        # Ping all switches concurrently
+        switch_ips = {str(sw.ip_address): sw for sw in switches}
+        ping_results = await ping_multiple_hosts(list(switch_ips.keys()), timeout=2)
+
+        # Update all switches
+        reachable_count = 0
+        unreachable_count = 0
+        results = []
+
+        for ip, ping_result in ping_results.items():
+            switch = switch_ips[ip]
+            switch.is_reachable = ping_result["reachable"]
+            switch.last_check_at = datetime.utcnow()
+            switch.response_time_ms = ping_result.get("response_time_ms")
+
+            if ping_result["reachable"]:
+                reachable_count += 1
+            else:
+                unreachable_count += 1
+
+            results.append({
+                "switch_id": switch.id,
+                "switch_name": switch.name,
+                "ip_address": ip,
+                "reachable": ping_result["reachable"],
+                "response_time_ms": ping_result.get("response_time_ms")
+            })
+
+        await db.commit()
+
+        logger.info(f"Pinged all switches: {reachable_count} reachable, {unreachable_count} unreachable")
+
+        return {
+            "total": len(switches),
+            "reachable": reachable_count,
+            "unreachable": unreachable_count,
+            "results": results
+        }
+
+    except Exception as e:
+        logger.error(f"Error pinging all switches: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to ping all switches: {str(e)}"
+        )
+

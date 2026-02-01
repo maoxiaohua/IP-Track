@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from api.v1 import switches, lookup, history, discovery, ipam
+from services.status_checker import switch_status_checker
 from utils.logger import logger
 import os
 
@@ -41,11 +42,19 @@ async def startup_event():
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Debug mode: {settings.DEBUG}")
 
+    # Start background switch status checker
+    switch_status_checker.start()
+    logger.info("Background switch status checker started")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Run on application shutdown"""
     logger.info(f"Shutting down {settings.APP_NAME}")
+
+    # Stop background switch status checker
+    switch_status_checker.stop()
+    logger.info("Background switch status checker stopped")
 
 
 @app.get("/")

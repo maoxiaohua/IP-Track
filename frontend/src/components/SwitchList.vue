@@ -45,7 +45,47 @@
 
       <el-table-column prop="username" label="Username" width="110" />
 
-      <el-table-column prop="enabled" label="Status" width="90">
+      <el-table-column label="Ping Status" width="120">
+        <template #default="{ row }">
+          <el-tag
+            v-if="row.is_reachable === true"
+            type="success"
+            size="small"
+            effect="dark"
+          >
+            <el-icon><CircleCheck /></el-icon>
+            Online
+          </el-tag>
+          <el-tag
+            v-else-if="row.is_reachable === false"
+            type="danger"
+            size="small"
+            effect="dark"
+          >
+            <el-icon><CircleClose /></el-icon>
+            Offline
+          </el-tag>
+          <el-tag
+            v-else
+            type="info"
+            size="small"
+          >
+            <el-icon><QuestionFilled /></el-icon>
+            Unknown
+          </el-tag>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="Response" width="100">
+        <template #default="{ row }">
+          <span v-if="row.response_time_ms" style="color: #67c23a; font-weight: 500;">
+            {{ row.response_time_ms.toFixed(1) }}ms
+          </span>
+          <span v-else style="color: #909399;">-</span>
+        </template>
+      </el-table-column>
+
+      <el-table-column prop="enabled" label="Enabled" width="90">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" size="small">
             {{ row.enabled ? 'On' : 'Off' }}
@@ -89,7 +129,7 @@
 </template>
 
 <script setup lang="ts">
-import { Connection, Edit, Delete } from '@element-plus/icons-vue'
+import { Connection, Edit, Delete, CircleCheck, CircleClose, QuestionFilled } from '@element-plus/icons-vue'
 import type { Switch } from '@/api/switches'
 
 defineProps<{

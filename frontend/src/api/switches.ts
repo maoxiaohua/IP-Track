@@ -12,6 +12,9 @@ export interface Switch {
   username: string
   connection_timeout: number
   enabled: boolean
+  is_reachable?: boolean | null
+  last_check_at?: string | null
+  response_time_ms?: number | null
   created_at: string
   updated_at: string
 }
@@ -83,6 +86,18 @@ export const switchesApi = {
   // Test switch connection
   test: async (id: number): Promise<SwitchTestResponse> => {
     const response = await apiClient.post(`/api/v1/switches/${id}/test`)
+    return response.data
+  },
+
+  // Ping a switch
+  ping: async (id: number): Promise<any> => {
+    const response = await apiClient.post(`/api/v1/switches/${id}/ping`)
+    return response.data
+  },
+
+  // Ping all switches
+  pingAll: async (): Promise<any> => {
+    const response = await apiClient.post('/api/v1/switches/ping-all')
     return response.data
   }
 }

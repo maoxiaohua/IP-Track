@@ -108,7 +108,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { switchesApi, type Switch, type SwitchCreate } from '@/api/switches'
 import SwitchList from '@/components/SwitchList.vue'
@@ -119,6 +119,7 @@ const saving = ref(false)
 const showAddDialog = ref(false)
 const editingSwitch = ref<Switch | null>(null)
 const switchFormRef = ref<FormInstance>()
+let refreshInterval: number | null = null
 
 const switchForm = reactive<SwitchCreate>({
   name: '',
@@ -263,6 +264,18 @@ const handleTest = async (switchItem: Switch) => {
 
 onMounted(() => {
   loadSwitches()
+
+  // Auto-refresh every 30 seconds to update switch status
+  refreshInterval = window.setInterval(() => {
+    loadSwitches()
+  }, 30000)
+})
+
+onUnmounted(() => {
+  // Clean up interval when component is unmounted
+  if (refreshInterval) {
+    clearInterval(refreshInterval)
+  }
 })
 </script>
 

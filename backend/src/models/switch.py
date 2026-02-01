@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
 from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.sql import func
 from core.database import Base
@@ -22,6 +22,12 @@ class Switch(Base):
     enable_password_encrypted = Column(Text, nullable=True)  # For Cisco enable mode
     enabled = Column(Boolean, default=True, nullable=False, index=True)
     connection_timeout = Column(Integer, default=30, nullable=False)
+
+    # Ping status fields
+    is_reachable = Column(Boolean, nullable=True, index=True)  # NULL = not checked yet
+    last_check_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    response_time_ms = Column(Float, nullable=True)  # Ping response time in milliseconds
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
