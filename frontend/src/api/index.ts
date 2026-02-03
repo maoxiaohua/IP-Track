@@ -12,7 +12,7 @@ const getApiBaseUrl = () => {
   // Otherwise, use current hostname with backend port
   const protocol = window.location.protocol
   const hostname = window.location.hostname
-  const port = '8101'  // Backend port
+  const port = '8100'  // Backend port
   return `${protocol}//${hostname}:${port}`
 }
 

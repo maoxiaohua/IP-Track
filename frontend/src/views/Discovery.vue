@@ -210,7 +210,7 @@ import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus, Delete } from '@element-plus/icons-vue'
-import axios from 'axios'
+import apiClient from '@/api'
 
 const router = useRouter()
 const currentStep = ref(0)
@@ -290,7 +290,7 @@ const startScan = async () => {
     scanning.value = true
 
     try {
-      const response = await axios.post('/api/v1/discovery/scan', {
+      const response = await apiClient.post('/api/v1/discovery/scan', {
         ip_range: scanForm.ip_range,
         credentials: validCredentials
       })
@@ -344,7 +344,7 @@ const batchAddSwitches = async () => {
       enabled: true
     }))
 
-    await axios.post('/api/v1/discovery/batch-add', switchesToAdd)
+    await apiClient.post('/api/v1/discovery/batch-add', switchesToAdd)
 
     ElMessage.success(`成功添加 ${selectedSwitches.value.length} 个交换机`)
 
