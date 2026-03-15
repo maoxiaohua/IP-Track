@@ -1,6 +1,7 @@
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, field_validator, field_serializer
+from typing import Optional, Any
 from datetime import datetime
+from ipaddress import IPv4Address, IPv6Address
 
 
 class QueryHistoryResponse(BaseModel):
@@ -15,6 +16,14 @@ class QueryHistoryResponse(BaseModel):
     error_message: Optional[str] = None
     query_time_ms: Optional[int] = None
     queried_at: datetime
+
+    @field_validator('target_ip', mode='before')
+    @classmethod
+    def convert_ip_to_string(cls, v: Any) -> str:
+        """Convert IPv4Address/IPv6Address to string before validation"""
+        if isinstance(v, (IPv4Address, IPv6Address)):
+            return str(v)
+        return v
 
     class Config:
         from_attributes = True

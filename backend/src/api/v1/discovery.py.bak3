@@ -1,0 +1,382 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from typing import List
+from api.deps import get_db
+from schemas.discovery import (
+    SwitchDiscoveryRequest,
+    SwitchDiscoveryResponse,
+    DiscoveredSwitch
+)
+from schemas.switch import SwitchCreate, SwitchResponse
+from services.switch_discovery import switch_discovery_service
+from services.switch_manager import switch_manager
+from core.security import credential_encryption
+from models.switch import Switch
+from utils.logger import logger
+import asyncio
+import json
+import uuid
+
+router = APIRouter(prefix="/discovery", tags=["discovery"])
+
+# Store discovered switches and progress
+_discovery_cache = {}
+_progress_queues = {}  # session_id -> asyncio.Queue
+
+
+@router.post("/scan", response_model=SwitchDiscoveryResponse)
+async def discover_switches(
+    request: SwitchDiscoveryRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Scan an IP range to discover switches
+
+    This endpoint will:
+    1. Scan the specified IP range
+    2. Try each credential set on each IP (with retry)
+    3. Detect vendor, model, and role automatically
+    4. Return list of discovered switches
+    """
+    try:
+        logger.info(f"Starting switch discovery for range: {request.ip_range}")
+
+        # Validate IP range format before proceeding
+        try:
+            temp_service = switch_discovery_service
+            ip_list = temp_service._parse_ip_range(request.ip_range)
+            if not ip_list:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="无法解析 IP 范围，请检查输入格式。支持格式：10.0.0.1-50、10.0.0.1-10.0.0.50 或 10.0.0.0/24"
+                )
+            total_scanned = len(ip_list)
+            logger.info(f"Valid IP range: {total_scanned} addresses to scan")
+        except ValueError as e:
+            logger.error(f"Invalid IP range format: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
+
+        # Validate credentials
+        if not request.credentials or len(request.credentials) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="至少需要提供一组认证信息"
+            )
+
+        # Convert credentials to dict format
+        credentials = [
+            {
+                'username': cred.username,
+                'password': cred.password,
+                'enable_password': cred.enable_password,
+                'port': cred.port
+            }
+            for cred in request.credentials
+        ]
+
+        # Validate at least one credential has username and password
+        valid_creds = [c for c in credentials if c.get('username') and c.get('password')]
+        if not valid_creds:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="至少需要一组完整的用户名和密码"
+            )
+
+        # Perform discovery
+        discovered = await switch_discovery_service.discover_switches(
+            request.ip_range,
+            valid_creds
+        )
+
+        # Store in cache for later batch add (use session ID in production)
+        session_id = f"discovery_{len(_discovery_cache)}"
+        _discovery_cache[session_id] = discovered
+
+        # Convert to response format (exclude passwords)
+        switches_response = [
+            DiscoveredSwitch(
+                ip_address=sw['ip_address'],
+                name=sw['name'],
+                vendor=sw['vendor'],
+                model=sw['model'],
+                role=sw['role'],
+                priority=sw['priority'],
+                ssh_port=sw['ssh_port'],
+                username=sw['username']
+            )
+            for sw in discovered
+        ]
+
+        logger.info(f"Discovery completed: {len(discovered)} switches found out of {total_scanned} IPs")
+
+        return SwitchDiscoveryResponse(
+            total_scanned=total_scanned,
+            discovered=len(discovered),
+            switches=switches_response
+        )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except ValueError as e:
+        # Handle validation errors from service layer
+        logger.error(f"Validation error during switch discovery: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during switch discovery: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"扫描交换机时发生错误，请检查网络连接和认证信息"
+        )
+
+
+@router.post("/scan-stream")
+async def discover_switches_stream(
+    request: SwitchDiscoveryRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Scan switches with real-time progress updates via SSE
+    Returns a session_id for connecting to the progress stream
+    """
+    try:
+        # Validate IP range
+        try:
+            temp_service = switch_discovery_service
+            ip_list = temp_service._parse_ip_range(request.ip_range)
+            if not ip_list:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="无法解析 IP 范围，请检查输入格式"
+                )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
+
+        # Validate credentials
+        credentials = [
+            {
+                'username': cred.username,
+                'password': cred.password,
+                'enable_password': cred.enable_password,
+                'port': cred.port
+            }
+            for cred in request.credentials
+        ]
+        
+        valid_creds = [c for c in credentials if c.get('username') and c.get('password')]
+        if not valid_creds:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="至少需要一组完整的用户名和密码"
+            )
+
+        # Create session
+        session_id = str(uuid.uuid4())
+        progress_queue = asyncio.Queue()
+        _progress_queues[session_id] = progress_queue
+
+        # Start discovery in background
+        async def run_discovery():
+            try:
+                discovered = await switch_discovery_service.discover_switches(
+                    request.ip_range,
+                    valid_creds,
+                    session_id=session_id,
+                    progress_queue=progress_queue
+                )
+                
+                # Store results
+                _discovery_cache[session_id] = discovered
+                
+                # Send completion event
+                await progress_queue.put({'type': 'done', 'session_id': session_id})
+                
+            except Exception as e:
+                logger.error(f"Error in background discovery: {str(e)}", exc_info=True)
+                await progress_queue.put({'type': 'error', 'message': str(e)})
+
+        # Start discovery task
+        asyncio.create_task(run_discovery())
+        
+        return {"session_id": session_id, "status": "started"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting scan stream: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.get("/progress/{session_id}")
+async def get_scan_progress(session_id: str):
+    """
+    Stream scan progress via Server-Sent Events
+    """
+    if session_id not in _progress_queues:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    
+    progress_queue = _progress_queues[session_id]
+    
+    async def event_generator():
+        try:
+            while True:
+                # Get progress event from queue
+                event = await progress_queue.get()
+                
+                # Send SSE formatted message
+                yield f"data: {json.dumps(event)}\n\n"
+                
+                # Check if scan is complete
+                if event.get('type') in ['done', 'error', 'complete']:
+                    break
+                    
+        except asyncio.CancelledError:
+            logger.info(f"Progress stream cancelled for session {session_id}")
+        finally:
+            # Cleanup
+            if session_id in _progress_queues:
+                del _progress_queues[session_id]
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+@router.get("/result/{session_id}", response_model=SwitchDiscoveryResponse)
+async def get_scan_result(session_id: str):
+    """
+    Get the final scan result after completion
+    """
+    if session_id not in _discovery_cache:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="扫描结果未找到或已过期"
+        )
+    
+    discovered = _discovery_cache[session_id]
+    
+    # Convert to response format
+    switches_response = [
+        DiscoveredSwitch(
+            ip_address=sw['ip_address'],
+            name=sw['name'],
+            vendor=sw['vendor'],
+            model=sw['model'],
+            role=sw['role'],
+            priority=sw['priority'],
+            ssh_port=sw['ssh_port'],
+            username=sw['username']
+        )
+        for sw in discovered
+    ]
+    
+    # Calculate total scanned (from cached data or estimate)
+    total_scanned = len(discovered)  # This is a simplification
+    
+    return SwitchDiscoveryResponse(
+        total_scanned=total_scanned,
+        discovered=len(discovered),
+        switches=switches_response
+    )
+
+
+@router.post("/batch-add", response_model=List[SwitchResponse])
+async def batch_add_switches(
+    discovered_switches: List[SwitchCreate],
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Batch add discovered switches to the database
+    """
+    try:
+        if not discovered_switches or len(discovered_switches) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="没有要添加的交换机"
+            )
+
+        added_switches = []
+        skipped_count = 0
+
+        for switch_data in discovered_switches:
+            # Check if switch already exists
+            from sqlalchemy import select
+            result = await db.execute(
+                select(Switch).where(Switch.ip_address == str(switch_data.ip_address))
+            )
+            existing = result.scalar_one_or_none()
+
+            if existing:
+                logger.warning(f"Switch {switch_data.ip_address} already exists, skipping")
+                skipped_count += 1
+                continue
+
+            # Encrypt credentials
+            password_encrypted = credential_encryption.encrypt(switch_data.password)
+            enable_password_encrypted = None
+            if switch_data.enable_password:
+                enable_password_encrypted = credential_encryption.encrypt(switch_data.enable_password)
+
+            # Create switch
+            switch = Switch(
+                name=switch_data.name,
+                ip_address=str(switch_data.ip_address),
+                vendor=switch_data.vendor,
+                model=switch_data.model,
+                role=switch_data.role,
+                priority=switch_data.priority,
+                ssh_port=switch_data.ssh_port,
+                username=switch_data.username,
+                password_encrypted=password_encrypted,
+                enable_password_encrypted=enable_password_encrypted,
+                enabled=switch_data.enabled,
+                connection_timeout=switch_data.connection_timeout
+            )
+
+            db.add(switch)
+            added_switches.append(switch)
+
+        await db.commit()
+
+        # Refresh all switches to get IDs
+        for switch in added_switches:
+            await db.refresh(switch)
+
+        message = f"成功添加 {len(added_switches)} 个交换机"
+        if skipped_count > 0:
+            message += f"，跳过 {skipped_count} 个已存在的交换机"
+        logger.info(message)
+        
+        return added_switches
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error batch adding switches: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"批量添加交换机失败: {str(e)}"
+        )

@@ -14,6 +14,16 @@ export default defineConfig({
     port: 5173,
     watch: {
       usePolling: true
+    },
+    hmr: {
+      overlay: false  // Disable HMR overlay to prevent URI malformed errors
+    },
+    proxy: {
+      '/api': {
+        target: 'http://iptrack-backend:8100',
+        changeOrigin: true,
+        secure: false
+      }
     }
   }
 })

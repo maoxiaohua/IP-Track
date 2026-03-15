@@ -33,8 +33,20 @@
           <el-tag type="warning">VLAN {{ result.vlan_id }}</el-tag>
         </el-descriptions-item>
 
-        <el-descriptions-item label="Query Time" :span="2">
+        <el-descriptions-item label="Query Mode">
+          <el-tag :type="getQueryModeType(result.query_mode)" size="small">
+            {{ getQueryModeLabel(result.query_mode) }}
+          </el-tag>
+        </el-descriptions-item>
+
+        <el-descriptions-item label="Query Time">
           {{ result.query_time_ms }} ms
+        </el-descriptions-item>
+
+        <el-descriptions-item v-if="result.data_age_seconds !== undefined" label="Data Age" :span="2">
+          <el-text :type="getDataAgeType(result.data_age_seconds)">
+            {{ formatDataAge(result.data_age_seconds) }}
+          </el-text>
         </el-descriptions-item>
       </el-descriptions>
     </el-card>
@@ -55,6 +67,12 @@
           <p>Target IP: <strong>{{ result.target_ip }}</strong></p>
           <p v-if="result.mac_address">MAC Address: <strong>{{ result.mac_address }}</strong></p>
           <p>Query Time: {{ result.query_time_ms }} ms</p>
+          <p v-if="result.query_mode">
+            Query Mode: 
+            <el-tag :type="getQueryModeType(result.query_mode)" size="small">
+              {{ getQueryModeLabel(result.query_mode) }}
+            </el-tag>
+          </p>
         </template>
       </el-result>
     </el-card>
@@ -67,6 +85,39 @@ import type { IPLookupResult } from '@/api/lookup'
 defineProps<{
   result: IPLookupResult
 }>()
+
+const getQueryModeType = (mode?: string) => {
+  if (!mode) return 'info'
+  switch (mode) {
+    case 'cache': return 'success'
+    case 'realtime': return 'warning'
+    case 'auto_fallback': return 'danger'
+    default: return 'info'
+  }
+}
+
+const getQueryModeLabel = (mode?: string) => {
+  if (!mode) return 'Unknown'
+  switch (mode) {
+    case 'cache': return 'Cache (Fast)'
+    case 'realtime': return 'Realtime (Live)'
+    case 'auto_fallback': return 'Auto (Fallback)'
+    default: return mode
+  }
+}
+
+const formatDataAge = (seconds: number) => {
+  if (seconds < 60) return `${seconds} seconds ago`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes ago`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`
+  return `${Math.floor(seconds / 86400)} days ago`
+}
+
+const getDataAgeType = (seconds: number) => {
+  if (seconds < 300) return 'success'  // < 5 minutes
+  if (seconds < 3600) return 'warning' // < 1 hour
+  return 'danger'  // > 1 hour
+}
 </script>
 
 <style scoped>

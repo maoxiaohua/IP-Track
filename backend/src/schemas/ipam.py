@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, IPvAnyAddress
+from pydantic import BaseModel, Field, IPvAnyAddress, field_serializer
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -56,6 +56,17 @@ class IPSubnetResponse(IPSubnetBase):
     class Config:
         from_attributes = True
 
+    def model_dump(self, **kwargs):
+        data = super().model_dump(**kwargs)
+        # Convert IP objects to strings
+        if "network" in data and data["network"] is not None:
+            data["network"] = str(data["network"])
+        if "gateway" in data and data["gateway"] is not None:
+            data["gateway"] = str(data["gateway"])
+        return data
+    
+
+
 
 # IP Address Schemas
 class IPAddressBase(BaseModel):
@@ -107,6 +118,12 @@ class IPAddressDetailResponse(IPAddressResponse):
     """Detailed IP address response with relationships"""
     subnet_name: Optional[str] = None
     switch_name: Optional[str] = None
+
+
+class IPAddressListResponse(BaseModel):
+    """Paginated IP address list response"""
+    items: List[IPAddressDetailResponse]
+    total: int
 
 
 # IP Scan History Schemas
@@ -170,6 +187,13 @@ class IPSubnetStatistics(BaseModel):
     subnet_id: int
     subnet_name: str
     network: str
+    description: Optional[str] = None
+    vlan_id: Optional[int] = None
+    gateway: Optional[str] = None
+    dns_servers: Optional[str] = None
+    enabled: bool = True
+    auto_scan: bool = True
+    scan_interval: int = 3600
     total_ips: int
     available_ips: int
     used_ips: int
@@ -190,3 +214,94 @@ class IPAMDashboard(BaseModel):
     overall_utilization: float
     subnets: List[IPSubnetStatistics]
     recent_changes: List[IPScanHistoryResponse]
+
+
+# Batch Import Schemas
+class IPSubnetBatchItem(BaseModel):
+    """Schema for single subnet in batch import"""
+    name: str = Field(..., min_length=1, max_length=100, description="Subnet name")
+    network: str = Field(..., description="Network in CIDR format, e.g., 10.0.0.0/24")
+    description: Optional[str] = Field(None, description="Subnet description")
+    vlan_id: Optional[int] = Field(None, ge=1, le=4094, description="VLAN ID")
+    gateway: Optional[str] = Field(None, description="Gateway IP address")
+    dns_servers: Optional[str] = Field(None, description="Comma-separated DNS servers")
+    enabled: bool = Field(default=True, description="Enable subnet")
+    auto_scan: bool = Field(default=True, description="Enable auto scan")
+    scan_interval: int = Field(default=3600, ge=300, le=86400, description="Scan interval in seconds")
+
+
+class IPSubnetBatchImportRequest(BaseModel):
+    """Schema for batch import request"""
+    subnets: List[IPSubnetBatchItem] = Field(..., min_items=1, max_items=100, description="List of subnets to import (max 100)")
+    skip_existing: bool = Field(default=True, description="Skip subnets with duplicate network addresses")
+
+
+class IPSubnetBatchImportResult(BaseModel):
+    """Schema for batch import result"""
+    total: int = Field(..., description="Total number of subnets to import")
+    success: int = Field(..., description="Number of successfully imported subnets")
+    failed: int = Field(..., description="Number of failed imports")
+    skipped: int = Field(..., description="Number of skipped subnets (duplicates)")
+    errors: List[dict] = Field(default=[], description="List of errors with details")
+    imported_ids: List[int] = Field(default=[], description="List of successfully imported subnet IDs")
+
+
+# Network Search Schemas
+class NetworkSearchRequest(BaseModel):
+    """Schema for network search request"""
+    network: str = Field(..., description="Network in CIDR format, e.g., 10.101.63.0/24")
+
+
+class NetworkSearchIPResult(BaseModel):
+    """Individual IP result in network search"""
+    ip_address: str
+    status: IPStatus
+    is_reachable: Optional[bool] = None
+    hostname: Optional[str] = None
+    mac_address: Optional[str] = None
+    switch_name: Optional[str] = None
+    switch_port: Optional[str] = None
+    description: Optional[str] = None
+    last_seen_at: Optional[datetime] = None
+
+
+class NetworkSearchResponse(BaseModel):
+    """Schema for network search response"""
+    network: str
+    network_address: str
+    broadcast_address: str
+    netmask: str
+    total_ips: int
+    usable_ips: int
+    first_usable: str
+    last_usable: str
+    ips: List[NetworkSearchIPResult]
+    in_ipam: bool = Field(..., description="Whether this network is managed in IPAM")
+    subnet_id: Optional[int] = None
+    subnet_name: Optional[str] = None
+
+
+# Subnet Calculator Schemas
+class SubnetCalculatorRequest(BaseModel):
+    """Schema for subnet calculator request"""
+    ip_address: str = Field(..., description="IP address (e.g., 10.101.63.25)")
+    netmask: Optional[str] = Field(None, description="Subnet mask (e.g., 255.255.255.0) or CIDR prefix (e.g., 24)")
+
+
+class SubnetCalculatorResponse(BaseModel):
+    """Schema for subnet calculator response"""
+    ip_address: str
+    cidr: str
+    network_address: str
+    broadcast_address: str
+    netmask: str
+    wildcard_mask: str
+    first_usable_ip: str
+    last_usable_ip: str
+    total_hosts: int
+    usable_hosts: int
+    ip_class: str
+    is_private: bool
+    binary_netmask: str
+    binary_ip: str
+    hex_ip: str

@@ -4,7 +4,9 @@ import subprocess
 import socket
 import re
 import time
+import shutil
 from concurrent.futures import ThreadPoolExecutor
+from core.config import settings
 from utils.logger import logger
 
 
@@ -12,7 +14,15 @@ class IPScanService:
     """Service for scanning IP addresses"""
 
     def __init__(self):
-        self.executor = ThreadPoolExecutor(max_workers=20)
+        self.executor = ThreadPoolExecutor(max_workers=settings.IPAM_SCAN_WORKERS)
+        # Find ping command path at initialization
+        # Always use absolute paths to avoid PATH issues
+        import os
+        self.ping_cmd = '/usr/bin/ping' if os.path.exists('/usr/bin/ping') else '/bin/ping'
+        self.arp_cmd = '/usr/sbin/arp' if os.path.exists('/usr/sbin/arp') else '/sbin/arp'
+        self.nmap_cmd = shutil.which('nmap')
+
+        logger.info(f"IP scan service initialized: ping={self.ping_cmd}, arp={self.arp_cmd}, nmap={self.nmap_cmd}")
 
     def _ping_ip(self, ip: str, timeout: int = 2) -> tuple[bool, Optional[int]]:
         """
@@ -20,14 +30,25 @@ class IPScanService:
         Returns: (is_reachable, response_time_ms)
         """
         try:
-            # Use ping command
-            cmd = ['ping', '-c', '1', '-W', str(timeout), ip]
+            # Use ping command with full path
+            cmd = [self.ping_cmd, '-c', '1', '-W', str(timeout), ip]
             start_time = time.time()
+
+            # Create environment without proxy settings for local network commands
+            import os
+            env = {k: v for k, v in os.environ.items()
+                   if not k.lower().endswith('_proxy')}
+
+            # Ensure PATH is set
+            if 'PATH' not in env:
+                env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=timeout + 1
+                timeout=timeout + 1,
+                env=env
             )
             elapsed = int((time.time() - start_time) * 1000)
 
@@ -44,7 +65,7 @@ class IPScanService:
                 return (False, None)
 
         except Exception as e:
-            logger.debug(f"Ping failed for {ip}: {str(e)}")
+            logger.error(f"Ping failed for {ip}: {str(e)} (cmd: {self.ping_cmd})")
             return (False, None)
 
     def _resolve_hostname(self, ip: str) -> Optional[str]:
@@ -62,12 +83,18 @@ class IPScanService:
         Get MAC address using ARP table
         """
         try:
+            # Create environment without proxy settings
+            import os
+            env = {k: v for k, v in os.environ.items()
+                   if not k.lower().endswith('_proxy')}
+
             # Try to read from ARP cache
             result = subprocess.run(
-                ['arp', '-n', ip],
+                [self.arp_cmd, '-n', ip],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=2
+                timeout=2,
+                env=env
             )
 
             if result.returncode == 0:
@@ -92,22 +119,22 @@ class IPScanService:
         """
         try:
             # Check if nmap is available
-            result = subprocess.run(
-                ['which', 'nmap'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-
-            if result.returncode != 0:
+            if not self.nmap_cmd:
                 logger.debug("nmap not available, skipping OS detection")
                 return self._detect_os_simple(ip)
 
+            # Create environment without proxy settings
+            import os
+            env = {k: v for k, v in os.environ.items()
+                   if not k.lower().endswith('_proxy')}
+
             # Run nmap OS detection
             result = subprocess.run(
-                ['nmap', '-O', '--osscan-guess', ip],
+                [self.nmap_cmd, '-O', '--osscan-guess', ip],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=30
+                timeout=30,
+                env=env
             )
 
             if result.returncode == 0:
@@ -125,11 +152,17 @@ class IPScanService:
         Simple OS detection using TTL values
         """
         try:
+            # Create environment without proxy settings
+            import os
+            env = {k: v for k, v in os.environ.items()
+                   if not k.lower().endswith('_proxy')}
+
             result = subprocess.run(
-                ['ping', '-c', '1', ip],
+                [self.ping_cmd, '-c', '1', ip],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=3
+                timeout=3,
+                env=env
             )
 
             if result.returncode == 0:
@@ -261,7 +294,10 @@ class IPScanService:
             'os_type': None,
             'os_name': None,
             'os_version': None,
-            'os_vendor': None
+            'os_vendor': None,
+            'switch_name': None,
+            'switch_port': None,
+            'vlan_id': None
         }
 
         # Step 1: Ping check

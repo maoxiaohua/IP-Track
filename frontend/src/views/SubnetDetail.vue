@@ -140,14 +140,20 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="交换机端口" width="200">
+        <el-table-column label="交换机" width="220">
           <template #default="{ row }">
-            <div v-if="row.switch_name">
-              <div>{{ row.switch_name }}</div>
-              <div style="font-size: 12px; color: #909399">
-                {{ row.switch_port }}
-                <span v-if="row.vlan_id"> (VLAN {{ row.vlan_id }})</span>
-              </div>
+            <span v-if="row.switch_name">{{ row.switch_name }}</span>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="交换机端口" width="180">
+          <template #default="{ row }">
+            <div v-if="row.switch_port">
+              {{ row.switch_port }}
+              <span v-if="row.vlan_id" style="font-size: 12px; color: #909399">
+                (VLAN {{ row.vlan_id }})
+              </span>
             </div>
             <span v-else>-</span>
           </template>
@@ -197,7 +203,7 @@
       <el-pagination
         v-model:current-page="pagination.page"
         v-model:page-size="pagination.pageSize"
-        :page-sizes="[50, 100, 200, 500]"
+        :page-sizes="[20, 50, 100, 200, 500, 1000]"
         :total="pagination.total"
         layout="total, sizes, prev, pager, next, jumper"
         @size-change="loadIPs"
@@ -250,7 +256,7 @@ import { ElMessage } from 'element-plus'
 import {
   Back, Refresh, Check, CircleClose, Connection, Close, Search, View, Edit
 } from '@element-plus/icons-vue'
-import axios from 'axios'
+import apiClient from '@/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -287,7 +293,7 @@ const editForm = reactive({
 
 const loadSubnet = async () => {
   try {
-    const response = await axios.get(`/api/v1/ipam/subnets/${subnetId}`)
+    const response = await apiClient.get(`/api/v1/ipam/subnets/${subnetId}`)
     subnet.value = response.data
   } catch (error) {
     ElMessage.error('加载子网信息失败')
@@ -296,7 +302,7 @@ const loadSubnet = async () => {
 
 const loadStatistics = async () => {
   try {
-    const response = await axios.get(`/api/v1/ipam/subnets/${subnetId}/statistics`)
+    const response = await apiClient.get(`/api/v1/ipam/subnets/${subnetId}/statistics`)
     statistics.value = response.data
   } catch (error) {
     ElMessage.error('加载统计信息失败')
@@ -316,11 +322,11 @@ const loadIPs = async () => {
     if (filters.is_reachable !== '') params.is_reachable = filters.is_reachable
     if (filters.search) params.search = filters.search
 
-    const response = await axios.get('/api/v1/ipam/ip-addresses', { params })
-    ipAddresses.value = response.data
+    const response = await apiClient.get('/api/v1/ipam/ip-addresses', { params })
 
-    // Note: In a real implementation, you'd get total count from API
-    pagination.total = response.data.length
+    // Response now includes items and total
+    ipAddresses.value = response.data.items || []
+    pagination.total = response.data.total || 0
   } catch (error) {
     ElMessage.error('加载 IP 地址失败')
   } finally {
@@ -331,7 +337,7 @@ const loadIPs = async () => {
 const scanSubnet = async () => {
   scanning.value = true
   try {
-    const response = await axios.post('/api/v1/ipam/scan', {
+    const response = await apiClient.post('/api/v1/ipam/scan', {
       subnet_id: subnetId,
       scan_type: 'full'
     })
@@ -351,7 +357,8 @@ const scanSubnet = async () => {
 }
 
 const viewIPDetail = (ip: any) => {
-  router.push(`/ipam/ip/${ip.id}`)
+  // Temporarily use edit dialog for viewing details
+  editIP(ip)
 }
 
 const editIP = (ip: any) => {
@@ -368,7 +375,7 @@ const editIP = (ip: any) => {
 
 const handleEditIP = async () => {
   try {
-    await axios.put(`/api/v1/ipam/ip-addresses/${editForm.id}`, {
+    await apiClient.put(`/api/v1/ipam/ip-addresses/${editForm.id}`, {
       status: editForm.status,
       hostname: editForm.hostname,
       mac_address: editForm.mac_address,

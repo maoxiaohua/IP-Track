@@ -2,6 +2,7 @@ import apiClient from './index'
 
 export interface IPLookupRequest {
   ip_address: string
+  mode?: 'auto' | 'cache' | 'realtime'  // Query mode
 }
 
 export interface IPLookupResult {
@@ -14,6 +15,9 @@ export interface IPLookupResult {
   port_name?: string
   vlan_id?: number
   query_time_ms: number
+  query_mode?: string  // 'cache', 'realtime', 'auto_fallback'
+  data_age_seconds?: number  // How old is the cached data
+  last_seen?: string  // When was the data last collected
   message?: string
 }
 
@@ -45,9 +49,10 @@ export interface QueryHistoryListResponse {
 
 export const lookupApi = {
   // Lookup an IP address
-  lookupIP: async (ipAddress: string): Promise<IPLookupResponse> => {
+  lookupIP: async (ipAddress: string, mode: 'auto' | 'cache' | 'realtime' = 'cache'): Promise<IPLookupResponse> => {
     const response = await apiClient.post('/api/v1/lookup/ip', {
-      ip_address: ipAddress
+      ip_address: ipAddress,
+      mode: mode
     })
     return response.data
   },

@@ -48,7 +48,7 @@ class IPAddress(Base):
     id = Column(Integer, primary_key=True, index=True)
     subnet_id = Column(Integer, ForeignKey("ip_subnets.id", ondelete="CASCADE"), nullable=False, index=True)
     ip_address = Column(INET, nullable=False, unique=True, index=True)
-    status = Column(SQLEnum(IPStatus), default=IPStatus.AVAILABLE, nullable=False, index=True)
+    status = Column(SQLEnum(IPStatus, values_callable=lambda x: [e.value for e in x]), default=IPStatus.AVAILABLE, nullable=False, index=True)
 
     # 基本信息
     hostname = Column(String(255), nullable=True)

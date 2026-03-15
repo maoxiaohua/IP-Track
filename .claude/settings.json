@@ -1,0 +1,8 @@
+{
+  "apiKeyHelper": "echo 'sk-ant-apiRbQEcaHSYHr0qQvQ7ovbMcuRzetdnuC4AqchV7uo'",
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-apiRbQEcaHSYHr0qQvQ7ovbMcuRzetdnuC4AqchV7uo",
+    "ANTHROPIC_BASE_URL": "https://user-api-01.aiweber.com",
+    "HTTPS_PROXY": "http://87.254.212.121:8080"
+  }
+}

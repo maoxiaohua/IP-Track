@@ -158,10 +158,7 @@ body {
 .el-statistic__content {
   font-size: 32px;
   font-weight: 700;
-  background: linear-gradient(135deg, #3B82F6 0%, #60A5FA 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: #303133 !important;
 }
 
 /* Progress Bar */

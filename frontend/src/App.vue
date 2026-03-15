@@ -25,6 +25,18 @@
               <el-icon><Compass /></el-icon>
               <span>Batch Discovery</span>
             </el-menu-item>
+            <el-menu-item index="/command-templates">
+              <el-icon><Document /></el-icon>
+              <span>Templates</span>
+            </el-menu-item>
+            <el-menu-item index="/alarms">
+              <el-icon><Bell /></el-icon>
+              <span>Alarms</span>
+            </el-menu-item>
+            <el-menu-item index="/optical-modules">
+              <el-icon><Connection /></el-icon>
+              <span>Optical Modules</span>
+            </el-menu-item>
             <el-menu-item index="/history">
               <el-icon><Clock /></el-icon>
               <span>History</span>

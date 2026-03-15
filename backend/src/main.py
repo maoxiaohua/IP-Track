@@ -1,10 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
-from api.v1 import switches, lookup, history, discovery, ipam
+from api.v1 import switches, lookup, history, discovery, ipam, command_templates, alarms, collection
+from api.routes import snmp_config, network
 from services.status_checker import switch_status_checker
+from services.network_scheduler import network_scheduler
+from services.collection_worker import worker_pool
 from utils.logger import logger
 import os
+import logging
+
+# Configure SQLAlchemy logging to WARNING level BEFORE any database imports
+# This reduces log verbosity significantly
+for sqlalchemy_logger in ['sqlalchemy.engine', 'sqlalchemy.pool', 'sqlalchemy.dialects', 'sqlalchemy.orm']:
+    sql_logger = logging.getLogger(sqlalchemy_logger)
+    sql_logger.setLevel(logging.WARNING)
+    sql_logger.propagate = False  # Don't propagate to root logger
 
 # Create logs directory if it doesn't exist
 os.makedirs("logs", exist_ok=True)
@@ -34,6 +45,11 @@ app.include_router(lookup.router, prefix=settings.API_V1_PREFIX)
 app.include_router(history.router, prefix=settings.API_V1_PREFIX)
 app.include_router(discovery.router, prefix=settings.API_V1_PREFIX)
 app.include_router(ipam.router, prefix=settings.API_V1_PREFIX)
+app.include_router(command_templates.router, prefix=settings.API_V1_PREFIX)
+app.include_router(alarms.router, prefix=settings.API_V1_PREFIX)
+app.include_router(collection.router, prefix=settings.API_V1_PREFIX)
+app.include_router(snmp_config.router, prefix=settings.API_V1_PREFIX)
+app.include_router(network.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.on_event("startup")
@@ -46,6 +62,16 @@ async def startup_event():
     switch_status_checker.start()
     logger.info("Background switch status checker started")
 
+    # Start network data scheduler (120 minutes = 2 hours)
+    # Changed from 10 minutes to prevent task overlapping
+    # 339 switches take ~1+ hours to collect, so use 2-hour interval
+    network_scheduler.start(interval_minutes=120)
+    logger.info("Network data scheduler started")
+
+    # Start collection worker pool
+    await worker_pool.start()
+    logger.info("Collection worker pool started")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -55,6 +81,14 @@ async def shutdown_event():
     # Stop background switch status checker
     switch_status_checker.stop()
     logger.info("Background switch status checker stopped")
+
+    # Stop network data scheduler
+    network_scheduler.stop()
+    logger.info("Network data scheduler stopped")
+
+    # Stop worker pool gracefully
+    await worker_pool.stop()
+    logger.info("Collection worker pool stopped")
 
 
 @app.get("/")

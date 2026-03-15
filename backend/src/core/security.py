@@ -29,3 +29,14 @@ class CredentialEncryption:
 
 # Singleton instance
 credential_encryption = CredentialEncryption()
+
+
+# Convenience functions for backward compatibility
+def encrypt_password(plaintext: str) -> str:
+    """Encrypt a password string"""
+    return credential_encryption.encrypt(plaintext)
+
+
+def decrypt_password(encrypted_text: str) -> str:
+    """Decrypt a password string"""
+    return credential_encryption.decrypt(encrypted_text)

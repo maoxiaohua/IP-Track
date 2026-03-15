@@ -7,13 +7,13 @@ export const useLookupStore = defineStore('lookup', () => {
   const currentResult = ref<IPLookupResult | null>(null)
   const error = ref<string | null>(null)
 
-  const lookupIP = async (ipAddress: string) => {
+  const lookupIP = async (ipAddress: string, mode: 'auto' | 'cache' | 'realtime' = 'cache') => {
     loading.value = true
     error.value = null
     currentResult.value = null
 
     try {
-      const response = await lookupApi.lookupIP(ipAddress)
+      const response = await lookupApi.lookupIP(ipAddress, mode)
 
       if (response.success && response.result) {
         currentResult.value = response.result

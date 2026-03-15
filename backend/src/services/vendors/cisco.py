@@ -12,11 +12,17 @@ class CiscoHandler(VendorHandler):
 
     def get_arp_command(self, ip_address: str) -> str:
         """Get command to query ARP table for specific IP"""
-        return f"show ip arp | include {ip_address}"
+        # Use 'show ip arp' as primary, but will fallback to 'show arp'
+        return f"show ip arp {ip_address}"
+
+    def get_arp_command_fallback(self, ip_address: str) -> str:
+        """Fallback command for switches that use 'show arp' instead of 'show ip arp'"""
+        return f"show arp {ip_address}"
 
     def get_mac_table_command(self, mac_address: str) -> str:
         """Get command to query MAC address table"""
         formatted_mac = self.format_mac_for_query(mac_address)
+        # Cisco format: show mac address-table address <mac>
         return f"show mac address-table address {formatted_mac}"
 
     def get_mac_table_all_command(self) -> str:

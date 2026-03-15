@@ -19,7 +19,7 @@
 cd /opt/ip-track
 
 # 添加远程仓库
-git remote add origin https://github.com/YOUR_USERNAME/IP-TRACK.git
+git remote add origin https://github.com/maoxiaohua/IP-TRACK.git
 
 # 推送代码
 git push -u origin main

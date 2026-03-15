@@ -3,26 +3,49 @@ import { ElMessage } from 'element-plus'
 
 // Dynamically determine API base URL
 const getApiBaseUrl = () => {
-  // If environment variable is set and not localhost, use it
+  // In development with Vite proxy, use empty string for relative paths
+  // Vite will proxy /api/* requests to the backend
+  if (import.meta.env.DEV) {
+    console.log('Using Vite proxy for API requests')
+    return ''
+  }
+
+  // Priority 1: Use environment variable if set (for production)
   const envUrl = import.meta.env.VITE_API_BASE_URL
-  if (envUrl && !envUrl.includes('localhost')) {
+  if (envUrl) {
+    console.log('Using env API URL:', envUrl)
     return envUrl
   }
 
-  // Otherwise, use current hostname with backend port
+  // Priority 2: Use current hostname with backend port
   const protocol = window.location.protocol
   const hostname = window.location.hostname
+
+  // If accessing via localhost/127.0.0.1, check if we should use server IP instead
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    // Try to use the same host but warn that it might not work
+    console.warn('Accessing via localhost - API calls may fail if backend is not on localhost')
+  }
+
   const port = '8100'  // Backend port
-  return `${protocol}//${hostname}:${port}`
+  const url = `${protocol}//${hostname}:${port}`
+  console.log('Computed API URL:', url)
+  return url
 }
 
 const apiClient = axios.create({
   baseURL: getApiBaseUrl(),
-  timeout: 30000,
+  timeout: 320000,  // 320s timeout for Alcatel optical module collection (52 ports query)
   headers: {
     'Content-Type': 'application/json'
   }
 })
+
+// Export API base URL for SSE connections
+export const API_BASE_URL = getApiBaseUrl()
+
+// Log the API base URL for debugging
+console.log('API Base URL initialized:', API_BASE_URL)
 
 // Request interceptor
 apiClient.interceptors.request.use(

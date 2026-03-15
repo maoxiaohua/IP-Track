@@ -12,16 +12,21 @@ class AlcatelHandler(VendorHandler):
 
     def get_arp_command(self, ip_address: str) -> str:
         """Get command to query ARP table for specific IP"""
-        return f"show ip arp | match {ip_address}"
+        return f"show arp"
+
+    def get_arp_command_fallback(self, ip_address: str) -> str:
+        """Fallback command - Alcatel uses 'show arp' primarily"""
+        return None
 
     def get_mac_table_command(self, mac_address: str) -> str:
         """Get command to query MAC address table"""
         formatted_mac = self.format_mac_for_query(mac_address)
-        return f"show mac-address-table address {formatted_mac}"
+        # Alcatel uses show mac-address or show mac-learning
+        return f"show mac-address {formatted_mac}"
 
     def get_mac_table_all_command(self) -> str:
         """Get command to retrieve entire MAC address table"""
-        return "show mac-address-table"
+        return "show mac-address"
 
     def normalize_mac(self, mac_address: str) -> str:
         """
@@ -48,31 +53,43 @@ class AlcatelHandler(VendorHandler):
         """
         Parse Alcatel ARP table output
         Example output:
-        192.168.1.100   00:50:56:c0:00:01   1       Dynamic   Vlan1
+        IP Address       Physical Address  Type       Age (sec) VLAN  Port
+        ---------------------------------------------------------------------------
+        192.168.1.100    00:50:56:c0:00:01 dynamic    3600      1     1/1/1
         """
         lines = output.strip().split('\n')
 
         for line in lines:
             if target_ip in line:
-                # Alcatel ARP format varies, but MAC is typically recognizable by colons
+                # Alcatel ARP format: IP_Address Physical_Address Type Age VLAN Port
                 parts = line.split()
-                for part in parts:
-                    # Look for MAC address pattern (contains colons and is right length)
-                    if ':' in part and len(part.replace(':', '')) == 12:
-                        try:
-                            return self.normalize_mac(part)
-                        except ValueError:
-                            continue
+                if len(parts) >= 2:
+                    # Try different positions for MAC address
+                    for part in parts:
+                        # Look for MAC address pattern (contains colons or dots)
+                        if (':' in part or '.' in part) and part != target_ip:
+                            # Check if it looks like a MAC (12 hex chars)
+                            mac_clean = part.replace(':', '').replace('.', '').replace('-', '')
+                            if len(mac_clean) == 12 and all(c in '0123456789abcdefABCDEF' for c in mac_clean):
+                                try:
+                                    return self.normalize_mac(part)
+                                except ValueError:
+                                    continue
 
         return None
 
     def parse_mac_table_output(self, output: str, mac_address: str) -> List[Dict[str, any]]:
         """
         Parse Alcatel MAC address table output
-        Example output:
-        Vlan  Mac Address         Type      Port
-        ----  -----------------   -------   ----
-        1     00:50:56:c0:00:01   Learned   1/1/1
+        Example output from 'show mac-address':
+        MAC Address         VLAN    Port           Type
+        ---------------------------------------------------
+        00:50:56:c0:00:01   1       1/1/1          learned
+
+        Or from 'show mac-learning':
+        vlan   mac                 port      age
+        -----------------------------------------------
+        1      00:50:56:c0:00:01   1/1/1     0
         """
         results = []
         lines = output.strip().split('\n')
@@ -80,8 +97,8 @@ class AlcatelHandler(VendorHandler):
         # Skip header lines
         data_started = False
         for line in lines:
-            # Skip until we find the data section
-            if '----' in line or 'Vlan' in line and 'Mac Address' in line:
+            # Skip header separator lines
+            if '---' in line or 'MAC' in line and ('Address' in line or 'VLAN' in line):
                 data_started = True
                 continue
 
@@ -90,18 +107,32 @@ class AlcatelHandler(VendorHandler):
 
             # Parse data line
             parts = line.split()
-            if len(parts) >= 4:
-                vlan = parts[0]
-                mac = parts[1]
-                port = parts[3]
+            if len(parts) >= 3:
+                # Try different column orders (Alcatel has variations)
+                # Format 1: MAC VLAN Port Type
+                # Format 2: VLAN MAC Port Age
 
-                # Validate VLAN is numeric
-                try:
-                    vlan_id = int(vlan)
-                except ValueError:
+                mac = None
+                vlan = None
+                port = None
+
+                for i, part in enumerate(parts):
+                    # Identify MAC address (contains : or . and is 12 hex chars)
+                    if ':' in part or '.' in part:
+                        mac_clean = part.replace(':', '').replace('.', '').replace('-', '')
+                        if len(mac_clean) == 12 and all(c in '0123456789abcdefABCDEF' for c in mac_clean):
+                            mac = part
+                    # Identify VLAN (should be numeric and reasonable)
+                    elif part.isdigit() and int(part) < 4096 and vlan is None:
+                        vlan = int(part)
+                    # Identify port (contains /)
+                    elif '/' in part and port is None:
+                        port = part
+
+                if not mac or not port:
                     continue
 
-                # Normalize MAC and check if it matches
+                # Validate and normalize MAC
                 try:
                     normalized_mac = self.normalize_mac(mac)
                     target_normalized = self.normalize_mac(mac_address)
@@ -109,7 +140,7 @@ class AlcatelHandler(VendorHandler):
                     if normalized_mac == target_normalized:
                         results.append({
                             'port': port,
-                            'vlan': vlan_id,
+                            'vlan': vlan if vlan else 1,  # Default to VLAN 1
                             'mac': normalized_mac
                         })
                 except ValueError:

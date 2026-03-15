@@ -1,0 +1,441 @@
+"""
+SNMP Configuration API Routes
+
+Provides endpoints to:
+1. Configure SNMP credentials for switches
+2. Test SNMP connectivity
+3. Batch configure SNMP for multiple switches
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Body
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from typing import Optional, List
+from pydantic import BaseModel, Field, validator
+from pysnmp.hlapi import (SnmpEngine, UsmUserData, UdpTransportTarget, ContextData, ObjectType, ObjectIdentity, getCmd, nextCmd, usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol, usmHMAC128SHA224AuthProtocol, usmDESPrivProtocol, usmAesCfb128Protocol, usmAesCfb192Protocol, usmAesCfb256Protocol, CommunityData)
+
+from core.database import get_db
+from core.security import encrypt_password, decrypt_password
+from models.switch import Switch
+from services.snmp_service import snmp_service
+from utils.logger import logger
+
+router = APIRouter(prefix="/snmp", tags=["snmp"])
+
+
+# ==================== Pydantic Models ====================
+
+class SNMPConfigRequest(BaseModel):
+    """SNMP configuration request model"""
+    snmp_enabled: bool = True
+    snmp_version: str = Field(default="3", pattern="^(2c|3)$")
+
+    # SNMPv3 fields
+    snmp_username: Optional[str] = None
+    snmp_auth_protocol: Optional[str] = Field(default="SHA", pattern="^(MD5|SHA|SHA256|SHA384|SHA512)$")
+    snmp_auth_password: Optional[str] = None
+    snmp_priv_protocol: Optional[str] = Field(default="AES128", pattern="^(DES|AES|AES128|AES192|AES256)$")
+    snmp_priv_password: Optional[str] = None
+    snmp_port: int = Field(default=161, ge=1, le=65535)
+
+    # SNMPv2c fields
+    snmp_community: Optional[str] = None  # For v2c
+
+    @validator('snmp_username')
+    def validate_username(cls, v, values):
+        if values.get('snmp_version') == '3' and values.get('snmp_enabled') and not v:
+            raise ValueError('snmp_username is required for SNMPv3')
+        return v
+
+    @validator('snmp_auth_password')
+    def validate_auth_password(cls, v, values):
+        if values.get('snmp_version') == '3' and values.get('snmp_enabled'):
+            if not v or len(v) < 8:
+                raise ValueError('snmp_auth_password must be at least 8 characters for SNMPv3')
+        return v
+
+    @validator('snmp_priv_password')
+    def validate_priv_password(cls, v, values):
+        if values.get('snmp_version') == '3' and values.get('snmp_enabled'):
+            if not v or len(v) < 8:
+                raise ValueError('snmp_priv_password must be at least 8 characters for SNMPv3')
+        return v
+
+    @validator('snmp_community')
+    def validate_community(cls, v, values):
+        if values.get('snmp_version') == '2c' and values.get('snmp_enabled') and not v:
+            raise ValueError('snmp_community is required for SNMPv2c')
+        return v
+
+
+class SNMPTestRequest(BaseModel):
+    """SNMP connection test request"""
+    target_ip: str
+    snmp_version: str = Field(default="3", pattern="^(2c|3)$")
+    snmp_username: Optional[str] = None
+    snmp_auth_protocol: Optional[str] = "SHA"
+    snmp_auth_password: Optional[str] = None
+    snmp_priv_protocol: Optional[str] = "AES128"
+    snmp_priv_password: Optional[str] = None
+    snmp_port: int = 161
+    snmp_community: Optional[str] = None
+
+
+class SNMPBatchConfigRequest(BaseModel):
+    """Batch SNMP configuration for multiple switches"""
+    switch_ids: List[int]
+    snmp_config: SNMPConfigRequest
+
+
+class SNMPConfigResponse(BaseModel):
+    """SNMP configuration response"""
+    switch_id: int
+    switch_name: str
+    switch_ip: str
+    snmp_enabled: bool
+    snmp_version: str
+    snmp_username: Optional[str]
+    snmp_auth_protocol: Optional[str]
+    snmp_priv_protocol: Optional[str]
+    snmp_port: int
+    has_credentials: bool  # Whether credentials are configured
+
+
+# ==================== API Endpoints ====================
+
+@router.get("/config/{switch_id}", response_model=SNMPConfigResponse)
+async def get_snmp_config(
+    switch_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get SNMP configuration for a switch
+
+    Note: Passwords are not returned for security reasons
+    """
+    result = await db.execute(
+        select(Switch).where(Switch.id == switch_id)
+    )
+    switch = result.scalar_one_or_none()
+
+    if not switch:
+        raise HTTPException(status_code=404, detail=f"Switch {switch_id} not found")
+
+    return SNMPConfigResponse(
+        switch_id=switch.id,
+        switch_name=switch.name,
+        switch_ip=str(switch.ip_address),
+        snmp_enabled=switch.snmp_enabled or False,
+        snmp_version=switch.snmp_version or "3",
+        snmp_username=switch.snmp_username,
+        snmp_auth_protocol=switch.snmp_auth_protocol,
+        snmp_priv_protocol=switch.snmp_priv_protocol,
+        snmp_port=switch.snmp_port or 161,
+        has_credentials=bool(switch.snmp_auth_password_encrypted and switch.snmp_priv_password_encrypted)
+    )
+
+
+@router.put("/config/{switch_id}")
+async def update_snmp_config(
+    switch_id: int,
+    config: SNMPConfigRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Update SNMP configuration for a switch
+
+    This endpoint encrypts and stores SNMP credentials securely.
+    """
+    # Get switch
+    result = await db.execute(
+        select(Switch).where(Switch.id == switch_id)
+    )
+    switch = result.scalar_one_or_none()
+
+    if not switch:
+        raise HTTPException(status_code=404, detail=f"Switch {switch_id} not found")
+
+    # Update SNMP configuration
+    switch.snmp_enabled = config.snmp_enabled
+    switch.snmp_version = config.snmp_version
+    switch.snmp_port = config.snmp_port
+
+    if config.snmp_version == "3":
+        # SNMPv3 configuration
+        switch.snmp_username = config.snmp_username
+        switch.snmp_auth_protocol = config.snmp_auth_protocol
+        switch.snmp_priv_protocol = config.snmp_priv_protocol
+
+        # Encrypt passwords
+        if config.snmp_auth_password:
+            switch.snmp_auth_password_encrypted = encrypt_password(config.snmp_auth_password)
+        if config.snmp_priv_password:
+            switch.snmp_priv_password_encrypted = encrypt_password(config.snmp_priv_password)
+
+    elif config.snmp_version == "2c":
+        # SNMPv2c configuration
+        if config.snmp_community:
+            # Store community string in auth_password field (encrypted)
+            switch.snmp_auth_password_encrypted = encrypt_password(config.snmp_community)
+
+    await db.commit()
+    await db.refresh(switch)
+
+    logger.info(f"Updated SNMP config for switch {switch.name} ({switch.ip_address})")
+
+    return {
+        "success": True,
+        "message": f"SNMP configuration updated for switch {switch.name}",
+        "switch_id": switch.id
+    }
+
+
+@router.post("/config/batch")
+async def batch_update_snmp_config(
+    batch_config: SNMPBatchConfigRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Batch update SNMP configuration for multiple switches
+
+    Useful when you have the same SNMP credentials for multiple switches.
+    """
+    if not batch_config.switch_ids:
+        raise HTTPException(status_code=400, detail="No switch IDs provided")
+
+    # Get all switches
+    result = await db.execute(
+        select(Switch).where(Switch.id.in_(batch_config.switch_ids))
+    )
+    switches = result.scalars().all()
+
+    if not switches:
+        raise HTTPException(status_code=404, detail="No switches found with provided IDs")
+
+    updated_count = 0
+    config = batch_config.snmp_config
+
+    for switch in switches:
+        # Update SNMP configuration
+        switch.snmp_enabled = config.snmp_enabled
+        switch.snmp_version = config.snmp_version
+        switch.snmp_port = config.snmp_port
+
+        if config.snmp_version == "3":
+            switch.snmp_username = config.snmp_username
+            switch.snmp_auth_protocol = config.snmp_auth_protocol
+            switch.snmp_priv_protocol = config.snmp_priv_protocol
+
+            if config.snmp_auth_password:
+                switch.snmp_auth_password_encrypted = encrypt_password(config.snmp_auth_password)
+            if config.snmp_priv_password:
+                switch.snmp_priv_password_encrypted = encrypt_password(config.snmp_priv_password)
+
+        elif config.snmp_version == "2c":
+            if config.snmp_community:
+                switch.snmp_auth_password_encrypted = encrypt_password(config.snmp_community)
+
+        updated_count += 1
+
+    await db.commit()
+
+    logger.info(f"Batch updated SNMP config for {updated_count} switches")
+
+    return {
+        "success": True,
+        "message": f"SNMP configuration updated for {updated_count} switches",
+        "updated_count": updated_count,
+        "switch_ids": [s.id for s in switches]
+    }
+
+
+@router.post("/test")
+async def test_snmp_connection(
+    test_config: SNMPTestRequest
+):
+    """
+    Test SNMP connectivity to a switch
+
+    This endpoint attempts to connect to the switch and retrieve basic system information.
+    Returns success/failure and any error messages.
+    """
+    try:
+        if test_config.snmp_version == "3":
+            # Test SNMPv3
+            if not test_config.snmp_username or not test_config.snmp_auth_password or not test_config.snmp_priv_password:
+                raise HTTPException(
+                    status_code=400,
+                    detail="SNMPv3 requires username, auth_password, and priv_password"
+                )
+
+            # Create auth data
+            auth_map = {
+                'MD5': usmHMACMD5AuthProtocol,
+                'SHA': usmHMACSHAAuthProtocol,
+                'SHA256': usmHMAC128SHA224AuthProtocol,
+            }
+            priv_map = {
+                'DES': usmDESPrivProtocol,
+                'AES': usmAesCfb128Protocol,
+                'AES128': usmAesCfb128Protocol,
+                'AES192': usmAesCfb192Protocol,
+                'AES256': usmAesCfb256Protocol,
+            }
+
+            auth_proto = auth_map.get(test_config.snmp_auth_protocol, usmHMACSHAAuthProtocol)
+            priv_proto = priv_map.get(test_config.snmp_priv_protocol, usmAesCfb128Protocol)
+
+            auth_data = UsmUserData(
+                test_config.snmp_username,
+                authKey=test_config.snmp_auth_password,
+                privKey=test_config.snmp_priv_password,
+                authProtocol=auth_proto,
+                privProtocol=priv_proto
+            )
+
+            # Try to get system description
+            errorIndication, errorStatus, errorIndex, varBinds = next(
+                getCmd(
+                    SnmpEngine(),
+                    auth_data,
+                    UdpTransportTarget((test_config.target_ip, test_config.snmp_port), timeout=5, retries=1),
+                    ContextData(),
+                    ObjectType(ObjectIdentity('1.3.6.1.2.1.1.1.0'))  # sysDescr
+                )
+            )
+
+            if errorIndication:
+                return {
+                    "success": False,
+                    "message": f"SNMP connection failed: {errorIndication}",
+                    "error_type": "connection_error"
+                }
+            elif errorStatus:
+                return {
+                    "success": False,
+                    "message": f"SNMP error: {errorStatus.prettyPrint()}",
+                    "error_type": "snmp_error"
+                }
+            else:
+                sys_descr = str(varBinds[0][1])
+                return {
+                    "success": True,
+                    "message": "SNMP connection successful",
+                    "system_description": sys_descr[:200],  # Limit length
+                    "target_ip": test_config.target_ip,
+                    "snmp_version": test_config.snmp_version
+                }
+
+        elif test_config.snmp_version == "2c":
+            # Test SNMPv2c
+            if not test_config.snmp_community:
+                raise HTTPException(
+                    status_code=400,
+                    detail="SNMPv2c requires community string"
+                )
+
+            errorIndication, errorStatus, errorIndex, varBinds = next(
+                getCmd(
+                    SnmpEngine(),
+                    CommunityData(test_config.snmp_community),
+                    UdpTransportTarget((test_config.target_ip, test_config.snmp_port), timeout=5, retries=1),
+                    ContextData(),
+                    ObjectType(ObjectIdentity('1.3.6.1.2.1.1.1.0'))
+                )
+            )
+
+            if errorIndication:
+                return {
+                    "success": False,
+                    "message": f"SNMP connection failed: {errorIndication}",
+                    "error_type": "connection_error"
+                }
+            elif errorStatus:
+                return {
+                    "success": False,
+                    "message": f"SNMP error: {errorStatus.prettyPrint()}",
+                    "error_type": "snmp_error"
+                }
+            else:
+                sys_descr = str(varBinds[0][1])
+                return {
+                    "success": True,
+                    "message": "SNMP connection successful",
+                    "system_description": sys_descr[:200],
+                    "target_ip": test_config.target_ip,
+                    "snmp_version": test_config.snmp_version
+                }
+
+    except Exception as e:
+        logger.error(f"SNMP test failed for {test_config.target_ip}: {str(e)}")
+        return {
+            "success": False,
+            "message": f"SNMP test failed: {str(e)}",
+            "error_type": "exception"
+        }
+
+
+@router.get("/switches/configured")
+async def list_snmp_configured_switches(
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    List all switches with SNMP configuration status
+    """
+    result = await db.execute(
+        select(Switch).order_by(Switch.priority.asc(), Switch.name.asc())
+    )
+    switches = result.scalars().all()
+
+    return {
+        "total": len(switches),
+        "switches": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "ip_address": str(s.ip_address),
+                "vendor": s.vendor,
+                "role": s.role,
+                "snmp_enabled": s.snmp_enabled or False,
+                "snmp_version": s.snmp_version or "3",
+                "snmp_username": s.snmp_username,
+                "has_credentials": bool(s.snmp_auth_password_encrypted and s.snmp_priv_password_encrypted),
+                "enabled": s.enabled
+            }
+            for s in switches
+        ]
+    }
+
+
+@router.delete("/config/{switch_id}")
+async def delete_snmp_config(
+    switch_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Remove SNMP configuration from a switch
+    """
+    result = await db.execute(
+        select(Switch).where(Switch.id == switch_id)
+    )
+    switch = result.scalar_one_or_none()
+
+    if not switch:
+        raise HTTPException(status_code=404, detail=f"Switch {switch_id} not found")
+
+    # Clear SNMP configuration
+    switch.snmp_enabled = False
+    switch.snmp_username = None
+    switch.snmp_auth_protocol = None
+    switch.snmp_auth_password_encrypted = None
+    switch.snmp_priv_protocol = None
+    switch.snmp_priv_password_encrypted = None
+
+    await db.commit()
+
+    logger.info(f"Removed SNMP config from switch {switch.name}")
+
+    return {
+        "success": True,
+        "message": f"SNMP configuration removed from switch {switch.name}"
+    }

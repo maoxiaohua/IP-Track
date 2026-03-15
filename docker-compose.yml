@@ -6,16 +6,16 @@ services:
     image: postgres:16-alpine
     container_name: iptrack-postgres
     environment:
-      POSTGRES_DB: iptrack
-      POSTGRES_USER: iptrack
-      POSTGRES_PASSWORD: iptrack123
+      POSTGRES_DB: ${DATABASE_NAME:-iptrack}
+      POSTGRES_USER: ${DATABASE_USER}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/init:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U iptrack"]
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,8 +26,16 @@ services:
   redis:
     image: redis:7-alpine
     container_name: iptrack-redis
+    command: >
+      sh -c '
+      if [ -n "$REDIS_PASSWORD" ]; then
+        redis-server --requirepass "$REDIS_PASSWORD"
+      else
+        redis-server
+      fi
+      '
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -43,15 +51,16 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        PIP_PROXY: ${PIP_PROXY:-}  # Optional proxy for pip
     container_name: iptrack-backend
     ports:
-      - "8101:8100"
+      - "${BACKEND_PORT:-8101}:8100"
     env_file:
-      - ./backend/.env
+      - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://iptrack:iptrack123@postgres:5432/iptrack
-      REDIS_URL: redis://redis:6379/0
-      DEBUG: "true"
+      DATABASE_HOST: postgres
+      REDIS_HOST: redis
     volumes:
       - ./backend/src:/app/src
       - ./backend/logs:/app/logs
@@ -71,12 +80,13 @@ services:
       dockerfile: Dockerfile.dev
     container_name: iptrack-frontend
     ports:
-      - "8001:5173"
+      - "${FRONTEND_PORT:-8001}:5173"
     environment:
-      VITE_API_BASE_URL: http://localhost:8101
+      VITE_API_BASE_URL: ""
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
+      - ./frontend/vite.config.ts:/app/vite.config.ts
       - /app/node_modules
     depends_on:
       - backend

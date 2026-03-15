@@ -17,8 +17,8 @@ else
     
     echo ""
     echo "正在添加远程仓库..."
-    git remote add origin "https://github.com/${GITHUB_USERNAME}/IP-TRACK.git"
-    echo "✅ 远程仓库已添加: https://github.com/${GITHUB_USERNAME}/IP-TRACK.git"
+    git remote add origin "https://github.com/maoxiaohua/IP-TRACK.git"
+    echo "✅ 远程仓库已添加: https://github.com/maoxiaohua/IP-TRACK.git"
 fi
 
 echo ""

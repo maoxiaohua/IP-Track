@@ -28,6 +28,19 @@ ENV/
 # Environment variables
 .env
 .env.local
+.env.*.local
+
+# Backup files (prevent accidental commits)
+*.bak
+*.bak2
+*.backup
+*.old
+*.env.backup*
+docker-compose.yml.backup
+
+# Database dumps
+*.sql.gz
+*.dump
 
 # IDE
 .vscode/
@@ -68,3 +81,7 @@ htmlcov/
 
 # Docker
 *.pid
+
+# Test data
+test_switches.json
+test_data/

@@ -49,6 +49,10 @@ class SwitchManager:
 
         device_type = device_type_map.get(switch.vendor.lower(), 'cisco_ios')
 
+        # Special handling for Dell S-series (Force10)
+        if switch.vendor.lower() == 'dell' and switch.model and switch.model.lower().startswith('s'):
+            device_type = 'dell_force10'
+
         device_params = {
             'device_type': device_type,
             'host': str(switch.ip_address),
@@ -60,8 +64,9 @@ class SwitchManager:
             'blocking_timeout': switch.connection_timeout,
         }
 
-        # Add enable password for Cisco devices
-        if switch.vendor.lower() == 'cisco' and enable_password:
+        # Add enable password for Cisco and Dell Force10 (S-series) devices
+        if enable_password and (switch.vendor.lower() == 'cisco' or
+                                (switch.vendor.lower() == 'dell' and switch.model and switch.model.lower().startswith('s'))):
             device_params['secret'] = enable_password
 
         return device_params
@@ -125,8 +130,9 @@ class SwitchManager:
             device_params = self._get_device_params(switch)
 
             with ConnectHandler(**device_params) as connection:
-                # Enter enable mode for Cisco if needed
-                if switch.vendor.lower() == 'cisco':
+                # Enter enable mode for Cisco and Dell Force10 (S-series) if needed
+                if switch.vendor.lower() == 'cisco' or \
+                   (switch.vendor.lower() == 'dell' and switch.model and 's' in switch.model.lower()[:2]):
                     if not connection.check_enable_mode():
                         connection.enable()
 
@@ -153,6 +159,7 @@ class SwitchManager:
         """
         Query ARP table on a switch for a specific IP
         Returns MAC address if found, None otherwise
+        Tries primary command first, then fallback if available
         """
         try:
             handler = self.get_vendor_handler(switch.vendor)
@@ -161,12 +168,66 @@ class SwitchManager:
             output = self.execute_command(switch, command)
             mac_address = handler.parse_arp_output(output, target_ip)
 
+            # If no result and fallback command exists, try it
+            if not mac_address:
+                fallback_command = handler.get_arp_command_fallback(target_ip)
+                if fallback_command:
+                    logger.debug(f"Primary ARP command failed, trying fallback: {fallback_command}")
+                    output = self.execute_command(switch, fallback_command)
+                    mac_address = handler.parse_arp_output(output, target_ip)
+
             if mac_address:
                 logger.info(f"Found MAC {mac_address} for IP {target_ip} on switch {switch.name}")
             else:
                 logger.debug(f"No ARP entry found for IP {target_ip} on switch {switch.name}")
 
             return mac_address
+
+        except SwitchConnectionError:
+            raise
+        except Exception as e:
+            logger.error(f"Error querying ARP table on {switch.name}: {str(e)}")
+            return None
+
+    def query_arp_table_with_port(self, switch: Switch, target_ip: str) -> Optional[Dict]:
+        """
+        Query ARP table and try to extract port information if available
+        Returns dict with 'mac', 'port', 'vlan' or just 'mac' if port not in ARP output
+
+        Some switches (like Dell S5232) include port info directly in ARP output
+        """
+        try:
+            handler = self.get_vendor_handler(switch.vendor)
+
+            # Try primary command
+            command = handler.get_arp_command(target_ip)
+            output = self.execute_command(switch, command)
+
+            # Try to get port info from ARP output
+            arp_data = handler.parse_arp_output_with_port(output, target_ip)
+
+            # If no result and fallback exists, try fallback
+            if not arp_data:
+                fallback_command = handler.get_arp_command_fallback(target_ip)
+                if fallback_command:
+                    logger.debug(f"Primary ARP command failed, trying fallback: {fallback_command}")
+                    output = self.execute_command(switch, fallback_command)
+                    arp_data = handler.parse_arp_output_with_port(output, target_ip)
+
+            if arp_data and arp_data.get('mac'):
+                logger.info(f"Found MAC {arp_data['mac']} for IP {target_ip} on switch {switch.name}")
+                if arp_data.get('port'):
+                    logger.info(f"Port info available in ARP output: {arp_data['port']}")
+                return arp_data
+
+            # Fallback to regular MAC-only parsing
+            mac_address = handler.parse_arp_output(output, target_ip)
+            if mac_address:
+                logger.info(f"Found MAC {mac_address} for IP {target_ip} on switch {switch.name}")
+                return {'mac': mac_address, 'port': None, 'vlan': None}
+
+            logger.debug(f"No ARP entry found for IP {target_ip} on switch {switch.name}")
+            return None
 
         except SwitchConnectionError:
             raise

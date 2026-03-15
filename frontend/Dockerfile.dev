@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM docker.m.daocloud.io/library/node:20-alpine
 
 WORKDIR /app
 
@@ -6,7 +6,7 @@ WORKDIR /app
 COPY package.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm install --proxy http://87.254.212.121:8080
 
 # Copy application code
 COPY . .

@@ -1,148 +1,190 @@
 <template>
   <div class="switch-list">
-    <el-table :data="switches" v-loading="loading" stripe style="width: 100%">
-      <el-table-column prop="name" label="Name" min-width="150" />
+    <el-table
+      :data="switches"
+      v-loading="loading"
+      stripe
+      style="width: 100%"
+      @selection-change="handleSelectionChange"
+      ref="tableRef"
+    >
+      <el-table-column type="selection" width="45" />
 
-      <el-table-column prop="ip_address" label="IP Address" width="140">
+      <!-- Name -->
+      <el-table-column prop="name" label="名称" min-width="160">
         <template #default="{ row }">
-          <el-tag type="primary">{{ row.ip_address }}</el-tag>
+          <el-link type="primary" @click="goToDetail(row)" underline="never" style="font-weight: 500; cursor: pointer;">
+            {{ row.name }}
+          </el-link>
         </template>
       </el-table-column>
 
-      <el-table-column prop="vendor" label="Vendor" width="100">
+      <!-- IP Address -->
+      <el-table-column prop="ip_address" label="IP 地址" width="135">
         <template #default="{ row }">
-          <el-tag
-            :type="getVendorTagType(row.vendor)"
-          >
-            {{ row.vendor.toUpperCase() }}
+          <el-tag type="primary" size="small">{{ row.ip_address }}</el-tag>
+        </template>
+      </el-table-column>
+
+      <!-- Vendor + Model combined -->
+      <el-table-column label="厂商 / 型号" min-width="160">
+        <template #default="{ row }">
+          <div>
+            <el-tag :type="getVendorTagType(row.vendor)" size="small">
+              {{ row.vendor.toUpperCase() }}
+            </el-tag>
+            <span v-if="row.model" style="margin-left: 6px; font-size: 12px; color: #606266;">
+              {{ row.model }}
+            </span>
+          </div>
+        </template>
+      </el-table-column>
+
+      <!-- 认证配置: CLI + SNMP status -->
+      <el-table-column label="认证配置" width="130">
+        <template #default="{ row }">
+          <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+            <el-tooltip :content="row.cli_enabled ? 'SSH CLI 已启用' : 'SSH CLI 未启用'" placement="top">
+              <el-tag :type="row.cli_enabled ? 'success' : 'info'" size="small">CLI</el-tag>
+            </el-tooltip>
+            <el-tooltip :content="row.has_snmp_credentials ? 'SNMP 已配置' : 'SNMP 未配置'" placement="top">
+              <el-tag :type="row.has_snmp_credentials ? 'success' : 'warning'" size="small">SNMP</el-tag>
+            </el-tooltip>
+          </div>
+        </template>
+      </el-table-column>
+
+      <!-- 自动采集: ARP + MAC -->
+      <el-table-column label="自动采集" width="100">
+        <template #default="{ row }">
+          <div style="display: flex; gap: 4px;">
+            <el-tooltip content="ARP 自动采集" placement="top">
+              <el-tag :type="row.auto_collect_arp ? 'success' : 'info'" size="small">ARP</el-tag>
+            </el-tooltip>
+            <el-tooltip content="MAC 自动采集" placement="top">
+              <el-tag :type="row.auto_collect_mac ? 'success' : 'info'" size="small">MAC</el-tag>
+            </el-tooltip>
+          </div>
+        </template>
+      </el-table-column>
+
+      <!-- 上次采集 -->
+      <el-table-column label="上次采集" width="110">
+        <template #default="{ row }">
+          <div v-if="row.last_collection_status" style="font-size: 12px;">
+            <el-tag
+              :type="row.last_collection_status === 'success' ? 'success' : row.last_collection_status === 'failed' ? 'danger' : 'warning'"
+              size="small"
+            >
+              {{ row.last_collection_status }}
+            </el-tag>
+            <div v-if="row.last_arp_collection_at || row.last_mac_collection_at" style="color: #909399; margin-top: 2px; font-size: 11px;">
+              {{ formatCollectionTime(row) }}
+            </div>
+          </div>
+          <span v-else style="color: #909399; font-size: 12px;">-</span>
+        </template>
+      </el-table-column>
+
+      <!-- Ping 状态 + 响应时间 combined -->
+      <el-table-column label="连接状态" width="120">
+        <template #default="{ row }">
+          <div v-if="row.is_reachable === true">
+            <el-tag type="success" size="small" effect="dark">
+              <el-icon><CircleCheck /></el-icon> 在线
+            </el-tag>
+            <div v-if="row.response_time_ms" style="color: #67c23a; font-size: 11px; margin-top: 2px; font-weight: 500;">
+              {{ row.response_time_ms.toFixed(1) }}ms
+            </div>
+          </div>
+          <el-tag v-else-if="row.is_reachable === false" type="danger" size="small" effect="dark">
+            <el-icon><CircleClose /></el-icon> 离线
+          </el-tag>
+          <el-tag v-else type="info" size="small">
+            <el-icon><QuestionFilled /></el-icon> 未知
           </el-tag>
         </template>
       </el-table-column>
 
-      <el-table-column prop="model" label="Model" min-width="120">
-        <template #default="{ row }">
-          {{ row.model || '-' }}
-        </template>
-      </el-table-column>
-
-      <el-table-column prop="role" label="Role" width="100">
-        <template #default="{ row }">
-          <el-tag :type="getRoleTagType(row.role)">
-            {{ getRoleLabel(row.role) }}
-          </el-tag>
-        </template>
-      </el-table-column>
-
-      <el-table-column prop="priority" label="Priority" width="90">
-        <template #default="{ row }">
-          <el-tag :type="getPriorityTagType(row.priority)">
-            {{ row.priority }}
-          </el-tag>
-        </template>
-      </el-table-column>
-
-      <el-table-column prop="ssh_port" label="Port" width="70" />
-
-      <el-table-column prop="username" label="Username" width="110" />
-
-      <el-table-column label="Ping Status" width="120">
-        <template #default="{ row }">
-          <el-tag
-            v-if="row.is_reachable === true"
-            type="success"
-            size="small"
-            effect="dark"
-          >
-            <el-icon><CircleCheck /></el-icon>
-            Online
-          </el-tag>
-          <el-tag
-            v-else-if="row.is_reachable === false"
-            type="danger"
-            size="small"
-            effect="dark"
-          >
-            <el-icon><CircleClose /></el-icon>
-            Offline
-          </el-tag>
-          <el-tag
-            v-else
-            type="info"
-            size="small"
-          >
-            <el-icon><QuestionFilled /></el-icon>
-            Unknown
-          </el-tag>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="Response" width="100">
-        <template #default="{ row }">
-          <span v-if="row.response_time_ms" style="color: #67c23a; font-weight: 500;">
-            {{ row.response_time_ms.toFixed(1) }}ms
-          </span>
-          <span v-else style="color: #909399;">-</span>
-        </template>
-      </el-table-column>
-
-      <el-table-column prop="enabled" label="Enabled" width="90">
+      <!-- 启用状态 -->
+      <el-table-column prop="enabled" label="启用" width="70">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" size="small">
-            {{ row.enabled ? 'On' : 'Off' }}
+            {{ row.enabled ? '是' : '否' }}
           </el-tag>
         </template>
       </el-table-column>
 
-      <el-table-column label="Actions" width="260" fixed="right">
+      <!-- 操作 -->
+      <el-table-column label="操作" width="150" fixed="right">
         <template #default="{ row }">
-          <el-button
-            size="small"
-            type="primary"
-            @click="$emit('test', row)"
-            :icon="Connection"
-          >
-            Test
-          </el-button>
-          <el-button
-            size="small"
-            @click="$emit('edit', row)"
-            :icon="Edit"
-          >
-            Edit
-          </el-button>
-          <el-button
-            size="small"
-            type="danger"
-            @click="$emit('delete', row)"
-            :icon="Delete"
-          >
-            Delete
-          </el-button>
+          <el-space :size="5">
+            <!-- Primary Action: View Details (on name click) + Test -->
+            <el-tooltip content="测试连接" placement="top">
+              <el-button
+                size="small"
+                type="primary"
+                :icon="Connection"
+                circle
+                @click="$emit('test', row)"
+              />
+            </el-tooltip>
+
+            <!-- Secondary Actions (Dropdown) -->
+            <el-dropdown trigger="click" @command="(cmd) => handleAction(cmd, row)">
+              <el-button size="small" :icon="More" circle />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="edit" :icon="Edit">
+                    编辑交换机
+                  </el-dropdown-item>
+                  <el-dropdown-item command="delete" :icon="Delete" divided style="color: #f56c6c">
+                    删除交换机
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </el-space>
         </template>
       </el-table-column>
     </el-table>
 
-    <el-empty v-if="!loading && switches.length === 0" description="No switches configured">
-      <el-button type="primary" @click="$emit('refresh')">Add Your First Switch</el-button>
+    <el-empty v-if="!loading && switches.length === 0" description="暂无交换机">
+      <el-button type="primary" @click="$emit('refresh')">添加第一台交换机</el-button>
     </el-empty>
   </div>
 </template>
 
 <script setup lang="ts">
-import { Connection, Edit, Delete, CircleCheck, CircleClose, QuestionFilled } from '@element-plus/icons-vue'
+import { ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { Connection, Edit, Delete, CircleCheck, CircleClose, QuestionFilled, More } from '@element-plus/icons-vue'
 import type { Switch } from '@/api/switches'
+
+const router = useRouter()
 
 defineProps<{
   switches: Switch[]
   loading: boolean
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   refresh: []
   edit: [switchItem: Switch]
   delete: [switchItem: Switch]
   test: [switchItem: Switch]
+  selectionChange: [switches: Switch[]]
 }>()
+
+const tableRef = ref()
+
+const goToDetail = (switchItem: Switch) => {
+  router.push(`/switches/${switchItem.id}`)
+}
+
+const handleSelectionChange = (selection: Switch[]) => {
+  emit('selectionChange', selection)
+}
 
 const getVendorTagType = (vendor: string) => {
   const types: Record<string, any> = {
@@ -153,39 +195,36 @@ const getVendorTagType = (vendor: string) => {
   return types[vendor] || 'info'
 }
 
-const getRoleTagType = (role: string) => {
-  const types: Record<string, any> = {
-    core: 'danger',
-    aggregation: 'warning',
-    access: 'info'
+const formatCollectionTime = (row: Switch) => {
+  if (row.last_arp_collection_at || row.last_mac_collection_at) {
+    const time = row.last_arp_collection_at || row.last_mac_collection_at
+    if (!time) return '-'
+
+    const date = new Date(time)
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+
+    if (diffMins < 1) return '刚刚'
+    if (diffMins < 60) return `${diffMins}分钟前`
+    if (diffMins < 1440) return `${Math.floor(diffMins / 60)}小时前`
+    return `${Math.floor(diffMins / 1440)}天前`
   }
-  return types[role] || 'info'
+  return '-'
 }
 
-const getRoleLabel = (role: string) => {
-  const labels: Record<string, string> = {
-    core: 'Core',
-    aggregation: 'Agg',
-    access: 'Access'
+// Handle dropdown menu actions
+const handleAction = (command: string, row: Switch) => {
+  if (command === 'edit') {
+    emit('edit', row)
+  } else if (command === 'delete') {
+    emit('delete', row)
   }
-  return labels[role] || role
-}
-
-const getPriorityTagType = (priority: number) => {
-  if (priority <= 20) return 'danger'
-  if (priority <= 40) return 'warning'
-  return 'info'
-}
-
-const formatDate = (dateString: string) => {
-  const date = new Date(dateString)
-  return date.toLocaleString()
 }
 </script>
 
 <style scoped>
 .switch-list {
   width: 100%;
-  overflow-x: auto;
 }
 </style>

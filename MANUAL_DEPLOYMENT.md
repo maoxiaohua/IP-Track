@@ -94,7 +94,7 @@ cd IP-TRACK
 
 ```bash
 sudo -u postgres psql << EOF
-CREATE USER iptrack WITH PASSWORD 'iptrack123';
+CREATE USER iptrack WITH PASSWORD 'YOUR_SECURE_PASSWORD';
 CREATE DATABASE iptrack OWNER iptrack;
 GRANT ALL PRIVILEGES ON DATABASE iptrack TO iptrack;
 \q
@@ -159,7 +159,7 @@ API_V1_PREFIX=/api/v1
 BACKEND_CORS_ORIGINS=["http://localhost:8001","http://YOUR_SERVER_IP:8001"]
 
 # Database Configuration
-DATABASE_URL=postgresql+asyncpg://iptrack:iptrack123@localhost:5432/iptrack
+DATABASE_URL=postgresql+asyncpg://iptrack:YOUR_SECURE_PASSWORD@localhost:5432/iptrack
 
 # Redis Configuration
 REDIS_URL=redis://localhost:6379/0

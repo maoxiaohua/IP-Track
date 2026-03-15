@@ -1,422 +1,451 @@
-# IP Track System
+# IP-Track Network Monitor
 
-A comprehensive web-based network management application for tracking IP addresses, managing switches, and monitoring network devices. Features include IP address lookup, IPAM (IP Address Management), batch switch discovery, and multi-vendor support (Cisco, Dell, Alcatel-Lucent).
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
+[![Vue 3](https://img.shields.io/badge/Vue.js-3.x-brightgreen.svg)](https://vuejs.org/)
+
+A production-ready, open-source network monitoring platform for tracking IP addresses, managing switches, and monitoring network devices across multi-vendor environments.
 
 ## ✨ Features
 
-### Core Features
-- **IP Address Lookup**: Enter an IP address to find the connected switch and port
-- **Multi-Vendor Support**: Works with Cisco IOS/IOS-XE, Dell Networking OS, and Alcatel-Lucent switches
-- **Switch Management**: Add, edit, and manage network switches with role-based prioritization
-- **Query History**: Track all lookup queries with timestamps and results
-- **Connection Testing**: Test SSH connectivity to switches before adding them
-- **Real-time Results**: Fast queries with intelligent caching for improved performance
+- **IP Address Lookup**: Track IP addresses to switch ports with cache and realtime modes
+- **Multi-Vendor Support**: Cisco, Dell, Alcatel/Nokia, Juniper with hybrid CLI/SNMP collection
+- **IPAM**: IP Address Management with automated subnet scanning
+- **Network Data Collection**: Automated ARP/MAC table collection every 2 hours
+- **Port Analysis**: Intelligent trunk/access port classification with confidence scoring
+- **Optical Modules**: Monitor SFP/SFP+ module health (temperature, power, wavelength)
+- **Alarm Management**: Comprehensive alerting for collection failures and device issues
+- **Status Checker**: Real-time switch connectivity monitoring (ICMP ping every 30s)
+- **Modern UI**: Vue 3 + TypeScript frontend with Element Plus components
+- **RESTful API**: FastAPI backend with automatic OpenAPI documentation
 
-### 🆕 IPAM - IP Address Management
-- **Subnet Management**: Create and manage IP subnets with CIDR notation
-- **Automatic IP Generation**: Automatically generate all IP addresses for a subnet
-- **Network Scanning**:
-  - Ping reachability detection
-  - DNS reverse lookup (hostname discovery)
-  - ARP MAC address discovery
-  - OS detection (Windows, Linux, macOS, network devices)
-- **Device Tracking**: Monitor device online/offline status over time
-- **Switch Port Association**: Automatically link IPs to switch ports via MAC lookup
-- **Scan History**: Track changes in device status, hostname, and OS
-- **Dashboard Statistics**: Subnet utilization, IP allocation, and device counts
+## 🚀 Quick Start
 
-### 🔍 Batch Discovery
-- **IP Range Scanning**: Scan IP ranges to discover network switches
-- **Multi-Credential Support**: Try multiple SSH credentials automatically
-- **Auto-Detection**: Automatically detect vendor, model, and role
-- **Bulk Import**: Select and import multiple switches at once
-- **3-Step Wizard**: User-friendly guided discovery process
+### Prerequisites
 
-### 🎨 Modern UI
-- **Clean Design**: Modern blue gradient theme with glass morphism effects
-- **Responsive Layout**: Works on desktop and mobile devices
-- **Smooth Animations**: Polished transitions and hover effects
-- **Intuitive Navigation**: Easy-to-use interface with clear visual hierarchy
+- **Docker & Docker Compose** (recommended) - Easiest deployment method
+- OR **Python 3.11+** and **PostgreSQL 16+** (manual installation)
 
-### ⚡ Performance Optimizations
-- **Smart Query Strategy**: Priority-based switch querying (30x faster)
-- **Concurrent Operations**: Parallel scanning and querying
-- **Redis Caching**: Intelligent caching for frequently accessed data
-- **Async Architecture**: Non-blocking operations throughout
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│              Frontend (Vue 3 + TypeScript)              │
-│   IP Lookup | Switch Mgmt | IPAM | Discovery | History │
-└────────────────────────┬────────────────────────────────┘
-                         │ HTTP/REST API
-┌────────────────────────▼────────────────────────────────┐
-│              Backend API (FastAPI + Python)             │
-│  IP Lookup | Switch Manager | IPAM Service | Scanner   │
-└────────────────────────┬────────────────────────────────┘
-                         │
-        ┌────────────────┼────────────────┐
-        │                │                │
-┌───────▼──────┐  ┌──────▼──────┐  ┌─────▼──────┐
-│ PostgreSQL   │  │   Redis     │  │  Network   │
-│ - Switches   │  │ - Caching   │  │  Switches  │
-│ - History    │  │ - MAC Cache │  │  (SSH)     │
-│ - IP Subnets │  │             │  │            │
-│ - IP Addrs   │  │             │  │            │
-└──────────────┘  └─────────────┘  └────────────┘
-```
-
-## 🛠️ Technology Stack
-
-### Backend
-- **FastAPI** - Modern async Python web framework
-- **netmiko** - Multi-vendor SSH library for network devices
-- **PostgreSQL 16** - Reliable database for switches, history, and IPAM
-- **SQLAlchemy** - Async ORM with relationship management
-- **Redis 6+** - High-performance caching layer
-- **Pydantic** - Data validation and serialization
-- **asyncio** - Concurrent operations and task management
-
-### Frontend
-- **Vue 3** - Progressive JavaScript framework with Composition API
-- **TypeScript** - Type-safe development
-- **Element Plus** - Modern UI component library
-- **Vite** - Lightning-fast build tool
-- **Pinia** - Intuitive state management
-- **Axios** - HTTP client with interceptors
-
-### DevOps
-- **Docker** - Containerization
-- **Docker Compose** - Multi-container orchestration
-- **Nginx** - Frontend web server
-- **Uvicorn** - ASGI server for FastAPI
-
-## 📋 Prerequisites
-
-- Docker and Docker Compose (recommended)
-- OR manual installation:
-  - Python 3.11+
-  - Node.js 18+
-  - PostgreSQL 16+
-  - Redis 6+
-
-## 🚀 Quick Start with Docker
+### Installation (Docker - Recommended)
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/IP-TRACK.git
-   cd IP-TRACK
+   git clone https://github.com/yourusername/ip-track.git
+   cd ip-track
    ```
 
-2. **Generate encryption key**
+2. **Initialize configuration**
    ```bash
-   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   chmod +x scripts/init_config.sh
+   ./scripts/init_config.sh
    ```
 
-3. **Configure environment**
+   This script will:
+   - Create `.env` from `.env.example` template
+   - Generate secure Fernet encryption key
+   - Generate random database password
+   - Set up all required configuration
+
+3. **Review and customize `.env`** (optional)
    ```bash
-   cp backend/.env.example backend/.env
-   # Edit backend/.env and set ENCRYPTION_KEY to the generated key
+   nano .env
    ```
 
-4. **Start the application**
+   Key settings to review:
+   - `COLLECTION_INTERVAL_MINUTES` - How often to collect network data (default: 120 min)
+   - `COLLECTION_WORKERS` - Concurrent switch collectors (default: 10)
+   - `BACKEND_CORS_ORIGINS` - Add your frontend URLs if not using defaults
+
+4. **Start all services**
    ```bash
    docker-compose up -d
    ```
 
-5. **Access the application**
-   - Frontend: http://localhost:8001
-   - Backend API: http://localhost:8101
-   - API Documentation: http://localhost:8101/api/docs
+5. **Verify services are running**
+   ```bash
+   docker-compose ps
+   ```
 
-## 📖 Usage Guide
+   Expected output:
+   ```
+   NAME                STATUS              PORTS
+   iptrack-backend     Up X minutes        0.0.0.0:8101->8100/tcp
+   iptrack-frontend    Up X minutes        0.0.0.0:8001->5173/tcp
+   iptrack-postgres    Up X minutes        0.0.0.0:5432->5432/tcp
+   iptrack-redis       Up X minutes        0.0.0.0:6379->6379/tcp
+   ```
 
-### 1. Adding Switches
+6. **Access the application**
+   - **Frontend UI**: http://localhost:8001
+   - **API Documentation**: http://localhost:8101/api/docs (interactive Swagger UI)
+   - **API Base URL**: http://localhost:8101/api/v1
 
-#### Manual Addition
-1. Navigate to **Switches** page
-2. Click **Add Switch**
-3. Fill in the form:
-   - **Name**: Descriptive name (e.g., "Core-Switch-01")
-   - **IP Address**: Switch management IP
-   - **Vendor**: Select Cisco, Dell, or Alcatel
-   - **Model**: Switch model (optional)
-   - **Role**: Core, Aggregation, or Access
-   - **Priority**: 1-100 (lower = higher priority)
-   - **Username/Password**: SSH credentials
-4. Click **Test** to verify connectivity
-5. Click **Create** to save
+### First Steps
 
-#### Batch Discovery
-1. Navigate to **Batch Discovery** page
-2. **Step 1**: Configure scan parameters
-   - Enter IP range (e.g., 10.0.0.1-10.0.0.50 or 10.0.0.0/24)
-   - Add SSH credentials (can add multiple sets)
-3. **Step 2**: Review discovered switches
-   - System auto-detects vendor, model, and role
-   - Select switches to import
-4. **Step 3**: Confirm and import
+1. **Open the web UI** at http://localhost:8001
+2. **Add your first switch**:
+   - Navigate to **Switches** → **Add Switch**
+   - Fill in switch details:
+     - Name (e.g., "Core-Switch-01")
+     - IP Address
+     - Vendor (Cisco/Dell/Alcatel/Juniper)
+     - Model
+     - SSH username and password
+     - Enable password (if required for Cisco/Dell Force10)
+   - Click **Test Connection** to verify
+   - Click **Create** to save
+3. **Enable auto-collection** (checkbox on switch form) or trigger manual collection
+4. **Wait for first collection** (2 hours by default) or trigger manually
+5. **Start using IP Lookup** to locate devices on the network
 
-### 2. IP Address Lookup
+## 📖 Documentation
 
-1. Navigate to **IP Lookup** page
-2. Enter the target IP address
-3. Click **Lookup IP Address**
-4. View results showing:
-   - MAC address
-   - Switch name and IP
-   - Port number
-   - VLAN ID
-   - Query time
+- **Quick Start Guide**: [QUICK_START.md](QUICK_START.md) - Detailed getting started guide
+- **Configuration Guide**: [.env.example](.env.example) - All available environment variables
+- **API Documentation**: http://localhost:8101/api/docs - Interactive Swagger UI
+- **Development Guide**: [CLAUDE.md](CLAUDE.md) - Architecture and development rules
+- **Contributing Guide**: [CONTRIBUTING.md](CONTRIBUTING.md) - How to contribute
+- **Project Summary**: [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) - Detailed feature overview
 
-### 3. IPAM - IP Address Management
+## 🛠️ Configuration
 
-#### Creating a Subnet
-1. Navigate to **IPAM** page
-2. Click **Add Subnet**
-3. Fill in the form:
-   - **Subnet Name**: e.g., "Office Network"
-   - **Network**: CIDR format (e.g., 10.0.0.0/24)
-   - **Description**: Purpose of the subnet
-   - **VLAN ID**: Associated VLAN (optional)
-   - **Gateway**: Default gateway (optional)
-   - **DNS Servers**: Comma-separated (optional)
-   - **Auto Scan**: Enable periodic scanning
-   - **Scan Interval**: Frequency in seconds
-4. Click **Create**
-   - System automatically generates all IP addresses
+IP-Track uses **environment variables exclusively** for all configuration. No hardcoded values exist in the codebase.
 
-#### Scanning a Subnet
-1. In IPAM dashboard, find your subnet
-2. Click **Scan** button
-3. Choose scan type:
-   - **Quick**: Ping only (fast)
-   - **Full**: Ping + Hostname + MAC + OS (comprehensive)
-4. Wait for scan to complete
-5. View results:
-   - Online/offline devices
-   - Hostnames and MAC addresses
-   - Operating systems detected
-   - Switch port associations
+### Essential Variables
 
-#### Viewing IP Details
-1. Click **View IPs** on a subnet
-2. Use filters:
-   - Status (Available, Used, Reserved, Offline)
-   - Reachability (Online, Offline)
-   - Search by IP, hostname, or description
-3. Click **Details** on any IP to see:
-   - Full scan history
-   - Device information
-   - Switch port connection
-   - Last seen timestamp
+```bash
+# Database (required)
+DATABASE_USER=iptrack
+DATABASE_PASSWORD=your_secure_password  # Auto-generated by init_config.sh
+DATABASE_HOST=postgres                   # Use 'postgres' for Docker, 'localhost' for manual
+DATABASE_NAME=iptrack
 
-### 4. Query History
+# Security (required)
+ENCRYPTION_KEY=your_fernet_key          # Auto-generated by init_config.sh
 
-1. Navigate to **History** page
-2. View all past queries with:
-   - Target IP
-   - Found MAC address
-   - Switch and port
-   - Query status
-   - Timestamp
-3. Use pagination to browse records
+# Redis Cache
+REDIS_HOST=redis                        # Use 'redis' for Docker, 'localhost' for manual
+REDIS_ENABLED=true
 
-## 🔌 API Documentation
+# Collection Schedule
+COLLECTION_ENABLED=true
+COLLECTION_INTERVAL_MINUTES=120         # ARP/MAC collection every 2 hours
+IPAM_SCAN_INTERVAL_MINUTES=60          # IPAM subnet scans every hour
+OPTICAL_MODULE_INTERVAL_MINUTES=720    # Optical module data every 12 hours
 
-Full interactive API documentation is available at: http://localhost:8101/api/docs
+# Worker Pool Sizes
+COLLECTION_WORKERS=10                  # Concurrent switch collectors
+IP_LOOKUP_WORKERS=50                   # Concurrent SSH connections for lookup
+DISCOVERY_WORKERS=20                   # Concurrent workers for discovery
+IPAM_SCAN_WORKERS=20                   # Concurrent IPAM scanners
 
-### Key Endpoints
-
-#### Switch Management
-- `POST /api/v1/switches` - Create a switch
-- `GET /api/v1/switches` - List all switches
-- `GET /api/v1/switches/{id}` - Get switch details
-- `PUT /api/v1/switches/{id}` - Update switch
-- `DELETE /api/v1/switches/{id}` - Delete switch
-- `POST /api/v1/switches/{id}/test` - Test connection
-
-#### IP Lookup
-- `POST /api/v1/lookup/ip` - Lookup an IP address
-
-#### Batch Discovery
-- `POST /api/v1/discovery/scan` - Scan IP range for switches
-- `POST /api/v1/discovery/add-switches` - Bulk add discovered switches
-
-#### IPAM
-- `POST /api/v1/ipam/subnets` - Create subnet
-- `GET /api/v1/ipam/subnets` - List subnets
-- `GET /api/v1/ipam/subnets/{id}` - Get subnet details
-- `DELETE /api/v1/ipam/subnets/{id}` - Delete subnet
-- `GET /api/v1/ipam/ip-addresses` - List IP addresses (with filters)
-- `GET /api/v1/ipam/ip-addresses/{id}` - Get IP details
-- `PUT /api/v1/ipam/ip-addresses/{id}` - Update IP
-- `POST /api/v1/ipam/scan` - Scan subnet or specific IPs
-- `GET /api/v1/ipam/dashboard` - Get IPAM statistics
-
-#### Query History
-- `GET /api/v1/history` - Get query history (paginated)
-- `GET /api/v1/history/{id}` - Get specific query
-
-## 🔧 Configuration
-
-### Backend Configuration (backend/.env)
-
-```env
-# Application
-APP_NAME=IP Track System
-APP_VERSION=1.0.0
-DEBUG=false
-
-# API
-API_V1_PREFIX=/api/v1
-BACKEND_CORS_ORIGINS=["http://localhost:8001"]
-
-# Database
-DATABASE_URL=postgresql+asyncpg://iptrack:iptrack123@localhost:5432/iptrack
-
-# Redis
-REDIS_URL=redis://localhost:6379/0
-REDIS_CACHE_TTL=300
-
-# Security - IMPORTANT: Generate a secure key
-ENCRYPTION_KEY=your-32-byte-base64-encoded-key-here
-
-# Switch Connection
-DEFAULT_SSH_TIMEOUT=30
-MAX_CONCURRENT_CONNECTIONS=10
+# Feature Toggles
+FEATURE_IPAM=true
+FEATURE_ALARMS=true
+FEATURE_OPTICAL_MODULES=true
+FEATURE_PORT_ANALYSIS=true
+FEATURE_STATUS_CHECKER=true            # ICMP ping monitoring every 30s
 ```
 
-### Switch Role and Priority
+See [.env.example](.env.example) for the complete list of 50+ configuration options.
 
-**Roles**:
-- **Core**: Layer 3 core switches (highest priority for ARP queries)
-- **Aggregation**: Distribution/aggregation layer switches
-- **Access**: Edge/access layer switches
+### Performance Tuning
 
-**Priority** (1-100):
-- Lower number = higher priority
-- Recommended: Core=10, Aggregation=30, Access=50
-- System queries switches in priority order for optimal performance
+**Small Networks (<50 switches)**
+```bash
+COLLECTION_WORKERS=5
+COLLECTION_BATCH_SIZE=10
+COLLECTION_INTERVAL_MINUTES=60
+IP_LOOKUP_WORKERS=20
+```
 
-## 🎯 How It Works
+**Medium Networks (50-200 switches)**
+```bash
+COLLECTION_WORKERS=10
+COLLECTION_BATCH_SIZE=5
+COLLECTION_INTERVAL_MINUTES=120
+IP_LOOKUP_WORKERS=50
+```
 
-### IP Lookup Process
-1. **Priority Grouping**: Switches are grouped by priority
-2. **ARP Query**: Query high-priority switches first for ARP entries
-3. **MAC Discovery**: Extract MAC address from ARP table
-4. **MAC Table Query**: Query all switches for MAC address location
-5. **Port Identification**: Identify which port learned the MAC
-6. **Result Display**: Show switch name, port, and VLAN
-7. **History Logging**: Store query results in database
+**Large Networks (>300 switches)**
+```bash
+COLLECTION_WORKERS=20
+COLLECTION_BATCH_SIZE=5
+COLLECTION_INTERVAL_MINUTES=180
+IP_LOOKUP_WORKERS=100
+DATABASE_POOL_SIZE=30
+DATABASE_MAX_OVERFLOW=20
+```
 
-### IPAM Scanning Process
-1. **Ping Sweep**: Test reachability of all IPs in subnet
-2. **DNS Lookup**: Reverse DNS to get hostnames
-3. **ARP Discovery**: Get MAC addresses from ARP cache
-4. **OS Detection**: Use nmap or TTL analysis to identify OS
-5. **Switch Association**: Query switches for MAC to find port
-6. **History Recording**: Log all scan results with change detection
+## 🏗️ Architecture
 
-## 🔐 Security Considerations
+### System Overview
 
-1. **Credential Encryption**: Switch passwords encrypted with Fernet (AES-256)
-2. **SSH Security**: Secure SSH connections to network devices
-3. **Input Validation**: All inputs validated to prevent injection attacks
-4. **CORS Configuration**: Restricted origins for API access
-5. **Network Isolation**: Deploy backend in secure network segment
-6. **Access Control**: Consider adding authentication for production
+```
+┌─────────────────────────────────────────┐
+│  Vue 3 Frontend (Port 8001)             │
+│  IP Lookup | Switches | IPAM | Alarms  │
+└──────────────┬──────────────────────────┘
+               │ REST API (Axios)
+┌──────────────▼──────────────────────────┐
+│  FastAPI Backend (Port 8101)            │
+│  ┌──────────────────────────────────┐  │
+│  │ Services Layer                   │  │
+│  │ - IP Lookup (cache/realtime)    │  │
+│  │ - Network Data Collector         │  │
+│  │ - Port Analysis Service          │  │
+│  │ - IPAM Service                   │  │
+│  │ - Alarm Service                  │  │
+│  │ - Status Checker (30s ping)      │  │
+│  └──────────────────────────────────┘  │
+└──────┬──────────────────┬───────────────┘
+       │                  │
+   ┌───▼────┐      ┌──────▼──────┐
+   │Postgres│      │    Redis    │
+   │  16    │      │  (Cache)    │
+   └────────┘      └─────────────┘
+```
+
+### Background Services
+
+IP-Track runs several automated background tasks:
+
+1. **Status Checker** (every 30 seconds)
+   - ICMP ping all enabled switches
+   - Updates `is_reachable`, `response_time_ms`, `last_check_at`
+
+2. **Network Data Collection** (every 120 minutes)
+   - Collects ARP tables from all switches
+   - Collects MAC tables from all switches
+   - Performs port analysis (trunk/access classification)
+   - Updates IP location database
+
+3. **IPAM Auto-Scan** (every 60 minutes)
+   - Scans configured subnets
+   - Updates IP reachability status
+   - Tracks IP lifecycle (active/inactive)
+
+4. **Optical Module Collection** (every 720 minutes)
+   - Collects SFP/SFP+ module information
+   - Monitors temperature, TX/RX power, wavelength
+
+5. **Alarm Cleanup** (daily at 3:00 AM)
+   - Removes old alarms (default: 30 days retention)
+
+## 🔌 Supported Vendors
+
+| Vendor | Device Types | Collection Method | Enable Mode | Device Type |
+|--------|--------------|-------------------|-------------|-------------|
+| Cisco | IOS, IOS-XE, Catalyst | CLI primary, SNMP fallback | ✅ Required | `cisco_ios` |
+| Dell | Force10 (S-series), OS10 | CLI primary, SNMP fallback | Force10 only | `dell_force10` / `dell_os10` |
+| Alcatel/Nokia | SROS (7250/7750), SR Linux (7220) | CLI only | ❌ Not required | `nokia_sros` / `nokia_srl` |
+| Juniper | JunOS | CLI primary, SNMP fallback | ❌ Not required | `juniper_junos` |
+
+### Collection Strategy (Hybrid Approach)
+
+- **Cisco & Dell**: Try CLI first, fallback to SNMP if CLI fails or returns zero results
+- **Alcatel/Nokia**: CLI only (SNMP MIBs not widely supported)
+- **Juniper**: CLI primary, SNMP fallback
+
+## 🔧 Development
+
+### Local Development Setup (Without Docker)
+
+1. **Install Python dependencies**
+   ```bash
+   cd backend
+   python3.11 -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+2. **Install frontend dependencies**
+   ```bash
+   cd frontend
+   npm install
+   ```
+
+3. **Start PostgreSQL and Redis**
+   ```bash
+   docker-compose up -d postgres redis
+   ```
+
+   Or install manually and configure connection in `.env`
+
+4. **Initialize `.env` file**
+   ```bash
+   ./scripts/init_config.sh
+
+   # Then edit .env to use localhost instead of docker hostnames
+   DATABASE_HOST=localhost
+   REDIS_HOST=localhost
+   ```
+
+5. **Run database migrations**
+   ```bash
+   cd backend
+   # Migrations run automatically via database/init/*.sql on first PostgreSQL start
+   ```
+
+6. **Start backend**
+   ```bash
+   cd backend
+   source venv/bin/activate
+   export $(cat ../.env | xargs)
+   uvicorn src.main:app --reload --host 0.0.0.0 --port 8100
+   ```
+
+7. **Start frontend** (in another terminal)
+   ```bash
+   cd frontend
+   npm run dev
+   ```
+
+8. **Access application**
+   - Frontend: http://localhost:5173 (Vite dev server)
+   - Backend: http://localhost:8100/api/docs
+
+### Running Tests
+
+```bash
+# Backend tests
+cd backend
+source venv/bin/activate
+pytest
+
+# Frontend tests
+cd frontend
+npm run test
+
+# Run with coverage
+cd backend
+pytest --cov=src --cov-report=html
+```
 
 ## 🐛 Troubleshooting
 
-### Connection Issues
+### Backend Won't Start
 
-**Problem**: "Connection timeout" error
-- Check network connectivity to switch
-- Verify SSH port is correct (default: 22)
-- Ensure firewall allows SSH traffic
-- Check switch SSH configuration
+**Symptom**: Container restarts, logs show `ModuleNotFoundError`
 
-**Problem**: "Authentication failed" error
-- Verify username and password are correct
-- For Cisco: Check if enable password is required
-- Ensure user has appropriate privileges
-- Try testing credentials manually via SSH
-
-### Lookup Issues
-
-**Problem**: "No ARP entry found"
-- Device may not be active on the network
-- IP address may be incorrect
-- ARP entry may have expired (try pinging the device first)
-- Check if switches have correct role/priority
-
-**Problem**: "MAC address not found in MAC table"
-- Device may be connected to a switch not in the system
-- MAC table entry may have aged out
-- Verify all switches are configured and enabled
-
-### IPAM Issues
-
-**Problem**: Scan shows all devices offline
-- Check network connectivity from backend server
-- Verify ICMP (ping) is not blocked by firewall
-- Ensure backend can reach the subnet
-
-**Problem**: OS detection not working
-- Install nmap: `apt-get install nmap` or `yum install nmap`
-- Check if nmap has proper permissions
-- OS detection requires root/sudo for accurate results
-
-## 📚 Additional Documentation
-
-- **Quick Start Guide**: See `QUICK_START.md`
-- **Manual Deployment**: See `MANUAL_DEPLOYMENT.md` (for servers without Docker)
-- **GitHub Push Guide**: See `GITHUB_PUSH_GUIDE.md`
-- **Project Summary**: See `PROJECT_SUMMARY.md`
-
-## 🚀 Deployment
-
-### Docker Deployment (Recommended)
+**Solution**:
 ```bash
-./setup.sh
+# Check logs
+docker logs iptrack-backend --tail 50
+
+# If missing dependencies, install them
+docker exec iptrack-backend pip install MODULE_NAME
+
+# Rebuild container if needed
+docker-compose build backend
+docker-compose up -d backend
 ```
 
-### Manual Deployment
-See `MANUAL_DEPLOYMENT.md` for detailed instructions on deploying without Docker.
+### All Switches Show "Offline"
+
+**Cause**: Status checker needs time to run (every 30 seconds)
+
+**Solution**: Wait 30-60 seconds after startup, then refresh the page.
+
+### No Data After Collection
+
+**Cause**: First collection happens 120 minutes after startup
+
+**Solution**:
+```bash
+# Trigger manual collection
+curl -X POST http://localhost:8101/api/v1/network/collect-all
+
+# Or use the UI: Switches page → Select switch → Manual Collection button
+```
+
+### Configuration Validation Errors
+
+**Symptom**: Backend logs show `ValidationError: Field required`
+
+**Solution**:
+```bash
+# Compare your .env with .env.example
+diff .env .env.example
+
+# Ensure all required fields are present
+grep -E "DATABASE_USER|DATABASE_PASSWORD|ENCRYPTION_KEY" .env
+```
+
+See [CLAUDE.md](CLAUDE.md) for more troubleshooting guides.
 
 ## 🤝 Contributing
 
 Contributions are welcome! Please follow these guidelines:
+
+1. ✅ **No hardcoded values** - All configuration via `.env` or database
+2. ✅ **Update `.env.example`** if adding new config options
+3. ✅ **Follow existing patterns** - async/await, type hints, Pydantic schemas
+4. ✅ **Test with multiple vendors** if modifying collectors
+5. ✅ **Update documentation** - CLAUDE.md, README.md, API docs
+
+### Contribution Workflow
+
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+3. Make your changes
+4. Run tests (`pytest` for backend, `npm run test` for frontend)
+5. Commit your changes (`git commit -m 'Add amazing feature'`)
+6. Push to the branch (`git push origin feature/amazing-feature`)
+7. Open a Pull Request
 
-## 📄 License
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
-This project is provided as-is for network management purposes.
+## 📊 Project Statistics
+
+- **Version**: 2.2.0
+- **Backend**: 61 Python files, ~15,000 lines
+- **Frontend**: 28 Vue/TS files, ~8,000 lines
+- **Database Tables**: 15+ tables
+- **API Endpoints**: 25+ endpoints
+- **Supported Vendors**: 4 major vendors
+- **Performance**: <100ms cached queries, 20-30s realtime queries
+- **Scale**: Tested with 340+ switches, 50,000+ IP addresses
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+### MIT License Summary
+
+- ✅ Commercial use allowed
+- ✅ Modification allowed
+- ✅ Distribution allowed
+- ✅ Private use allowed
+- ⚠️ No warranty provided
+- ⚠️ License and copyright notice must be included
 
 ## 🙏 Acknowledgments
 
-- Built with FastAPI, Vue 3, and Element Plus
-- Uses netmiko for multi-vendor network device support
-- Inspired by network operations teams worldwide
-- Co-developed with Claude Sonnet 4.5
+- Built with [FastAPI](https://fastapi.tiangolo.com/), [Vue 3](https://vuejs.org/), and [PostgreSQL](https://www.postgresql.org/)
+- Network device communication via [Netmiko](https://github.com/ktbyers/netmiko)
+- SNMP support via [pysnmp](https://github.com/lextudio/pysnmp)
+- UI components from [Element Plus](https://element-plus.org/)
+- Inspired by enterprise network management tools
 
-## 📞 Support
+## 📧 Support
 
-For issues and questions:
-- Check the troubleshooting section above
-- Review API documentation at `/api/docs`
-- Check application logs in `backend/logs/`
-- Open an issue on GitHub
+- **Documentation**: Browse the [docs/](./) folder
+- **Issues**: [GitHub Issues](https://github.com/yourusername/ip-track/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/yourusername/ip-track/discussions)
+- **API Docs**: http://localhost:8101/api/docs (when running)
+
+## 🔗 Related Projects
+
+- [Netmiko](https://github.com/ktbyers/netmiko) - Multi-vendor SSH library
+- [NAPALM](https://github.com/napalm-automation/napalm) - Network automation library
+- [Netbox](https://github.com/netbox-community/netbox) - IPAM and DCIM tool
 
 ---
 
-**Version**: 2.0.0
-**Last Updated**: 2026-02-01
-**Status**: Production Ready ✅
+**⭐ Star this repository if you find it useful!**
+
+**Last Updated**: 2026-03-15
+**Version**: 2.2.0
+**Maintained By**: IP-Track Contributors

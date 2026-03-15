@@ -4,17 +4,38 @@ export interface Switch {
   id: number
   name: string
   ip_address: string
-  vendor: 'cisco' | 'dell' | 'alcatel'
+  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper'
   model?: string
-  role: 'core' | 'aggregation' | 'access'
-  priority: number
-  ssh_port: number
-  username: string
-  connection_timeout: number
   enabled: boolean
+
+  // CLI fields
+  cli_enabled: boolean
+  ssh_port?: number
+  username?: string
+  connection_timeout?: number
+
+  // Ping status
   is_reachable?: boolean | null
   last_check_at?: string | null
   response_time_ms?: number | null
+
+  // Data collection
+  auto_collect_arp: boolean
+  auto_collect_mac: boolean
+  last_arp_collection_at?: string | null
+  last_mac_collection_at?: string | null
+  last_collection_status?: string | null
+  last_collection_message?: string | null
+
+  // SNMP fields
+  snmp_enabled: boolean
+  snmp_version?: string
+  snmp_port?: number
+  snmp_username?: string
+  snmp_auth_protocol?: string
+  snmp_priv_protocol?: string
+  has_snmp_credentials?: boolean
+
   created_at: string
   updated_at: string
 }
@@ -22,29 +43,61 @@ export interface Switch {
 export interface SwitchCreate {
   name: string
   ip_address: string
-  vendor: 'cisco' | 'dell' | 'alcatel'
+  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper'
   model?: string
-  role?: 'core' | 'aggregation' | 'access'
-  priority?: number
+  enabled?: boolean
+
+  // CLI fields
+  cli_enabled?: boolean
   ssh_port?: number
-  username: string
-  password: string
+  username?: string
+  password?: string
   enable_password?: string
   connection_timeout?: number
-  enabled?: boolean
+
+  // Data collection
+  auto_collect_arp?: boolean
+  auto_collect_mac?: boolean
+
+  // SNMP fields (required)
+  snmp_enabled?: boolean
+  snmp_version?: string
+  snmp_port?: number
+  snmp_username: string
+  snmp_auth_protocol?: string
+  snmp_auth_password: string
+  snmp_priv_protocol?: string
+  snmp_priv_password: string
+  snmp_community?: string
 }
 
 export interface SwitchUpdate {
   name?: string
   ip_address?: string
-  vendor?: 'cisco' | 'dell' | 'alcatel'
+  vendor?: 'cisco' | 'dell' | 'alcatel' | 'juniper'
   model?: string
+  cli_enabled?: boolean
   ssh_port?: number
   username?: string
   password?: string
   enable_password?: string
   connection_timeout?: number
   enabled?: boolean
+
+  // Data collection
+  auto_collect_arp?: boolean
+  auto_collect_mac?: boolean
+
+  // SNMP fields
+  snmp_enabled?: boolean
+  snmp_version?: string
+  snmp_port?: number
+  snmp_username?: string
+  snmp_auth_protocol?: string
+  snmp_auth_password?: string
+  snmp_priv_protocol?: string
+  snmp_priv_password?: string
+  snmp_community?: string
 }
 
 export interface SwitchTestResponse {
@@ -53,10 +106,27 @@ export interface SwitchTestResponse {
   details?: any
 }
 
+export interface SwitchListParams {
+  skip?: number
+  limit?: number
+  search?: string
+}
+
+export interface SwitchListResponse {
+  items: Switch[]
+  total: number
+}
+
 export const switchesApi = {
   // Get all switches
-  list: async (): Promise<Switch[]> => {
-    const response = await apiClient.get('/api/v1/switches')
+  list: async (params?: SwitchListParams): Promise<SwitchListResponse> => {
+    const queryParams = new URLSearchParams()
+    if (params?.skip !== undefined) queryParams.append('skip', params.skip.toString())
+    if (params?.limit !== undefined) queryParams.append('limit', params.limit.toString())
+    if (params?.search) queryParams.append('search', params.search)
+
+    const url = `/api/v1/switches${queryParams.toString() ? '?' + queryParams.toString() : ''}`
+    const response = await apiClient.get(url)
     return response.data
   },
 
@@ -98,6 +168,34 @@ export const switchesApi = {
   // Ping all switches
   pingAll: async (): Promise<any> => {
     const response = await apiClient.post('/api/v1/switches/ping-all')
+    return response.data
+  },
+
+  // Manual collection operations
+  collectArp: async (id: number): Promise<any> => {
+    const response = await apiClient.post(`/api/v1/switches/${id}/collect/arp`)
+    return response.data
+  },
+
+  collectMac: async (id: number): Promise<any> => {
+    const response = await apiClient.post(`/api/v1/switches/${id}/collect/mac`)
+    return response.data
+  },
+
+  collectDeviceInfo: async (id: number): Promise<any> => {
+    const response = await apiClient.post(`/api/v1/switches/${id}/collect/device-info`)
+    return response.data
+  },
+
+  // Get optical modules
+  getOpticalModules: async (id: number): Promise<any> => {
+    const response = await apiClient.get(`/api/v1/switches/${id}/optical-modules`)
+    return response.data
+  },
+
+  // Collect optical modules
+  collectOpticalModules: async (id: number): Promise<any> => {
+    const response = await apiClient.post(`/api/v1/switches/${id}/collect/optical-modules`)
     return response.data
   }
 }
