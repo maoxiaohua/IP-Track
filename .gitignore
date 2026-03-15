@@ -85,3 +85,7 @@ htmlcov/
 # Test data
 test_switches.json
 test_data/
+
+
+# Claude settings
+.claude/settings.json
