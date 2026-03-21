@@ -21,6 +21,10 @@
               <el-icon><Grid /></el-icon>
               <span>IPAM</span>
             </el-menu-item>
+            <el-menu-item index="/snmp-profiles">
+              <el-icon><Key /></el-icon>
+              <span>SNMP Profiles</span>
+            </el-menu-item>
             <el-menu-item index="/discovery">
               <el-icon><Compass /></el-icon>
               <span>Batch Discovery</span>

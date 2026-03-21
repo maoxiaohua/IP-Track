@@ -1,10 +1,11 @@
 from typing import Optional, List, Dict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_
+from sqlalchemy import select, func, and_, or_, cast, Text, String
 from models.ipam import IPSubnet, IPAddress, IPScanHistory, IPStatus
 from models.switch import Switch
 from services.ip_scan import ip_scan_service
 from services.ip_lookup import ip_lookup_service
+from core.config import settings
 from utils.logger import logger
 import ipaddress
 from datetime import datetime, timedelta, timezone
@@ -71,20 +72,32 @@ class IPAMService:
     ):
         """
         Generate all IP addresses for a subnet
+        Uses INSERT ... ON CONFLICT DO NOTHING to handle duplicate IPs gracefully
         """
+        from sqlalchemy.dialects.postgresql import insert
+
         ip_addresses = []
-
         for ip in network.hosts():
-            ip_addr = IPAddress(
-                subnet_id=subnet.id,
-                ip_address=str(ip),
-                status=IPStatus.AVAILABLE.value
-            )
-            ip_addresses.append(ip_addr)
+            ip_addresses.append({
+                'subnet_id': subnet.id,
+                'ip_address': str(ip),
+                'status': IPStatus.AVAILABLE.value,
+                'is_reachable': False,
+                'scan_count': 0
+            })
 
-        # Bulk insert
-        db.add_all(ip_addresses)
-        logger.info(f"Generated {len(ip_addresses)} IP addresses for subnet {subnet.id}")
+        if ip_addresses:
+            # Use INSERT ... ON CONFLICT DO NOTHING to handle duplicate IPs
+            stmt = insert(IPAddress).values(ip_addresses)
+            stmt = stmt.on_conflict_do_nothing(index_elements=['ip_address'])
+
+            result = await db.execute(stmt)
+            inserted_count = result.rowcount if result.rowcount else 0
+
+            logger.info(f"Generated {len(ip_addresses)} IP addresses for subnet {subnet.id}, {inserted_count} new IPs inserted (others already exist)")
+        else:
+            logger.warning(f"No IP addresses to generate for subnet {subnet.id}")
+
 
     async def get_subnet(self, db: AsyncSession, subnet_id: int) -> Optional[IPSubnet]:
         """Get subnet by ID"""
@@ -168,7 +181,8 @@ class IPAMService:
 
         stats = {status.value: 0 for status in IPStatus}
         for row in result:
-            stats[row.status.value] = row.count
+            status_key = row.status.value if hasattr(row.status, 'value') else row.status
+            stats[status_key] = row.count
 
         # Count reachable IPs
         result = await db.execute(
@@ -278,7 +292,7 @@ class IPAMService:
         scan_type: str = "full"
     ) -> Dict:
         """
-        Scan all IPs in a subnet
+        Scan all IPs in a subnet with integrated Ping+DNS+SNMP workflow
         """
         logger.info(f"Starting subnet scan: {subnet_id} (type: {scan_type})")
         start_time = datetime.now(timezone.utc)
@@ -288,15 +302,48 @@ class IPAMService:
         if not subnet:
             raise ValueError(f"Subnet {subnet_id} not found")
 
+        # Get SNMP profile if configured for this subnet
+        snmp_profile = None
+        if subnet.snmp_profile_id:
+            from models.ipam import SNMPProfile
+            result = await db.execute(
+                select(SNMPProfile).where(SNMPProfile.id == subnet.snmp_profile_id)
+            )
+            profile = result.scalar_one_or_none()
+            if profile and profile.enabled:
+                # Prepare SNMP profile dictionary for scanning
+                snmp_profile = {
+                    'username': profile.username,
+                    'auth_protocol': profile.auth_protocol,
+                    'auth_password_encrypted': profile.auth_password_encrypted,
+                    'priv_protocol': profile.priv_protocol,
+                    'priv_password_encrypted': profile.priv_password_encrypted,
+                    'port': profile.port,
+                    'timeout': profile.timeout
+                }
+                logger.info(f"Using SNMP profile '{profile.name}' for subnet {subnet_id}")
+
         # Get all IP addresses
         result = await db.execute(
             select(IPAddress).where(IPAddress.subnet_id == subnet_id)
         )
         ip_addresses = result.scalars().all()
 
-        # Scan all IPs
+        # Parse DNS servers from subnet configuration
+        dns_servers = None
+        if subnet.dns_servers:
+            # dns_servers is stored as comma-separated string
+            dns_servers = [s.strip() for s in subnet.dns_servers.split(',') if s.strip()]
+            logger.info(f"Using DNS servers for subnet {subnet_id}: {dns_servers}")
+
+        # Scan all IPs with SNMP profile (if configured) and DNS servers
         ip_list = [str(ip.ip_address) for ip in ip_addresses]
-        scan_results = await ip_scan_service.scan_multiple_ips(ip_list, scan_type)
+        scan_results = await ip_scan_service.scan_multiple_ips(
+            ip_list,
+            scan_type,
+            snmp_profile,  # Pass SNMP profile to scanning service
+            dns_servers    # Pass DNS servers for PTR lookups
+        )
 
         # Update database
         new_devices = 0
@@ -329,7 +376,6 @@ class IPAMService:
             if not mac_to_lookup and scan_result['is_reachable']:
                 from models.arp_table import ARPTable
                 from models.mac_table import MACTable
-                from sqlalchemy import cast, Text
 
                 # Try ARP table first
                 arp_result = await db.execute(
@@ -343,10 +389,29 @@ class IPAMService:
                     mac_to_lookup = str(arp_entry.mac_address)
                     logger.info(f"Found MAC for {ip_str} from ARP table: {mac_to_lookup}")
 
-            # Update IP address fields
+            # Update basic IP address fields
             ip_addr.is_reachable = scan_result['is_reachable']
             ip_addr.response_time = scan_result['response_time']
-            ip_addr.hostname = scan_result['hostname']
+
+            # Update hostname with source tracking (SolarWinds-style)
+            ip_addr.hostname = scan_result.get('hostname')
+            ip_addr.hostname_source = scan_result.get('hostname_source')  # SNMP, DNS, ARP, or None
+
+            # Update SolarWinds-style SNMP/DNS fields
+            ip_addr.dns_name = scan_result.get('dns_name')  # DNS PTR result
+            ip_addr.system_name = scan_result.get('system_name')  # SNMP sysName
+            ip_addr.contact = scan_result.get('contact')  # SNMP sysContact
+            ip_addr.location = scan_result.get('location')  # SNMP sysLocation
+            ip_addr.machine_type = scan_result.get('machine_type')  # SNMP sysDescr parsed
+            ip_addr.vendor = scan_result.get('vendor')  # SNMP vendor parsed
+
+            # Update last_boot_time from SNMP sysUpTime
+            if scan_result.get('last_boot_time'):
+                # Parse ISO format datetime string
+                try:
+                    ip_addr.last_boot_time = datetime.fromisoformat(scan_result['last_boot_time'])
+                except:
+                    pass
 
             # Only update MAC if we have one (don't overwrite with None)
             if mac_to_lookup:
@@ -364,10 +429,43 @@ class IPAMService:
             ip_addr.last_scan_at = datetime.now(timezone.utc)
             ip_addr.scan_count += 1
 
+            # Intelligent status update logic
             if scan_result['is_reachable']:
+                # IP is reachable now
                 ip_addr.last_seen_at = datetime.now(timezone.utc)
-                if ip_addr.status == IPStatus.AVAILABLE.value:
+
+                # If status is AVAILABLE or OFFLINE, mark as USED
+                if ip_addr.status in [IPStatus.AVAILABLE.value, IPStatus.OFFLINE.value]:
                     ip_addr.status = IPStatus.USED.value
+            else:
+                # IP is NOT reachable
+                # Only mark as OFFLINE if it hasn't been seen for a long time
+                # This prevents temporary network issues from marking IPs as offline
+                if ip_addr.last_seen_at:
+                    time_since_last_seen = datetime.now(timezone.utc) - ip_addr.last_seen_at
+                    offline_threshold_hours = settings.IPAM_OFFLINE_THRESHOLD_HOURS
+
+                    if time_since_last_seen.total_seconds() > offline_threshold_hours * 3600:
+                        # Mark as OFFLINE only if USED (don't change RESERVED or AVAILABLE)
+                        if ip_addr.status == IPStatus.USED.value:
+                            ip_addr.status = IPStatus.OFFLINE.value
+                            logger.info(f"Marking {ip_str} as OFFLINE (not seen for {time_since_last_seen.total_seconds()/3600:.1f} hours)")
+
+            # Try to get hostname from switches table if we don't have one
+            if not ip_addr.hostname:
+                # Query switches table by IP address (use host() to strip netmask)
+                from sqlalchemy.sql import text as sql_text
+                switch_result = await db.execute(
+                    select(Switch.name)
+                    .where(sql_text("host(switches.ip_address) = :ip"))
+                    .params(ip=ip_str)
+                )
+                switch_name = switch_result.scalar_one_or_none()
+
+                if switch_name:
+                    ip_addr.hostname = switch_name
+                    ip_addr.hostname_source = 'SWITCH'
+                    logger.info(f"Hostname from switches table for {ip_str}: {switch_name}")
 
             # Update switch info if we have MAC address
             if mac_to_lookup:
@@ -422,7 +520,6 @@ class IPAMService:
         try:
             # First, try to find MAC address in mac_table (most accurate)
             from models.mac_table import MACTable
-            from sqlalchemy import cast, Text
 
             result = await db.execute(
                 select(MACTable, Switch)
@@ -514,8 +611,8 @@ class IPAMService:
 
         stats = {status.value: 0 for status in IPStatus}
         for row in result:
-            # Ensure we use the string value as key
-            status_key = row.status if isinstance(row.status, str) else row.status.value
+            # row.status is IPStatus enum, use .value to get string
+            status_key = row.status.value if hasattr(row.status, 'value') else row.status
             stats[status_key] = row.count
 
         total_ips = sum(stats.values())
@@ -620,24 +717,48 @@ class IPAMService:
                     skipped += 1
                     continue
 
-                # Create subnet
-                subnet = IPSubnet(
-                    name=subnet_data.get('name'),
-                    network=normalized_network,
-                    description=subnet_data.get('description'),
-                    vlan_id=subnet_data.get('vlan_id'),
-                    gateway=subnet_data.get('gateway'),
-                    dns_servers=subnet_data.get('dns_servers'),
-                    enabled=subnet_data.get('enabled', True),
-                    auto_scan=subnet_data.get('auto_scan', True),
-                    scan_interval=subnet_data.get('scan_interval', 3600)
-                )
+                # Check for IP address conflicts (overlapping subnets)
+                # Check if any IP in this new subnet already exists
+                try:
+                    first_ip = str(list(net.hosts())[0] if net.num_addresses > 2 else net.network_address)
+                    # Use text cast to compare INET with string
+                    ip_check = await db.execute(
+                        select(IPAddress).where(cast(IPAddress.ip_address, Text) == first_ip)
+                    )
+                    if ip_check.scalar_one_or_none():
+                        logger.warning(f"Skipping subnet {normalized_network}: IP addresses already exist (overlapping subnet)")
+                        skipped += 1
+                        errors.append({
+                            'index': idx,
+                            'network': network_str,
+                            'name': subnet_data.get('name'),
+                            'error': 'IP地址冲突：该网段的IP地址已存在（可能与其他子网重叠）'
+                        })
+                        continue
+                except (IndexError, AttributeError):
+                    # Handle edge case where network has no hosts
+                    pass
 
-                db.add(subnet)
-                await db.flush()  # Get subnet ID
+                # Use a savepoint for each subnet
+                async with db.begin_nested():
+                    # Create subnet
+                    subnet = IPSubnet(
+                        name=subnet_data.get('name'),
+                        network=normalized_network,
+                        description=subnet_data.get('description'),
+                        vlan_id=subnet_data.get('vlan_id'),
+                        gateway=subnet_data.get('gateway'),
+                        dns_servers=subnet_data.get('dns_servers'),
+                        enabled=subnet_data.get('enabled', True),
+                        auto_scan=subnet_data.get('auto_scan', True),
+                        scan_interval=subnet_data.get('scan_interval', 3600)
+                    )
 
-                # Generate IP addresses
-                await self._generate_ip_addresses(db, subnet, net)
+                    db.add(subnet)
+                    await db.flush()  # Get subnet ID
+
+                    # Generate IP addresses
+                    await self._generate_ip_addresses(db, subnet, net)
 
                 imported_ids.append(subnet.id)
                 existing_networks.add(normalized_network)
@@ -655,6 +776,7 @@ class IPAMService:
                 }
                 errors.append(error_detail)
                 logger.error(f"Failed to import subnet {idx + 1}/{total}: {str(e)}")
+                # Continue to next subnet
 
         # Commit all changes
         try:
@@ -723,7 +845,7 @@ class IPAMService:
 
             try:
                 logger.info(f"Scanning subnet: {subnet.name} ({subnet.network})")
-                scan_result = await self.scan_subnet(db, subnet.id, scan_type="quick")
+                scan_result = await self.scan_subnet(db, subnet.id, scan_type="full")
                 scanned_count += 1
                 total_ips += scan_result.get('total_scanned', 0)
                 logger.info(
@@ -778,7 +900,6 @@ class IPAMService:
             raise ValueError(f"Invalid network format: {str(e)}")
 
         # Check if network exists in IPAM
-        from sqlalchemy import cast, String
         result = await db.execute(
             select(IPSubnet).where(
                 cast(IPSubnet.network, String) == str(net)

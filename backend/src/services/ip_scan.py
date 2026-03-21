@@ -9,6 +9,15 @@ from concurrent.futures import ThreadPoolExecutor
 from core.config import settings
 from utils.logger import logger
 
+# Try to import dnspython, but make it optional
+try:
+    import dns.resolver
+    import dns.reversename
+    DNS_AVAILABLE = True
+except ImportError:
+    DNS_AVAILABLE = False
+    logger.warning("dnspython not available - DNS PTR lookups will be disabled")
+
 
 class IPScanService:
     """Service for scanning IP addresses"""
@@ -24,10 +33,13 @@ class IPScanService:
 
         logger.info(f"IP scan service initialized: ping={self.ping_cmd}, arp={self.arp_cmd}, nmap={self.nmap_cmd}")
 
-    def _ping_ip(self, ip: str, timeout: int = 2) -> tuple[bool, Optional[int]]:
+    def _ping_ip(self, ip: str, timeout: int = 3) -> tuple[bool, Optional[int]]:
         """
         Ping an IP address to check reachability
         Returns: (is_reachable, response_time_ms)
+
+        Note: Default timeout increased to 3 seconds to accommodate slower-responding hosts
+        (Windows hosts, hosts waking from sleep, etc.)
         """
         try:
             # Use ping command with full path
@@ -70,12 +82,67 @@ class IPScanService:
 
     def _resolve_hostname(self, ip: str) -> Optional[str]:
         """
-        Reverse DNS lookup to get hostname
+        Reverse DNS lookup to get hostname (basic method using socket)
         """
         try:
             hostname, _, _ = socket.gethostbyaddr(ip)
             return hostname
         except Exception:
+            return None
+
+    def _dns_ptr_lookup(self, ip: str, timeout: int = 5, dns_servers: Optional[List[str]] = None) -> Optional[str]:
+        """
+        DNS PTR (reverse DNS) lookup to get hostname
+        Uses dnspython for more reliable PTR lookups
+
+        Args:
+            ip: IP address to lookup
+            timeout: Query timeout in seconds
+            dns_servers: List of DNS server IPs to use (if None, uses system default)
+
+        Returns: DNS hostname from PTR record or None
+        """
+        if not DNS_AVAILABLE:
+            logger.debug("DNS PTR lookup skipped - dnspython not available")
+            return None
+
+        try:
+            # Create reverse DNS name (e.g., 1.0.168.192.in-addr.arpa)
+            rev_name = dns.reversename.from_address(ip)
+
+            # Configure resolver with timeout
+            resolver = dns.resolver.Resolver()
+            resolver.timeout = timeout
+            resolver.lifetime = timeout
+
+            # Use custom DNS servers if provided
+            if dns_servers:
+                resolver.nameservers = dns_servers
+                logger.debug(f"Using DNS servers: {dns_servers}")
+
+            # Perform PTR query
+            answers = resolver.resolve(rev_name, "PTR")
+
+            # Get first PTR record
+            if answers:
+                ptr_record = str(answers[0])
+                # Remove trailing dot if present
+                if ptr_record.endswith('.'):
+                    ptr_record = ptr_record[:-1]
+                logger.debug(f"DNS PTR lookup for {ip}: {ptr_record}")
+                return ptr_record
+
+            return None
+
+        except dns.resolver.NXDOMAIN:
+            # No PTR record exists
+            logger.debug(f"No PTR record for {ip}")
+            return None
+        except dns.resolver.Timeout:
+            logger.debug(f"DNS PTR lookup timeout for {ip}")
+            return None
+        except Exception as e:
+            logger.debug(f"DNS PTR lookup failed for {ip}: {str(e)}")
             return None
 
     def _get_mac_address(self, ip: str) -> Optional[str]:
@@ -150,6 +217,10 @@ class IPScanService:
     def _detect_os_simple(self, ip: str) -> Dict[str, Optional[str]]:
         """
         Simple OS detection using TTL values
+        TTL values typically used by different OS:
+        - Linux/Unix: 64
+        - Windows: 128
+        - Network devices (routers/switches): 255
         """
         try:
             # Create environment without proxy settings
@@ -173,6 +244,7 @@ class IPScanService:
                     ttl = int(match.group(1))
 
                     # Guess OS based on TTL
+                    # TTL decreases by 1 for each hop, so we check ranges
                     if ttl <= 64:
                         return {
                             'os_type': 'linux',
@@ -188,6 +260,7 @@ class IPScanService:
                             'os_vendor': 'Microsoft'
                         }
                     elif ttl <= 255:
+                        # Network devices typically use TTL 255
                         return {
                             'os_type': 'network',
                             'os_name': 'Network Device',
@@ -212,7 +285,7 @@ class IPScanService:
 
     def _parse_nmap_output(self, output: str) -> Dict[str, Optional[str]]:
         """
-        Parse nmap output to extract OS information
+        Parse nmap output to extract OS information and device type
         """
         os_info = {
             'os_type': None,
@@ -243,6 +316,12 @@ class IPScanService:
                             os_info['os_version'] = 'Server 2022'
                         elif 'windows server 2019' in os_lower:
                             os_info['os_version'] = 'Server 2019'
+                        elif 'windows server 2016' in os_lower:
+                            os_info['os_version'] = 'Server 2016'
+                        elif 'windows 8' in os_lower:
+                            os_info['os_version'] = '8'
+                        elif 'windows 7' in os_lower:
+                            os_info['os_version'] = '7'
 
                     elif 'linux' in os_lower or 'ubuntu' in os_lower or 'centos' in os_lower or 'redhat' in os_lower or 'debian' in os_lower:
                         os_info['os_type'] = 'linux'
@@ -273,6 +352,34 @@ class IPScanService:
                         os_info['os_type'] = 'macos'
                         os_info['os_vendor'] = 'Apple'
 
+                    # Detect network devices
+                    elif any(keyword in os_lower for keyword in ['cisco', 'ios', 'catalyst', 'nexus']):
+                        os_info['os_type'] = 'network'
+                        os_info['os_vendor'] = 'Cisco'
+                        os_info['os_name'] = 'Cisco Network Device'
+                    elif any(keyword in os_lower for keyword in ['juniper', 'junos']):
+                        os_info['os_type'] = 'network'
+                        os_info['os_vendor'] = 'Juniper'
+                        os_info['os_name'] = 'Juniper Network Device'
+                    elif any(keyword in os_lower for keyword in ['hp', 'aruba', 'procurve']):
+                        os_info['os_type'] = 'network'
+                        os_info['os_vendor'] = 'HP/Aruba'
+                        os_info['os_name'] = 'HP/Aruba Network Device'
+                    elif any(keyword in os_lower for keyword in ['nokia', 'alcatel']):
+                        os_info['os_type'] = 'network'
+                        os_info['os_vendor'] = 'Nokia'
+                        os_info['os_name'] = 'Nokia Network Device'
+                    elif any(keyword in os_lower for keyword in ['dell', 'force10']):
+                        os_info['os_type'] = 'network'
+                        os_info['os_vendor'] = 'Dell'
+                        os_info['os_name'] = 'Dell Network Device'
+                    elif 'printer' in os_lower:
+                        os_info['os_type'] = 'printer'
+                        os_info['os_name'] = 'Network Printer'
+                    elif any(keyword in os_lower for keyword in ['camera', 'ipc', 'surveillance']):
+                        os_info['os_type'] = 'camera'
+                        os_info['os_name'] = 'IP Camera'
+
                     break
 
         except Exception as e:
@@ -280,16 +387,48 @@ class IPScanService:
 
         return os_info
 
-    def _scan_single_ip(self, ip: str, scan_type: str = "full") -> Dict:
+    def _scan_single_ip(
+        self,
+        ip: str,
+        scan_type: str = "full",
+        snmp_profile: Optional[Dict] = None,
+        dns_servers: Optional[List[str]] = None
+    ) -> Dict:
         """
-        Scan a single IP address
-        scan_type: 'quick' (ping only) or 'full' (ping + hostname + MAC + OS)
+        Scan a single IP address with integrated Ping+DNS+SNMP workflow
+
+        Args:
+            ip: IP address to scan
+            scan_type: 'quick' (ping only) or 'full' (ping + DNS + SNMP + MAC + OS)
+            snmp_profile: Optional SNMP profile for device identification
+                          Dict with keys: username, auth_protocol, auth_password_encrypted,
+                          priv_protocol, priv_password_encrypted, port, timeout
+            dns_servers: Optional list of DNS server IPs for PTR lookups
+
+        Returns:
+            Dict with scan results including:
+            - is_reachable, response_time
+            - hostname (best available from SNMP/DNS/ARP priority)
+            - hostname_source (SNMP, DNS, ARP)
+            - dns_name (from DNS PTR)
+            - system_name (from SNMP sysName)
+            - contact, location, machine_type, vendor (from SNMP)
+            - last_boot_time (from SNMP sysUpTime)
+            - mac_address, os_type, os_name, etc.
         """
         result = {
             'ip_address': ip,
             'is_reachable': False,
             'response_time': None,
             'hostname': None,
+            'hostname_source': None,  # SNMP, DNS, ARP, or None
+            'dns_name': None,  # DNS PTR lookup result
+            'system_name': None,  # SNMP sysName
+            'contact': None,  # SNMP sysContact
+            'location': None,  # SNMP sysLocation
+            'machine_type': None,  # SNMP sysDescr parsed
+            'vendor': None,  # SNMP sysDescr parsed
+            'last_boot_time': None,  # SNMP sysUpTime converted
             'mac_address': None,
             'os_type': None,
             'os_name': None,
@@ -312,48 +451,109 @@ class IPScanService:
         if scan_type == "quick":
             return result
 
-        # Step 3: Full scan - get hostname
-        hostname = self._resolve_hostname(ip)
-        if hostname:
-            result['hostname'] = hostname
+        # Step 3: SNMP device identification (HIGHEST PRIORITY)
+        # Try SNMP first if profile is provided
+        if snmp_profile:
+            try:
+                from services.snmp_service import snmp_service
+                import asyncio
 
-        # Step 4: Get MAC address
+                # Get device identification via SNMP
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    snmp_data = loop.run_until_complete(
+                        snmp_service.get_device_identification(ip, snmp_profile)
+                    )
+                    if snmp_data:
+                        result['system_name'] = snmp_data.get('system_name')
+                        result['contact'] = snmp_data.get('contact')
+                        result['location'] = snmp_data.get('location')
+                        result['last_boot_time'] = snmp_data.get('last_boot_time')
+                        result['machine_type'] = snmp_data.get('machine_type')
+                        result['vendor'] = snmp_data.get('vendor')
+
+                        # SNMP sysName is the highest priority hostname
+                        if result['system_name']:
+                            result['hostname'] = result['system_name']
+                            result['hostname_source'] = 'SNMP'
+                            logger.debug(f"Hostname from SNMP for {ip}: {result['system_name']}")
+                finally:
+                    loop.close()
+
+            except Exception as e:
+                logger.debug(f"SNMP device identification failed for {ip}: {str(e)}")
+
+        # Step 4: DNS PTR lookup (SECOND PRIORITY)
+        # Only query DNS if we didn't get hostname from SNMP
+        if not result['hostname']:
+            dns_name = self._dns_ptr_lookup(ip, dns_servers=dns_servers)
+            if dns_name:
+                result['dns_name'] = dns_name
+                result['hostname'] = dns_name
+                result['hostname_source'] = 'DNS'
+                logger.debug(f"Hostname from DNS for {ip}: {dns_name}")
+
+        # Step 5: Get MAC address (can be used for ARP-based hostname later)
         mac = self._get_mac_address(ip)
         if mac:
             result['mac_address'] = mac
 
-        # Step 5: OS detection
+        # Step 6: OS detection
         os_info = self._detect_os(ip)
         result.update(os_info)
 
         return result
 
-    async def scan_ip_async(self, ip: str, scan_type: str = "full") -> Dict:
+    async def scan_ip_async(
+        self,
+        ip: str,
+        scan_type: str = "full",
+        snmp_profile: Optional[Dict] = None,
+        dns_servers: Optional[List[str]] = None
+    ) -> Dict:
         """
-        Async wrapper for scanning a single IP
+        Async wrapper for scanning a single IP with optional SNMP profile
+
+        Args:
+            ip: IP address to scan
+            scan_type: 'quick' or 'full'
+            snmp_profile: Optional SNMP profile for device identification
+            dns_servers: Optional list of DNS server IPs for PTR lookups
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self.executor,
+        from functools import partial
+        scan_func = partial(
             self._scan_single_ip,
-            ip,
-            scan_type
+            ip=ip,
+            scan_type=scan_type,
+            snmp_profile=snmp_profile,
+            dns_servers=dns_servers
         )
+        return await loop.run_in_executor(self.executor, scan_func)
 
     async def scan_multiple_ips(
         self,
         ip_list: List[str],
-        scan_type: str = "full"
+        scan_type: str = "full",
+        snmp_profile: Optional[Dict] = None,
+        dns_servers: Optional[List[str]] = None
     ) -> List[Dict]:
         """
-        Scan multiple IPs concurrently
+        Scan multiple IPs concurrently with optional SNMP profile
+
+        Args:
+            ip_list: List of IP addresses to scan
+            scan_type: 'quick' or 'full'
+            snmp_profile: Optional SNMP profile for all IPs
+            dns_servers: Optional list of DNS server IPs for PTR lookups
         """
-        logger.info(f"Starting scan of {len(ip_list)} IPs (type: {scan_type})")
+        logger.info(f"Starting scan of {len(ip_list)} IPs (type: {scan_type}, SNMP: {'enabled' if snmp_profile else 'disabled'})")
         start_time = time.time()
 
         # Create tasks for all IPs
         tasks = [
-            self.scan_ip_async(ip, scan_type)
+            self.scan_ip_async(ip, scan_type, snmp_profile, dns_servers)
             for ip in ip_list
         ]
 

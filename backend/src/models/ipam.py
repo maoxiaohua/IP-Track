@@ -14,6 +14,53 @@ class IPStatus(str, enum.Enum):
     OFFLINE = "offline"         # 离线
 
 
+class HostnameSource(str, enum.Enum):
+    """Hostname source - priority: SNMP > DNS > ARP > MANUAL"""
+    SNMP = "SNMP"        # From SNMP sysName (OID 1.3.6.1.2.1.1.5.0)
+    DNS = "DNS"          # From DNS reverse lookup (PTR record)
+    ARP = "ARP"          # From switch ARP table
+    MANUAL = "MANUAL"    # Manually entered by user
+
+
+class SNMPProfile(Base):
+    """SNMP profile for device identification and monitoring"""
+
+    __tablename__ = "snmp_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True)
+    version = Column(String(10), default='v3', nullable=False)  # v2c or v3
+
+    # SNMPv3 Authentication
+    username = Column(String(100), nullable=True)
+    auth_protocol = Column(String(20), nullable=True)  # MD5, SHA, SHA-256, etc.
+    auth_password_encrypted = Column(Text, nullable=True)
+
+    # SNMPv3 Privacy
+    priv_protocol = Column(String(20), nullable=True)  # DES, AES, AES-256, etc.
+    priv_password_encrypted = Column(Text, nullable=True)
+
+    # SNMPv2c Community
+    community_encrypted = Column(Text, nullable=True)
+
+    # Common settings
+    port = Column(Integer, default=161, nullable=False)
+    timeout = Column(Integer, default=5, nullable=False)
+    retries = Column(Integer, default=3, nullable=False)
+
+    # Metadata
+    description = Column(Text, nullable=True)
+    enabled = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relationships
+    subnets = relationship("IPSubnet", back_populates="snmp_profile")
+
+    def __repr__(self):
+        return f"<SNMPProfile(id={self.id}, name='{self.name}', version='{self.version}')>"
+
+
 class IPSubnet(Base):
     """IP subnet model for IPAM"""
 
@@ -29,37 +76,53 @@ class IPSubnet(Base):
     enabled = Column(Boolean, default=True, nullable=False)
     auto_scan = Column(Boolean, default=True, nullable=False)  # 是否自动扫描
     scan_interval = Column(Integer, default=3600, nullable=False)  # 扫描间隔（秒）
+    snmp_profile_id = Column(Integer, ForeignKey("snmp_profiles.id", ondelete="SET NULL"), nullable=True, index=True)
     last_scan_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     # Relationships
     ip_addresses = relationship("IPAddress", back_populates="subnet", cascade="all, delete-orphan")
+    snmp_profile = relationship("SNMPProfile", back_populates="subnets")
 
     def __repr__(self):
         return f"<IPSubnet(id={self.id}, name='{self.name}', network='{self.network}')>"
 
 
 class IPAddress(Base):
-    """IP address model for IPAM"""
+    """IP address model for IPAM - SolarWinds-style"""
 
     __tablename__ = "ip_addresses"
 
     id = Column(Integer, primary_key=True, index=True)
     subnet_id = Column(Integer, ForeignKey("ip_subnets.id", ondelete="CASCADE"), nullable=False, index=True)
     ip_address = Column(INET, nullable=False, unique=True, index=True)
-    status = Column(SQLEnum(IPStatus, values_callable=lambda x: [e.value for e in x]), default=IPStatus.AVAILABLE, nullable=False, index=True)
+    status = Column(
+        SQLEnum(IPStatus, values_callable=lambda x: [e.value for e in x], name='ipstatus', native_enum=True, create_constraint=False),
+        default=IPStatus.AVAILABLE,
+        nullable=False,
+        index=True
+    )
 
-    # 基本信息
-    hostname = Column(String(255), nullable=True)
+    # Hostname information (SolarWinds-style)
+    hostname = Column(String(255), nullable=True)  # Best hostname (from hostname_source priority)
+    hostname_source = Column(String(20), nullable=True, index=True)
+    dns_name = Column(String(255), nullable=True, index=True)  # From DNS PTR lookup
+    system_name = Column(String(255), nullable=True, index=True)  # From SNMP sysName
+
+    # Device information
     mac_address = Column(MACADDR, nullable=True, index=True)
+    vendor = Column(String(100), nullable=True)  # MAC vendor or device vendor
     description = Column(Text, nullable=True)
+    contact = Column(String(255), nullable=True)  # From SNMP sysContact
+    location = Column(String(255), nullable=True)  # From SNMP sysLocation
+    machine_type = Column(String(255), nullable=True)  # From SNMP or OS detection (increased from 100)
 
-    # 网络信息
+    # Network information
     is_reachable = Column(Boolean, default=False, nullable=False)
     response_time = Column(Integer, nullable=True)  # Ping 响应时间（毫秒）
 
-    # 操作系统信息
+    # Operating system information
     os_type = Column(String(50), nullable=True)  # windows, linux, macos, etc.
     os_name = Column(String(100), nullable=True)  # Windows 11, Ubuntu 22.04, etc.
     os_version = Column(String(100), nullable=True)
@@ -70,8 +133,9 @@ class IPAddress(Base):
     switch_port = Column(String(50), nullable=True)
     vlan_id = Column(Integer, nullable=True)
 
-    # 扫描信息
-    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    # Timing information (SolarWinds-style)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)  # Last successful ping - CRITICAL for "Last Response"
+    last_boot_time = Column(DateTime(timezone=True), nullable=True)  # From SNMP sysUpTime
     last_scan_at = Column(DateTime(timezone=True), nullable=True)
     scan_count = Column(Integer, default=0, nullable=False)
 

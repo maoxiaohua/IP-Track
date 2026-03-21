@@ -4,7 +4,7 @@
       <template #header>
         <div class="card-header">
           <h2>Query History</h2>
-          <el-button @click="loadHistory" :icon="Refresh">Refresh</el-button>
+          <el-button type="info" plain @click="loadHistory" :icon="Refresh">Refresh</el-button>
         </div>
       </template>
 

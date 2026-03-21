@@ -34,6 +34,9 @@ class SNMPService:
     OID_SYS_NAME = '1.3.6.1.2.1.1.5.0'       # sysName (hostname)
     OID_SYS_DESCR = '1.3.6.1.2.1.1.1.0'      # sysDescr (system description)
     OID_SYS_OBJECT_ID = '1.3.6.1.2.1.1.2.0'  # sysObjectID (vendor enterprise OID)
+    OID_SYS_CONTACT = '1.3.6.1.2.1.1.4.0'    # sysContact (contact info)
+    OID_SYS_LOCATION = '1.3.6.1.2.1.1.6.0'   # sysLocation (location)
+    OID_SYS_UPTIME = '1.3.6.1.2.1.1.3.0'     # sysUpTime (time ticks since boot)
     # ENTITY-MIB: physical chassis description (index 1 = chassis)
     # Returns hardware platform string, e.g. "Nokia 7220 IXR-D2" on SR Linux
     OID_ENTITY_PHYS_DESCR = '1.3.6.1.2.1.47.1.1.1.1.2.1'
@@ -56,7 +59,7 @@ class SNMPService:
     OID_IF_HIGH_SPEED = '1.3.6.1.2.1.31.1.1.1.15'  # ifHighSpeed (in Mbps)
 
     def __init__(self):
-        self.engine = SnmpEngine()
+        # Don't create a singleton engine - create per-request to avoid event loop issues
         logger.info("SNMP service initialized with asyncio")
 
     def _create_snmp_auth(
@@ -120,6 +123,9 @@ class SNMPService:
         """
         try:
             results = []
+            # Create a new SnmpEngine for each request to avoid event loop issues
+            engine = SnmpEngine()
+
             # Create transport target using .create() method for pysnmp 7.x
             transport = await UdpTransportTarget.create((target_ip, port), timeout=timeout, retries=retries)
 
@@ -129,7 +135,7 @@ class SNMPService:
 
             while True:
                 errorIndication, errorStatus, errorIndex, varBinds = await next_cmd(
-                    self.engine,
+                    engine,
                     auth_data,
                     transport,
                     ContextData(),
@@ -172,12 +178,15 @@ class SNMPService:
         try:
             logger.debug(f"Starting SNMP GET on {target_ip} OID {oid} with timeout={timeout}s")
 
+            # Create a new SnmpEngine for each request to avoid event loop issues
+            engine = SnmpEngine()
+
             # Create transport target using .create() method for pysnmp 7.x
             transport = await UdpTransportTarget.create((target_ip, port), timeout=timeout, retries=2)
             logger.debug(f"Transport created for {target_ip}:{port}")
 
             errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
-                self.engine,
+                engine,
                 auth_data,
                 transport,
                 ContextData(),
@@ -561,6 +570,169 @@ class SNMPService:
 
         except Exception as e:
             logger.error(f"Failed to get device info from {switch_ip}: {str(e)}")
+            return None
+
+    async def get_device_identification(
+        self,
+        target_ip: str,
+        snmp_profile: Dict
+    ) -> Optional[Dict]:
+        """
+        Get device identification info for IPAM (SolarWinds-style)
+
+        Queries the following SNMP OIDs:
+        - sysName (1.3.6.1.2.1.1.5.0): System hostname
+        - sysContact (1.3.6.1.2.1.1.4.0): Contact information
+        - sysLocation (1.3.6.1.2.1.1.6.0): Physical location
+        - sysUpTime (1.3.6.1.2.1.1.3.0): Time since boot
+        - sysDescr (1.3.6.1.2.1.1.1.0): System description (for machine_type/vendor)
+
+        Args:
+            target_ip: IP address of the device to query
+            snmp_profile: SNMP profile dictionary with credentials
+
+        Returns:
+            Dictionary with keys:
+            - system_name: SNMP sysName (hostname)
+            - contact: SNMP sysContact
+            - location: SNMP sysLocation
+            - last_boot_time: Calculated datetime from sysUpTime
+            - machine_type: Extracted from sysDescr
+            - vendor: Extracted from sysDescr
+            Or None if SNMP query fails
+        """
+        try:
+            logger.debug(f"Getting device identification from {target_ip} via SNMP")
+
+            # Decrypt SNMP passwords
+            auth_password = decrypt_password(snmp_profile['auth_password_encrypted'])
+            priv_password = decrypt_password(snmp_profile['priv_password_encrypted'])
+
+            # Create SNMP authentication
+            auth_data = self._create_snmp_auth(
+                username=snmp_profile['username'],
+                auth_protocol=snmp_profile.get('auth_protocol', 'SHA'),
+                auth_password=auth_password,
+                priv_protocol=snmp_profile.get('priv_protocol', 'AES'),
+                priv_password=priv_password
+            )
+
+            port = snmp_profile.get('port', 161)
+            timeout = snmp_profile.get('timeout', 5)
+
+            # Query all OIDs
+            result = {
+                'system_name': None,
+                'contact': None,
+                'location': None,
+                'last_boot_time': None,
+                'machine_type': None,
+                'vendor': None
+            }
+
+            # sysName (hostname)
+            sys_name = await self._get_oid(target_ip, self.OID_SYS_NAME, auth_data, port, timeout)
+            if sys_name:
+                result['system_name'] = ''.join(c for c in str(sys_name) if c.isprintable()).strip()
+
+            # sysContact
+            sys_contact = await self._get_oid(target_ip, self.OID_SYS_CONTACT, auth_data, port, timeout)
+            if sys_contact:
+                result['contact'] = str(sys_contact).strip()
+
+            # sysLocation
+            sys_location = await self._get_oid(target_ip, self.OID_SYS_LOCATION, auth_data, port, timeout)
+            if sys_location:
+                result['location'] = str(sys_location).strip()
+
+            # sysDescr (for machine_type and vendor extraction)
+            sys_descr = await self._get_oid(target_ip, self.OID_SYS_DESCR, auth_data, port, timeout)
+            if sys_descr:
+                descr = str(sys_descr).strip()
+                # Try to extract vendor and machine type from sysDescr
+                descr_lower = descr.lower()
+
+                # Enhanced vendor detection
+                if 'cisco' in descr_lower:
+                    result['vendor'] = 'Cisco'
+                elif 'dell' in descr_lower:
+                    result['vendor'] = 'Dell'
+                elif 'hp' in descr_lower or 'hewlett' in descr_lower or 'hewlett-packard' in descr_lower:
+                    result['vendor'] = 'HP'
+                elif 'juniper' in descr_lower:
+                    result['vendor'] = 'Juniper'
+                elif 'nokia' in descr_lower or 'alcatel' in descr_lower:
+                    result['vendor'] = 'Nokia'
+                elif 'huawei' in descr_lower:
+                    result['vendor'] = 'Huawei'
+                elif 'zte' in descr_lower:
+                    result['vendor'] = 'ZTE'
+                elif 'aruba' in descr_lower:
+                    result['vendor'] = 'Aruba'
+                elif 'fortinet' in descr_lower or 'fortigate' in descr_lower:
+                    result['vendor'] = 'Fortinet'
+
+                # Enhanced device type detection
+                machine_type = descr.split('\n')[0][:200] if descr else None
+
+                # Categorize device types based on sysDescr patterns
+                if 'switch' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} Switch"
+                elif 'router' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} Router"
+                elif 'firewall' in descr_lower or 'fortigate' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} Firewall"
+                elif 'access point' in descr_lower or 'wireless' in descr_lower or 'ap' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} Access Point"
+                elif 'base station' in descr_lower or 'bts' in descr_lower or 'enodeb' in descr_lower or 'gnodeb' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Nokia')} Base Station"
+                elif 'server' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} Server"
+                elif 'workstation' in descr_lower or 'pc' in descr_lower or 'desktop' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} PC"
+                elif 'laptop' in descr_lower or 'notebook' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} Laptop"
+                elif 'printer' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} Printer"
+                elif 'camera' in descr_lower or 'ipc' in descr_lower:
+                    result['machine_type'] = f"{result.get('vendor', 'Unknown')} IP Camera"
+                else:
+                    # Use raw sysDescr as fallback
+                    result['machine_type'] = machine_type
+
+            # sysUpTime (time ticks since boot, convert to last_boot_time)
+            sys_uptime = await self._get_oid(target_ip, self.OID_SYS_UPTIME, auth_data, port, timeout)
+            if sys_uptime:
+                try:
+                    # sysUpTime is in hundredths of seconds
+                    uptime_ticks = int(sys_uptime)
+                    uptime_seconds = uptime_ticks / 100
+
+                    # Calculate last boot time
+                    from datetime import datetime, timedelta, timezone
+                    now = datetime.now(timezone.utc)
+                    last_boot = now - timedelta(seconds=uptime_seconds)
+                    result['last_boot_time'] = last_boot.isoformat()
+
+                    logger.debug(f"Device {target_ip} uptime: {uptime_seconds}s, last boot: {last_boot}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse sysUpTime for {target_ip}: {str(e)}")
+
+            # Return result if we got at least one field
+            if result['system_name'] or result['contact'] or result['location']:
+                logger.info(
+                    f"Got device identification from {target_ip}: "
+                    f"sysName={result['system_name']}, "
+                    f"location={result['location']}, "
+                    f"vendor={result['vendor']}"
+                )
+                return result
+            else:
+                logger.warning(f"No device identification data retrieved from {target_ip}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Failed to get device identification from {target_ip}: {str(e)}")
             return None
 
     # Keep compatibility with async wrappers

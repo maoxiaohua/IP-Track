@@ -5,7 +5,7 @@
         <div class="card-header">
           <h2>Switch Management</h2>
           <div class="header-actions">
-            <el-button @click="loadSwitches" :loading="loading">
+            <el-button type="info" plain @click="loadSwitches" :loading="loading">
               <el-icon><Refresh /></el-icon>
               刷新列表
             </el-button>

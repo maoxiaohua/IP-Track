@@ -55,20 +55,12 @@
 
       <!-- Charts -->
       <el-row :gutter="20" style="margin-bottom: 20px">
-        <el-col :span="12">
+        <el-col :span="24">
           <el-card shadow="hover">
             <template #header>
               <h3 style="margin: 0">IP 地址分布</h3>
             </template>
             <Chart :option="ipDistributionOption" height="220px" />
-          </el-card>
-        </el-col>
-        <el-col :span="12">
-          <el-card shadow="hover">
-            <template #header>
-              <h3 style="margin: 0">子网利用率</h3>
-            </template>
-            <Chart :option="subnetUtilizationOption" height="220px" />
           </el-card>
         </el-col>
       </el-row>
@@ -704,11 +696,20 @@ const subnetPagination = reactive({
   pageSize: 20
 })
 
-// Paginated subnets - computed property for client-side pagination
+// Paginated subnets - computed property for client-side pagination with utilization-based sorting
 const paginatedSubnets = computed(() => {
+  // Sort subnets by utilization_percent in descending order (high to low)
+  const sortedSubnets = [...subnets.value].sort((a, b) => {
+    // Handle undefined/null values - treat them as 0%
+    const aUtil = a.utilization_percent ?? 0
+    const bUtil = b.utilization_percent ?? 0
+    return bUtil - aUtil  // Descending order (highest utilization first)
+  })
+
+  // Apply pagination
   const start = (subnetPagination.currentPage - 1) * subnetPagination.pageSize
   const end = start + subnetPagination.pageSize
-  return subnets.value.slice(start, end)
+  return sortedSubnets.slice(start, end)
 })
 
 const subnetForm = reactive({
@@ -765,52 +766,6 @@ const ipDistributionOption = computed(() => ({
     }
   ]
 }))
-
-const subnetUtilizationOption = computed(() => {
-  // Handle case where subnets might be undefined or null
-  const validSubnets = subnets.value || []
-
-  return {
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: {
-        type: 'shadow'
-      }
-    },
-    xAxis: {
-      type: 'category',
-      data: validSubnets.map(s => s.subnet_name),
-      axisLabel: {
-        rotate: 45,
-        interval: 0
-      }
-    },
-    yAxis: {
-      type: 'value',
-      max: 100,
-      axisLabel: {
-        formatter: '{value}%'
-      }
-    },
-    series: [
-      {
-        name: '利用率',
-        type: 'bar',
-        data: validSubnets.map(s => ({
-          value: s.utilization_percent,
-          itemStyle: {
-            color: s.utilization_percent < 50 ? '#67c23a' : s.utilization_percent < 80 ? '#e6a23c' : '#f56c6c'
-          }
-        })),
-        label: {
-          show: true,
-          position: 'top',
-          formatter: '{c}%'
-        }
-      }
-    ]
-  }
-})
 
 const loadDashboard = async () => {
   loading.value = true

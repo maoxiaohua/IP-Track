@@ -4,11 +4,12 @@ import Switches from '@/views/Switches.vue'
 import SwitchDetail from '@/views/SwitchDetail.vue'
 import History from '@/views/History.vue'
 import Discovery from '@/views/Discovery.vue'
-import IPAM from '@/views/IPAM.vue'
-import SubnetDetail from '@/views/SubnetDetail.vue'
+import IPAM from '@/views/IPAM_Simple.vue'
+import SubnetDetail from '@/views/SubnetDetail_SolarWinds.vue'
 import CommandTemplates from '@/views/CommandTemplates.vue'
 import Alarms from '@/views/Alarms.vue'
 import OpticalModules from '@/views/OpticalModules.vue'
+import SNMPProfiles from '@/views/SNMPProfiles.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -42,6 +43,12 @@ const router = createRouter({
       name: 'IPAM',
       component: IPAM,
       meta: { title: 'IP Address Management' }
+    },
+    {
+      path: '/snmp-profiles',
+      name: 'SNMPProfiles',
+      component: SNMPProfiles,
+      meta: { title: 'SNMP Profiles', icon: 'Key' }
     },
     {
       path: '/snmp-config',

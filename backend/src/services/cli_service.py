@@ -1184,11 +1184,12 @@ class CLIService:
             model = switch_config.get('model', '')
             name = switch_config.get('name', '')
 
-            # Find matching template
+            # Find matching template (with builtin fallback)
             template = self._find_matching_template(vendor, model, name, templates)
 
             if not template:
-                logger.warning(f"No command template found for {vendor} {model} (name: {name})")
+                # This should rarely happen now that we have builtin fallback
+                logger.error(f"No command template found (even in builtins) for {vendor} {model} (name: {name})")
                 return []
 
             if not template.get('mac_enabled', False) or not template.get('mac_command'):
@@ -1300,35 +1301,31 @@ class CLIService:
                 except:
                     pass
 
-    def _find_matching_template(
+    def _match_from_template_list(
         self,
         vendor: str,
         model: str,
         name: str,
-        templates: Optional[List[Dict]] = None
+        template_list: List[Dict]
     ) -> Optional[Dict]:
         """
-        Find matching command template for a switch
+        Match switch against a list of templates
 
         Args:
             vendor: Switch vendor
             model: Switch model
             name: Switch name
-            templates: Optional list of templates from database
+            template_list: List of template dicts to search
 
         Returns:
             Matching template dict or None
         """
-        if not templates:
-            # Fallback to hardcoded templates
-            templates = self._get_builtin_templates()
-
         vendor_lower = vendor.lower()
         model_lower = model.lower()
         name_lower = name.lower()
 
         # Sort by priority (descending)
-        sorted_templates = sorted(templates, key=lambda t: t.get('priority', 100), reverse=True)
+        sorted_templates = sorted(template_list, key=lambda t: t.get('priority', 100), reverse=True)
 
         for template in sorted_templates:
             if not template.get('enabled', True):
@@ -1361,6 +1358,45 @@ class CLIService:
             return template
 
         return None
+
+    def _find_matching_template(
+        self,
+        vendor: str,
+        model: str,
+        name: str,
+        templates: Optional[List[Dict]] = None
+    ) -> Optional[Dict]:
+        """
+        Find matching command template for a switch with builtin fallback
+
+        Args:
+            vendor: Switch vendor
+            model: Switch model
+            name: Switch name
+            templates: Optional list of templates from database
+
+        Returns:
+            Matching template dict or None
+        """
+        # Try database templates first if provided
+        if templates:
+            matched_template = self._match_from_template_list(vendor, model, name, templates)
+            if matched_template:
+                logger.debug(f"Matched database template for {vendor} {model}")
+                return matched_template
+            # Database templates provided but no match found
+            logger.debug(f"No match in database templates for {vendor} {model}, trying builtin templates")
+
+        # Fallback to builtin templates
+        builtin_templates = self._get_builtin_templates()
+        matched_template = self._match_from_template_list(vendor, model, name, builtin_templates)
+
+        if matched_template:
+            logger.debug(f"Matched builtin template for {vendor} {model}: {matched_template.get('device_type')}")
+        else:
+            logger.warning(f"No template found (database or builtin) for {vendor} {model}")
+
+        return matched_template
 
     def _get_builtin_templates(self) -> List[Dict]:
         """
@@ -1463,11 +1499,12 @@ class CLIService:
             model = switch_config.get('model', '')
             name = switch_config.get('name', '')
 
-            # Find matching template
+            # Find matching template (with builtin fallback)
             template = self._find_matching_template(vendor, model, name, templates)
 
             if not template:
-                logger.warning(f"No command template found for {vendor} {model} (name: {name})")
+                # This should rarely happen now that we have builtin fallback
+                logger.error(f"No command template found (even in builtins) for {vendor} {model} (name: {name})")
                 return []
 
             if not template.get('arp_enabled', False) or not template.get('arp_command'):

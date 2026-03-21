@@ -102,6 +102,143 @@ backend/src/
 
 ---
 
+## Quick Commands
+
+### Docker Container Management
+
+**Restart Backend:**
+```bash
+sudo docker restart iptrack-backend
+```
+
+**Restart Frontend:**
+```bash
+sudo docker restart iptrack-frontend
+```
+
+**Restart Database:**
+```bash
+sudo docker restart iptrack-postgres
+```
+
+**Restart All Services:**
+```bash
+sudo docker restart iptrack-backend iptrack-frontend iptrack-postgres
+```
+
+**View Logs:**
+```bash
+# Backend logs (last 50 lines)
+sudo docker logs iptrack-backend --tail 50
+
+# Follow backend logs in real-time
+sudo docker logs iptrack-backend -f
+
+# Frontend logs
+sudo docker logs iptrack-frontend --tail 50
+
+# Database logs
+sudo docker logs iptrack-postgres --tail 50
+```
+
+**Container Status:**
+```bash
+# Check all containers
+docker ps
+
+# Check specific container
+docker ps | grep iptrack
+```
+
+**Execute Commands in Container:**
+```bash
+# Access backend shell
+sudo docker exec -it iptrack-backend bash
+
+# Access database
+sudo docker exec -it iptrack-postgres psql -U iptrack -d iptrack
+
+# Run Django management command (if applicable)
+sudo docker exec iptrack-backend python manage.py <command>
+```
+
+### Development Workflow Commands
+
+**After Code Changes:**
+```bash
+# 1. Restart backend to apply changes
+sudo docker restart iptrack-backend
+
+# 2. Check logs for errors
+sudo docker logs iptrack-backend --tail 30
+
+# 3. Test API endpoint
+curl http://localhost:8101/api/v1/health
+```
+
+**Database Operations:**
+```bash
+# Backup database
+sudo docker exec iptrack-postgres pg_dump -U iptrack iptrack > backup_$(date +%Y%m%d).sql
+
+# Restore database
+cat backup.sql | sudo docker exec -i iptrack-postgres psql -U iptrack -d iptrack
+
+# Connect to database
+sudo docker exec -it iptrack-postgres psql -U iptrack -d iptrack
+```
+
+**Clear Cache:**
+```bash
+# Redis cache
+sudo docker exec iptrack-redis redis-cli FLUSHALL
+```
+
+### Configuration Changes
+
+**Modify Environment Variables:**
+```bash
+# 1. Edit .env file
+nano /opt/IP-Track/.env
+
+# 2. After changing .env, recreate containers to reload environment variables
+cd /opt/IP-Track
+sudo docker compose down
+sudo docker compose up -d
+
+# OR for single service (e.g., backend only)
+sudo docker stop iptrack-backend && sudo docker rm iptrack-backend
+sudo docker compose up -d backend
+```
+
+**Common Configuration Examples:**
+
+```bash
+# Change IPAM scan interval (default: 60 minutes, example: 6 hours = 360 minutes)
+sed -i 's/IPAM_SCAN_INTERVAL_MINUTES=60/IPAM_SCAN_INTERVAL_MINUTES=360/' /opt/IP-Track/.env
+
+# Change network data collection interval (default: 120 minutes)
+sed -i 's/COLLECTION_INTERVAL_MINUTES=120/COLLECTION_INTERVAL_MINUTES=180/' /opt/IP-Track/.env
+
+# Change worker pool sizes
+sed -i 's/COLLECTION_WORKERS=10/COLLECTION_WORKERS=20/' /opt/IP-Track/.env
+
+# After any .env changes, recreate containers
+cd /opt/IP-Track && sudo docker compose down && sudo docker compose up -d
+```
+
+**Verify Configuration Inside Container:**
+```bash
+# Check environment variables
+sudo docker exec iptrack-backend printenv | grep IPAM
+sudo docker exec iptrack-backend printenv | grep COLLECTION
+
+# Check scheduler logs
+sudo docker logs iptrack-backend | grep "scheduled (interval:"
+```
+
+---
+
 ## Configuration Rules
 
 ### Environment-Based Configuration
@@ -324,6 +461,177 @@ class IPLookupService:
 - Return consistent error responses
 - Document with OpenAPI (FastAPI automatic)
 - Version API endpoints (`/api/v1/...`)
+
+### 8. Open-Source Coding Standards
+
+**MANDATORY**: All code modifications and additions MUST follow these principles:
+
+#### ✅ No Hardcoded Values
+
+**BAD:**
+```python
+# Hardcoded thresholds
+if mac_count > 10:
+    port_type = 'trunk'
+
+# Hardcoded network specifics
+DEFAULT_VLAN = 99
+MANAGEMENT_SUBNET = "10.56.4.0/24"
+
+# Hardcoded device names
+if switch_name.startswith('CNHZ-'):
+    region = 'china'
+```
+
+**GOOD:**
+```python
+# Configuration-driven
+if mac_count > settings.PORT_TRUNK_THRESHOLD:
+    port_type = 'trunk'
+
+# Generic logic
+if subnet.vlan_id:
+    vlan = subnet.vlan_id
+
+# Pattern-based, not hardcoded
+if switch.location:
+    region = switch.location
+```
+
+#### ✅ Applicable to Any Dataset
+
+**BAD:**
+```typescript
+// Assumes specific data structure
+const topSubnets = subnets.slice(0, 5)  // Only shows first 5
+
+// Assumes specific value ranges
+if (utilization > 80) {
+    chartColor = 'red'  // Hardcoded threshold
+}
+```
+
+**GOOD:**
+```typescript
+// Configurable or dynamic
+const topSubnets = subnets.slice(0, displayLimit)
+
+// Percentage-based or configurable
+const chartColor = utilization > utilizationThreshold ? 'red' : 'green'
+
+// Works with any data size
+const sortedSubnets = [...subnets].sort((a, b) => {
+    const aUtil = a.utilization_percent ?? 0
+    const bUtil = b.utilization_percent ?? 0
+    return bUtil - aUtil  // Generic sorting
+})
+```
+
+#### ✅ Automatically Handle Edge Cases (null/undefined)
+
+**BAD:**
+```python
+# Crashes on None
+mac_count = port_analysis.mac_count + 1
+
+# Assumes data exists
+confidence = result['confidence_score']
+```
+
+**GOOD:**
+```python
+# Safe with None
+mac_count = (port_analysis.mac_count or 0) + 1
+
+# Null-safe
+confidence = result.get('confidence_score', 0.0)
+
+# Multiple levels of safety
+if port_analysis and port_analysis.mac_count is not None:
+    mac_count = port_analysis.mac_count
+else:
+    mac_count = 0
+```
+
+**TypeScript:**
+```typescript
+// Bad
+const utilization = subnet.utilization_percent * 100
+
+// Good - handles null/undefined
+const utilization = (subnet.utilization_percent ?? 0) * 100
+
+// Good - optional chaining
+const macCount = portAnalysis?.mac_count ?? 0
+```
+
+#### ✅ Suitable for Open-Source Project Release
+
+**Checklist for Every Code Change:**
+- [ ] No environment-specific values (IPs, passwords, hostnames)
+- [ ] No lab/company-specific logic or naming
+- [ ] All configuration via environment variables or database
+- [ ] Generic error messages (no internal references)
+- [ ] Works with empty/minimal datasets
+- [ ] Handles missing optional fields gracefully
+- [ ] Documentation uses generic examples
+- [ ] No assumptions about deployment environment
+
+**Example - Complete Refactoring:**
+
+**Before (Lab-specific):**
+```python
+# CNHZ-specific logic
+if switch.name.startswith('CNHZ-L3'):
+    priority = 100
+elif switch.name.startswith('CNHZ-L2'):
+    priority = 50
+
+# Hardcoded infrastructure
+REDIS_HOST = "10.56.4.137"
+ALLOWED_SUBNETS = ["10.56.0.0/16", "10.64.0.0/16"]
+```
+
+**After (Open-source ready):**
+```python
+# Generic role-based logic
+if switch.role == 'core':
+    priority = settings.CORE_SWITCH_PRIORITY
+elif switch.role == 'aggregation':
+    priority = settings.AGGREGATION_SWITCH_PRIORITY
+else:
+    priority = settings.ACCESS_SWITCH_PRIORITY
+
+# Configuration-driven
+REDIS_HOST = settings.REDIS_HOST
+# No hardcoded subnet filtering - use database-configured subnets
+```
+
+**Real-World Application (IPAM Module Example):**
+
+```typescript
+// Subnet table sorting - works for any dataset
+const paginatedSubnets = computed(() => {
+    // Generic sorting by utilization (no hardcoded limits)
+    const sortedSubnets = [...subnets.value].sort((a, b) => {
+        // Safe null handling
+        const aUtil = a.utilization_percent ?? 0
+        const bUtil = b.utilization_percent ?? 0
+        return bUtil - aUtil  // Descending order
+    })
+
+    // Dynamic pagination (works with any page size)
+    const start = (currentPage - 1) * pageSize
+    const end = start + pageSize
+    return sortedSubnets.slice(start, end)
+})
+```
+
+**Key Principles:**
+1. **Configuration over Convention**: Use `settings` or database config instead of hardcoded values
+2. **Defensive Programming**: Always check for null/undefined before accessing properties
+3. **Generic Logic**: Write code that works for any network, any dataset, any deployment
+4. **No Assumptions**: Don't assume data exists, specific formats, or value ranges
 
 ---
 

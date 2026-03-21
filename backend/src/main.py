@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
-from api.v1 import switches, lookup, history, discovery, ipam, command_templates, alarms, collection
+from api.v1 import switches, lookup, history, discovery, ipam, command_templates, alarms, collection, snmp_profiles
 from api.routes import snmp_config, network
 from services.status_checker import switch_status_checker
 from services.network_scheduler import network_scheduler
@@ -48,6 +48,7 @@ app.include_router(ipam.router, prefix=settings.API_V1_PREFIX)
 app.include_router(command_templates.router, prefix=settings.API_V1_PREFIX)
 app.include_router(alarms.router, prefix=settings.API_V1_PREFIX)
 app.include_router(collection.router, prefix=settings.API_V1_PREFIX)
+app.include_router(snmp_profiles.router, prefix=settings.API_V1_PREFIX)
 app.include_router(snmp_config.router, prefix=settings.API_V1_PREFIX)
 app.include_router(network.router, prefix=settings.API_V1_PREFIX)
 

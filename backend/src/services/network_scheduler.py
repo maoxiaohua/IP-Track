@@ -34,58 +34,67 @@ class NetworkCollectionScheduler:
         Args:
             interval_minutes: Collection interval (defaults to config value)
         """
-        if interval_minutes is not None:
-            self.collection_interval_minutes = interval_minutes
-        else:
-            self.collection_interval_minutes = settings.COLLECTION_INTERVAL_MINUTES
+        try:
+            if interval_minutes is not None:
+                self.collection_interval_minutes = interval_minutes
+            else:
+                self.collection_interval_minutes = settings.COLLECTION_INTERVAL_MINUTES
 
-        # Add collection job
-        self.scheduler.add_job(
-            self._run_collection,
-            trigger=IntervalTrigger(minutes=interval_minutes),
-            id='network_data_collection',
-            name='Network Data Collection',
-            replace_existing=True,
-            max_instances=1  # Prevent overlapping runs
-        )
+            logger.info(f"Adding collection job with interval: {self.collection_interval_minutes} min")
 
-        # Add daily alarm cleanup job (configurable hour)
-        self.scheduler.add_job(
-            self._run_alarm_cleanup,
-            trigger=CronTrigger(hour=settings.ALARM_CLEANUP_HOUR, minute=0),
-            id='alarm_cleanup',
-            name='Alarm Cleanup (30 days)',
-            replace_existing=True,
-            max_instances=1
-        )
+            # Add collection job
+            self.scheduler.add_job(
+                self._run_collection,
+                trigger=IntervalTrigger(minutes=self.collection_interval_minutes),
+                id='network_data_collection',
+                name='Network Data Collection',
+                replace_existing=True,
+                max_instances=1  # Prevent overlapping runs
+            )
 
-        # Add IPAM auto-scan job (runs every hour)
-        self.scheduler.add_job(
-            self._run_ipam_scan,
-            trigger=IntervalTrigger(minutes=self.ipam_scan_interval_minutes),
-            id='ipam_auto_scan',
-            name='IPAM Auto Scan',
-            replace_existing=True,
-            max_instances=1
-        )
+            # Add daily alarm cleanup job (configurable hour)
+            self.scheduler.add_job(
+                self._run_alarm_cleanup,
+                trigger=CronTrigger(hour=settings.ALARM_CLEANUP_HOUR, minute=0),
+                id='alarm_cleanup',
+                name='Alarm Cleanup (30 days)',
+                replace_existing=True,
+                max_instances=1
+            )
 
-        # Add optical module collection job (runs every 12 hours)
-        self.scheduler.add_job(
-            self._run_optical_module_collection,
-            trigger=IntervalTrigger(minutes=self.optical_module_interval_minutes),
-            id='optical_module_collection',
-            name='Optical Module Collection',
-            replace_existing=True,
-            max_instances=1
-        )
+            # Add IPAM auto-scan job (runs every hour)
+            self.scheduler.add_job(
+                self._run_ipam_scan,
+                trigger=IntervalTrigger(minutes=self.ipam_scan_interval_minutes),
+                id='ipam_auto_scan',
+                name='IPAM Auto Scan',
+                replace_existing=True,
+                max_instances=1
+            )
 
-        self.scheduler.start()
-        self.is_running = True
+            # Add optical module collection job (runs every 12 hours)
+            self.scheduler.add_job(
+                self._run_optical_module_collection,
+                trigger=IntervalTrigger(minutes=self.optical_module_interval_minutes),
+                id='optical_module_collection',
+                name='Optical Module Collection',
+                replace_existing=True,
+                max_instances=1
+            )
 
-        logger.info(f"Network collection scheduler started (interval: {interval_minutes} min)")
-        logger.info("Alarm cleanup job scheduled (daily at 3:00 AM)")
-        logger.info(f"IPAM auto-scan job scheduled (interval: {self.ipam_scan_interval_minutes} min)")
-        logger.info(f"Optical module collection job scheduled (interval: {self.optical_module_interval_minutes} min)")
+            logger.info(f"Starting APScheduler with {len(self.scheduler.get_jobs())} jobs")
+            self.scheduler.start()
+            self.is_running = True
+            logger.info(f"APScheduler started successfully. Running: {self.scheduler.running}")
+
+            logger.info(f"Network collection scheduler started (interval: {self.collection_interval_minutes} min)")
+            logger.info("Alarm cleanup job scheduled (daily at 3:00 AM)")
+            logger.info(f"IPAM auto-scan job scheduled (interval: {self.ipam_scan_interval_minutes} min)")
+            logger.info(f"Optical module collection job scheduled (interval: {self.optical_module_interval_minutes} min)")
+
+        except Exception as e:
+            logger.error(f"Failed to start network scheduler: {str(e)}", exc_info=True)
+            raise
 
     def stop(self):
         """Stop the scheduler"""
@@ -282,3 +291,99 @@ class NetworkCollectionScheduler:
 
 # Singleton instance
 network_scheduler = NetworkCollectionScheduler()
+
+
+# ======================================================================
+# Async Start/Stop Functions for Multi-Service Architecture
+# ======================================================================
+
+async def start_collection_scheduler():
+    """Start only the collection-related scheduler jobs (for Collection Service)"""
+    try:
+        scheduler = network_scheduler.scheduler
+
+        if not scheduler.running:
+            logger.info("Starting Collection Service scheduler...")
+
+            # Add collection job
+            scheduler.add_job(
+                network_scheduler._run_collection,
+                trigger=IntervalTrigger(minutes=settings.COLLECTION_INTERVAL_MINUTES),
+                id='network_data_collection',
+                name='Network Data Collection',
+                replace_existing=True,
+                max_instances=1
+            )
+
+            # Add optical module collection job
+            scheduler.add_job(
+                network_scheduler._run_optical_module_collection,
+                trigger=IntervalTrigger(minutes=settings.OPTICAL_MODULE_INTERVAL_MINUTES),
+                id='optical_module_collection',
+                name='Optical Module Collection',
+                replace_existing=True,
+                max_instances=1
+            )
+
+            # Add alarm cleanup job
+            scheduler.add_job(
+                network_scheduler._run_alarm_cleanup,
+                trigger=CronTrigger(hour=settings.ALARM_CLEANUP_HOUR, minute=0),
+                id='alarm_cleanup',
+                name='Alarm Cleanup (30 days)',
+                replace_existing=True,
+                max_instances=1
+            )
+
+            scheduler.start()
+            network_scheduler.is_running = True
+            logger.info(f"Collection scheduler started with {len(scheduler.get_jobs())} jobs")
+    except Exception as e:
+        logger.error(f"Failed to start collection scheduler: {str(e)}", exc_info=True)
+
+
+async def stop_collection_scheduler():
+    """Stop the collection scheduler (for Collection Service)"""
+    try:
+        if network_scheduler.is_running:
+            network_scheduler.scheduler.shutdown()
+            network_scheduler.is_running = False
+            logger.info("Collection scheduler stopped")
+    except Exception as e:
+        logger.error(f"Failed to stop collection scheduler: {str(e)}", exc_info=True)
+
+
+async def start_ipam_scheduler():
+    """Start only the IPAM auto-scan scheduler job (for IPAM Service)"""
+    try:
+        scheduler = network_scheduler.scheduler
+
+        if not scheduler.running:
+            logger.info("Starting IPAM Service scheduler...")
+
+            # Add IPAM auto-scan job
+            scheduler.add_job(
+                network_scheduler._run_ipam_scan,
+                trigger=IntervalTrigger(minutes=settings.IPAM_SCAN_INTERVAL_MINUTES),
+                id='ipam_auto_scan',
+                name='IPAM Auto Scan',
+                replace_existing=True,
+                max_instances=1
+            )
+
+            scheduler.start()
+            network_scheduler.is_running = True
+            logger.info(f"IPAM scheduler started (interval: {settings.IPAM_SCAN_INTERVAL_MINUTES} min)")
+    except Exception as e:
+        logger.error(f"Failed to start IPAM scheduler: {str(e)}", exc_info=True)
+
+
+async def stop_ipam_scheduler():
+    """Stop the IPAM scheduler (for IPAM Service)"""
+    try:
+        if network_scheduler.is_running:
+            network_scheduler.scheduler.shutdown()
+            network_scheduler.is_running = False
+            logger.info("IPAM scheduler stopped")
+    except Exception as e:
+        logger.error(f"Failed to stop IPAM scheduler: {str(e)}", exc_info=True)

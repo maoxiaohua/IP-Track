@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     ALARM_CLEANUP_HOUR: int = 3
     ALARM_RETENTION_DAYS: int = 30
 
+    # IPAM Settings
+    IPAM_OFFLINE_THRESHOLD_HOURS: int = 6  # Hours without response before marking as offline
+
     # Worker Pools
     COLLECTION_WORKERS: int = 10
     IP_LOOKUP_WORKERS: int = 50

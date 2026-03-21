@@ -88,9 +88,11 @@ async def create_subnet(
         )
     except Exception as e:
         logger.error(f"Error creating subnet: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create subnet"
+            detail=f"Failed to create subnet: {str(e)}"
         )
 
 
@@ -140,10 +142,66 @@ async def download_excel_template():
 
     Returns an Excel file with example data and column headers
     """
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Excel export功能暂时不可用，请联系管理员安装openpyxl库"
-    )
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from io import BytesIO
+
+        # Create workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "子网导入模板"
+
+        # Headers
+        headers = ['子网名称', '网络地址(CIDR)', '描述', 'VLAN ID', '网关', 'DNS服务器']
+        ws.append(headers)
+
+        # Style headers
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # Example data
+        examples = [
+            ['办公网络', '10.0.1.0/24', '办公区域网络', '100', '10.0.1.1', '8.8.8.8,8.8.4.4'],
+            ['数据中心', '172.16.0.0/16', 'DC核心网络', '200', '172.16.0.1', '8.8.8.8'],
+            ['访客网络', '192.168.10.0/24', '访客WiFi', '300', '192.168.10.1', ''],
+        ]
+
+        for row in examples:
+            ws.append(row)
+
+        # Adjust column widths
+        column_widths = [20, 20, 25, 12, 15, 20]
+        for idx, width in enumerate(column_widths, 1):
+            ws.column_dimensions[chr(64 + idx)].width = width
+
+        # Save to BytesIO
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": "attachment; filename=IPAM_Import_Template.xlsx"
+            }
+        )
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Excel功能需要安装openpyxl库。请联系管理员执行: pip install openpyxl"
+        )
+    except Exception as e:
+        logger.error(f"Error generating Excel template: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"生成Excel模板失败: {str(e)}"
+        )
 
 
 @router.post("/subnets/import/excel", response_model=IPSubnetBatchImportResult, status_code=status.HTTP_201_CREATED)
@@ -159,10 +217,104 @@ async def import_subnets_from_excel(
     Required columns: 子网名称, 网络地址(CIDR)
     Optional columns: 描述, VLAN ID, 网关, DNS服务器
     """
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Excel导入功能暂时不可用，请联系管理员安装openpyxl库"
-    )
+    try:
+        from openpyxl import load_workbook
+        from io import BytesIO
+
+        # Validate file type
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="只支持 .xlsx 或 .xls 格式的Excel文件"
+            )
+
+        # Read file content
+        contents = await file.read()
+        workbook = load_workbook(BytesIO(contents), data_only=True)
+        worksheet = workbook.active
+
+        # Parse data (skip header row)
+        subnets_data = []
+        errors = []
+
+        for idx, row in enumerate(worksheet.iter_rows(min_row=2, values_only=True), start=2):
+            # Skip empty rows
+            if not any(row):
+                continue
+
+            try:
+                # Extract values (handle None values)
+                name = row[0] if row[0] else f"子网-{idx}"
+                network = row[1] if len(row) > 1 and row[1] else None
+                description = row[2] if len(row) > 2 and row[2] else None
+                vlan_id = int(row[3]) if len(row) > 3 and row[3] and str(row[3]).strip() else None
+                gateway = row[4] if len(row) > 4 and row[4] else None
+                dns_servers = row[5] if len(row) > 5 and row[5] else None
+
+                # Validate required fields
+                if not network:
+                    errors.append({
+                        'index': idx,
+                        'network': str(name),
+                        'error': '缺少网络地址(CIDR)'
+                    })
+                    continue
+
+                subnet_data = {
+                    'name': str(name).strip(),
+                    'network': str(network).strip(),
+                    'description': str(description).strip() if description else None,
+                    'vlan_id': vlan_id,
+                    'gateway': str(gateway).strip() if gateway else None,
+                    'dns_servers': str(dns_servers).strip() if dns_servers else None,
+                    'enabled': True,
+                    'auto_scan': True,
+                    'scan_interval': 3600
+                }
+
+                subnets_data.append(subnet_data)
+
+            except Exception as e:
+                errors.append({
+                    'index': idx,
+                    'network': str(row[1]) if len(row) > 1 else 'N/A',
+                    'error': f'解析错误: {str(e)}'
+                })
+
+        if not subnets_data:
+            return {
+                'total': 0,
+                'success': 0,
+                'failed': len(errors),
+                'skipped': 0,
+                'errors': errors,
+                'imported_ids': []
+            }
+
+        # Call batch import service
+        result = await ipam_service.batch_create_subnets(
+            db=db,
+            subnets_data=subnets_data,
+            skip_existing=skip_existing
+        )
+
+        # Merge parse errors with import errors
+        result['errors'].extend(errors)
+        result['failed'] += len(errors)
+
+        return result
+
+    except ImportError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Excel导入功能需要安装openpyxl库。请联系管理员执行: pip install openpyxl"
+        )
+    except Exception as e:
+        logger.error(f"Error importing Excel: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Excel导入失败: {str(e)}"
+        )
 
 
 @router.get("/subnets", response_model=List[IPSubnetResponse])
@@ -277,11 +429,15 @@ async def update_subnet(
             "updated_at": subnet.updated_at,
             **stats
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error updating subnet: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update subnet"
+            detail=f"Failed to update subnet: {str(e)}"
         )
 
 
@@ -399,7 +555,12 @@ async def list_ip_addresses(
             'is_reachable': ip_addr.is_reachable,
             'response_time': ip_addr.response_time,
             'hostname': ip_addr.hostname,
+            'hostname_source': ip_addr.hostname_source,
+            'dns_name': ip_addr.dns_name,
+            'system_name': ip_addr.system_name,
             'mac_address': str(ip_addr.mac_address) if ip_addr.mac_address else None,
+            'vendor': ip_addr.vendor,
+            'machine_type': ip_addr.machine_type,
             'switch_id': ip_addr.switch_id,
             'switch_name': switch_name,
             'switch_port': ip_addr.switch_port,
@@ -409,6 +570,7 @@ async def list_ip_addresses(
             'os_version': ip_addr.os_version,
             'os_vendor': ip_addr.os_vendor,
             'description': ip_addr.description,
+            'last_boot_time': ip_addr.last_boot_time,
             'last_seen_at': ip_addr.last_seen_at,
             'last_scan_at': ip_addr.last_scan_at,
             'scan_count': ip_addr.scan_count,

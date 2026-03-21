@@ -14,6 +14,7 @@ redis==5.0.1
 # SSH and Network
 netmiko==4.3.0
 paramiko==3.4.0
+dnspython==2.4.2
 
 # Security
 cryptography==41.0.7
@@ -30,6 +31,7 @@ loguru==0.7.2
 # Utilities
 python-dotenv==1.0.0
 httpx==0.25.2
+openpyxl==3.1.2
 
 # Background Task Scheduler
 APScheduler==3.10.4

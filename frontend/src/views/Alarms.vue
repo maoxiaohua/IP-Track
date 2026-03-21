@@ -5,7 +5,7 @@
         <div class="card-header">
           <h2>告警管理 / Alarms</h2>
           <div class="header-actions">
-            <el-button @click="loadAlarms" :loading="loading">
+            <el-button type="info" plain @click="loadAlarms" :loading="loading">
               <el-icon><Refresh /></el-icon>
               刷新
             </el-button>
