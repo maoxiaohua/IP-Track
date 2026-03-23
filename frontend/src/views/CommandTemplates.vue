@@ -9,7 +9,7 @@
             <el-button type="primary" @click="showAddDialog = true" :icon="Plus">
               添加模板
             </el-button>
-            <el-button type="info" plain @click="loadTemplates" :icon="Refresh">
+            <el-button type="primary" @click="loadTemplates" :icon="Refresh">
               刷新
             </el-button>
           </div>

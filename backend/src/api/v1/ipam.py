@@ -666,19 +666,24 @@ async def scan_ips(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Scan IP addresses
+    Scan IP addresses - SIMPLIFIED SYNC MODE
 
-    - **subnet_id**: Scan all IPs in a subnet
+    - **subnet_id**: Scan all IPs in a subnet (runs synchronously)
     - **ip_addresses**: Scan specific IP addresses
     - **scan_type**: 'quick' (ping only) or 'full' (ping + hostname + MAC + OS)
+
+    Note: For subnets, this runs synchronously and may take 2-3 minutes.
+    Frontend should poll for updated last_scan_at to detect completion.
     """
     if scan_request.subnet_id:
-        # Scan entire subnet
-        return await ipam_service.scan_subnet(
+        # Run scan synchronously (reliable but slow)
+        result = await ipam_service.scan_subnet(
             db=db,
             subnet_id=scan_request.subnet_id,
             scan_type=scan_request.scan_type
         )
+        return result
+
     elif scan_request.ip_addresses:
         # Scan specific IPs
         from services.ip_scan import ip_scan_service

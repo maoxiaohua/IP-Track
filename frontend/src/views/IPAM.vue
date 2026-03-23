@@ -1038,18 +1038,29 @@ const viewSubnetIPs = (subnet: any) => {
 const scanSubnet = async (subnet: any) => {
   scanning.value[subnet.subnet_id] = true
   try {
+    // API call is SYNCHRONOUS - waits for scan completion (2-3 minutes)
     const response = await apiClient.post('/api/v1/ipam/scan', {
       subnet_id: subnet.subnet_id,
       scan_type: 'full'
     })
 
+    // When we reach here, scan is ALREADY COMPLETED
     const result = response.data
-    ElMessage.success(
-      `扫描完成：${result.reachable} 个在线，${result.unreachable} 个离线`
-    )
+
+    // Show success message
+    if (result.message) {
+      ElMessage.success(`子网 ${subnet.network}: ${result.message}`)
+    } else {
+      ElMessage.success(
+        `子网 ${subnet.network} 扫描完成：${result.reachable} 个在线，${result.unreachable} 个离线`
+      )
+    }
+
+    // Immediately refresh data
     loadDashboard()
+
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.detail || '扫描失败')
+    ElMessage.error(error.response?.data?.detail || '启动扫描失败')
   } finally {
     scanning.value[subnet.subnet_id] = false
   }

@@ -60,7 +60,10 @@ class SNMPService:
 
     def __init__(self):
         # Don't create a singleton engine - create per-request to avoid event loop issues
-        logger.info("SNMP service initialized with asyncio")
+        # Disable MIB loading to avoid MibNotFoundError in pysnmp 7.x
+        import os
+        os.environ['PYSNMP_MIB_PKGS'] = ''  # Disable MIB package loading
+        logger.info("SNMP service initialized with asyncio (MIB loading disabled)")
 
     def _create_snmp_auth(
         self,
@@ -572,6 +575,95 @@ class SNMPService:
             logger.error(f"Failed to get device info from {switch_ip}: {str(e)}")
             return None
 
+    def _extract_os_from_sysdescr(self, sys_descr: str) -> Dict[str, Optional[str]]:
+        """
+        从SNMP sysDescr字符串提取OS类型、名称和版本
+
+        Args:
+            sys_descr: SNMP sysDescr字符串 (OID 1.3.6.1.2.1.1.1.0)
+
+        Returns:
+            包含os_type, os_name, os_version的字典
+        """
+        import re
+
+        result = {'os_type': None, 'os_name': None, 'os_version': None}
+
+        if not sys_descr:
+            return result
+
+        descr_lower = sys_descr.lower()
+
+        # Cisco IOS/NX-OS/IOS-XE
+        if any(kw in descr_lower for kw in ['ios', 'nx-os', 'ios-xe', 'ios-xr']):
+            result['os_type'] = 'network'
+            result['os_name'] = 'Cisco IOS'
+            # 提取版本: "Version 15.2(4)E8" 或 "IOS Version 12.2"
+            match = re.search(r'(?:Version|IOS.*Version)\s+([0-9]+\.[0-9]+[^\s,)]*)', sys_descr, re.IGNORECASE)
+            if match:
+                result['os_version'] = match.group(1)
+
+        # Linux
+        elif 'linux' in descr_lower:
+            result['os_type'] = 'linux'
+            result['os_name'] = 'Ubuntu Linux' if 'ubuntu' in descr_lower else \
+                               'CentOS Linux' if 'centos' in descr_lower else \
+                               'Red Hat Linux' if ('red hat' in descr_lower or 'rhel' in descr_lower) else \
+                               'Linux'
+            # 提取内核版本: "Linux 5.4.0-42-generic"
+            match = re.search(r'Linux\s+(?:kernel\s+)?([0-9]+\.[0-9]+\.[0-9]+[^\s,)]*)', sys_descr, re.IGNORECASE)
+            if match:
+                result['os_version'] = match.group(1)
+
+        # Windows
+        elif 'windows' in descr_lower:
+            result['os_type'] = 'windows'
+            result['os_name'] = 'Windows'
+            # 提取版本: "Windows Server 2019" 或 "Windows 10"
+            match = re.search(r'Windows\s+(Server\s+)?([0-9]+(?:\.[0-9]+)*|[0-9]{4})', sys_descr, re.IGNORECASE)
+            if match:
+                result['os_version'] = match.group(2)
+                if match.group(1):  # 包含"Server"
+                    result['os_name'] = 'Windows Server'
+
+        # Juniper JUNOS
+        elif any(kw in descr_lower for kw in ['junos', 'juniper']):
+            result['os_type'] = 'network'
+            result['os_name'] = 'Juniper JUNOS'
+            match = re.search(r'JUNOS\s+([0-9]+\.[0-9]+[^\s,)]*)', sys_descr, re.IGNORECASE)
+            if match:
+                result['os_version'] = match.group(1)
+
+        # Dell Force10 OS
+        elif 'force10' in descr_lower or ('dell' in descr_lower and 'os' in descr_lower):
+            result['os_type'] = 'network'
+            result['os_name'] = 'Dell Force10 OS'
+            match = re.search(r'(?:OS\s+)?Version\s+([0-9]+\.[0-9]+[^\s,)]*)', sys_descr, re.IGNORECASE)
+            if match:
+                result['os_version'] = match.group(1)
+
+        # Nokia/Alcatel
+        elif any(kw in descr_lower for kw in ['nokia', 'alcatel', 'timos', 'sr linux']):
+            result['os_type'] = 'network'
+            result['os_name'] = 'Nokia SR Linux' if 'sr linux' in descr_lower else \
+                               'Nokia TiMOS' if 'timos' in descr_lower else \
+                               'Nokia Network OS'
+            match = re.search(r'(?:Version|TiMOS-|v)([0-9]+\.[0-9]+[^\s,)]*)', sys_descr, re.IGNORECASE)
+            if match:
+                result['os_version'] = match.group(1)
+
+        # FreeBSD/OpenBSD
+        elif any(kw in descr_lower for kw in ['freebsd', 'openbsd', 'netbsd']):
+            result['os_type'] = 'unix'
+            result['os_name'] = 'FreeBSD' if 'freebsd' in descr_lower else \
+                               'OpenBSD' if 'openbsd' in descr_lower else \
+                               'NetBSD'
+            match = re.search(r'(?:FreeBSD|OpenBSD|NetBSD)\s+([0-9]+\.[0-9]+[^\s,)]*)', sys_descr, re.IGNORECASE)
+            if match:
+                result['os_version'] = match.group(1)
+
+        return result
+
     async def get_device_identification(
         self,
         target_ip: str,
@@ -627,7 +719,11 @@ class SNMPService:
                 'location': None,
                 'last_boot_time': None,
                 'machine_type': None,
-                'vendor': None
+                'vendor': None,
+                # OS information fields
+                'os_type': None,
+                'os_name': None,
+                'os_version': None
             }
 
             # sysName (hostname)
@@ -700,6 +796,17 @@ class SNMPService:
                     # Use raw sysDescr as fallback
                     result['machine_type'] = machine_type
 
+                # Extract OS information from sysDescr
+                os_info = self._extract_os_from_sysdescr(descr)
+                result['os_type'] = os_info['os_type']
+                result['os_name'] = os_info['os_name']
+                result['os_version'] = os_info['os_version']
+
+                logger.debug(
+                    f"OS from SNMP sysDescr for {target_ip}: "
+                    f"type={os_info['os_type']}, name={os_info['os_name']}, version={os_info['os_version']}"
+                )
+
             # sysUpTime (time ticks since boot, convert to last_boot_time)
             sys_uptime = await self._get_oid(target_ip, self.OID_SYS_UPTIME, auth_data, port, timeout)
             if sys_uptime:
@@ -724,7 +831,9 @@ class SNMPService:
                     f"Got device identification from {target_ip}: "
                     f"sysName={result['system_name']}, "
                     f"location={result['location']}, "
-                    f"vendor={result['vendor']}"
+                    f"vendor={result['vendor']}, "
+                    f"os_type={result['os_type']}, "
+                    f"os_version={result['os_version']}"
                 )
                 return result
             else:

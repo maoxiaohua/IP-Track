@@ -297,215 +297,224 @@ class IPAMService:
         logger.info(f"Starting subnet scan: {subnet_id} (type: {scan_type})")
         start_time = datetime.now(timezone.utc)
 
-        # Get subnet
-        subnet = await self.get_subnet(db, subnet_id)
-        if not subnet:
-            raise ValueError(f"Subnet {subnet_id} not found")
+        try:
 
-        # Get SNMP profile if configured for this subnet
-        snmp_profile = None
-        if subnet.snmp_profile_id:
-            from models.ipam import SNMPProfile
+            # Get subnet
+            subnet = await self.get_subnet(db, subnet_id)
+            if not subnet:
+                raise ValueError(f"Subnet {subnet_id} not found")
+
+            # Get SNMP profile if configured for this subnet
+            snmp_profile = None
+            if subnet.snmp_profile_id:
+                from models.ipam import SNMPProfile
+                result = await db.execute(
+                    select(SNMPProfile).where(SNMPProfile.id == subnet.snmp_profile_id)
+                )
+                profile = result.scalar_one_or_none()
+                if profile and profile.enabled:
+                    # Prepare SNMP profile dictionary for scanning
+                    snmp_profile = {
+                        'username': profile.username,
+                        'auth_protocol': profile.auth_protocol,
+                        'auth_password_encrypted': profile.auth_password_encrypted,
+                        'priv_protocol': profile.priv_protocol,
+                        'priv_password_encrypted': profile.priv_password_encrypted,
+                        'port': profile.port,
+                        'timeout': profile.timeout
+                    }
+                    logger.info(f"Using SNMP profile '{profile.name}' for subnet {subnet_id}")
+
+            # Get all IP addresses
             result = await db.execute(
-                select(SNMPProfile).where(SNMPProfile.id == subnet.snmp_profile_id)
+                select(IPAddress).where(IPAddress.subnet_id == subnet_id)
             )
-            profile = result.scalar_one_or_none()
-            if profile and profile.enabled:
-                # Prepare SNMP profile dictionary for scanning
-                snmp_profile = {
-                    'username': profile.username,
-                    'auth_protocol': profile.auth_protocol,
-                    'auth_password_encrypted': profile.auth_password_encrypted,
-                    'priv_protocol': profile.priv_protocol,
-                    'priv_password_encrypted': profile.priv_password_encrypted,
-                    'port': profile.port,
-                    'timeout': profile.timeout
-                }
-                logger.info(f"Using SNMP profile '{profile.name}' for subnet {subnet_id}")
+            ip_addresses = result.scalars().all()
 
-        # Get all IP addresses
-        result = await db.execute(
-            select(IPAddress).where(IPAddress.subnet_id == subnet_id)
-        )
-        ip_addresses = result.scalars().all()
+            # Parse DNS servers from subnet configuration
+            dns_servers = None
+            if subnet.dns_servers:
+                # dns_servers is stored as comma-separated string
+                dns_servers = [s.strip() for s in subnet.dns_servers.split(',') if s.strip()]
+                logger.info(f"Using DNS servers for subnet {subnet_id}: {dns_servers}")
 
-        # Parse DNS servers from subnet configuration
-        dns_servers = None
-        if subnet.dns_servers:
-            # dns_servers is stored as comma-separated string
-            dns_servers = [s.strip() for s in subnet.dns_servers.split(',') if s.strip()]
-            logger.info(f"Using DNS servers for subnet {subnet_id}: {dns_servers}")
-
-        # Scan all IPs with SNMP profile (if configured) and DNS servers
-        ip_list = [str(ip.ip_address) for ip in ip_addresses]
-        scan_results = await ip_scan_service.scan_multiple_ips(
-            ip_list,
-            scan_type,
-            snmp_profile,  # Pass SNMP profile to scanning service
-            dns_servers    # Pass DNS servers for PTR lookups
-        )
-
-        # Update database
-        new_devices = 0
-        changed_devices = 0
-
-        for scan_result in scan_results:
-            ip_str = scan_result['ip_address']
-
-            # Find IP address record
-            ip_addr = next((ip for ip in ip_addresses if str(ip.ip_address) == ip_str), None)
-            if not ip_addr:
-                continue
-
-            # Detect changes
-            status_changed = ip_addr.is_reachable != scan_result['is_reachable']
-            hostname_changed = ip_addr.hostname != scan_result['hostname']
-            os_changed = ip_addr.os_name != scan_result['os_name']
-
-            if scan_result['is_reachable'] and not ip_addr.last_seen_at:
-                new_devices += 1
-
-            if status_changed or hostname_changed or os_changed:
-                changed_devices += 1
-
-            # Try to find MAC address
-            # First, try with MAC from scan result
-            mac_to_lookup = scan_result['mac_address']
-
-            # If scan didn't get MAC and IP is reachable, try to find it from ARP/MAC tables
-            if not mac_to_lookup and scan_result['is_reachable']:
-                from models.arp_table import ARPTable
-                from models.mac_table import MACTable
-
-                # Try ARP table first
-                arp_result = await db.execute(
-                    select(ARPTable)
-                    .where(cast(ARPTable.ip_address, Text) == ip_str)
-                    .order_by(ARPTable.last_seen.desc())
-                    .limit(1)
-                )
-                arp_entry = arp_result.scalar_one_or_none()
-                if arp_entry:
-                    mac_to_lookup = str(arp_entry.mac_address)
-                    logger.info(f"Found MAC for {ip_str} from ARP table: {mac_to_lookup}")
-
-            # Update basic IP address fields
-            ip_addr.is_reachable = scan_result['is_reachable']
-            ip_addr.response_time = scan_result['response_time']
-
-            # Update hostname with source tracking (SolarWinds-style)
-            ip_addr.hostname = scan_result.get('hostname')
-            ip_addr.hostname_source = scan_result.get('hostname_source')  # SNMP, DNS, ARP, or None
-
-            # Update SolarWinds-style SNMP/DNS fields
-            ip_addr.dns_name = scan_result.get('dns_name')  # DNS PTR result
-            ip_addr.system_name = scan_result.get('system_name')  # SNMP sysName
-            ip_addr.contact = scan_result.get('contact')  # SNMP sysContact
-            ip_addr.location = scan_result.get('location')  # SNMP sysLocation
-            ip_addr.machine_type = scan_result.get('machine_type')  # SNMP sysDescr parsed
-            ip_addr.vendor = scan_result.get('vendor')  # SNMP vendor parsed
-
-            # Update last_boot_time from SNMP sysUpTime
-            if scan_result.get('last_boot_time'):
-                # Parse ISO format datetime string
-                try:
-                    ip_addr.last_boot_time = datetime.fromisoformat(scan_result['last_boot_time'])
-                except:
-                    pass
-
-            # Only update MAC if we have one (don't overwrite with None)
-            if mac_to_lookup:
-                ip_addr.mac_address = mac_to_lookup
-
-            # If we still don't have MAC but IP already has one in DB, use existing MAC
-            elif ip_addr.mac_address and scan_result['is_reachable']:
-                mac_to_lookup = str(ip_addr.mac_address)
-                logger.info(f"Using existing MAC for {ip_str}: {mac_to_lookup}")
-
-            ip_addr.os_type = scan_result['os_type']
-            ip_addr.os_name = scan_result['os_name']
-            ip_addr.os_version = scan_result['os_version']
-            ip_addr.os_vendor = scan_result['os_vendor']
-            ip_addr.last_scan_at = datetime.now(timezone.utc)
-            ip_addr.scan_count += 1
-
-            # Intelligent status update logic
-            if scan_result['is_reachable']:
-                # IP is reachable now
-                ip_addr.last_seen_at = datetime.now(timezone.utc)
-
-                # If status is AVAILABLE or OFFLINE, mark as USED
-                if ip_addr.status in [IPStatus.AVAILABLE.value, IPStatus.OFFLINE.value]:
-                    ip_addr.status = IPStatus.USED.value
-            else:
-                # IP is NOT reachable
-                # Only mark as OFFLINE if it hasn't been seen for a long time
-                # This prevents temporary network issues from marking IPs as offline
-                if ip_addr.last_seen_at:
-                    time_since_last_seen = datetime.now(timezone.utc) - ip_addr.last_seen_at
-                    offline_threshold_hours = settings.IPAM_OFFLINE_THRESHOLD_HOURS
-
-                    if time_since_last_seen.total_seconds() > offline_threshold_hours * 3600:
-                        # Mark as OFFLINE only if USED (don't change RESERVED or AVAILABLE)
-                        if ip_addr.status == IPStatus.USED.value:
-                            ip_addr.status = IPStatus.OFFLINE.value
-                            logger.info(f"Marking {ip_str} as OFFLINE (not seen for {time_since_last_seen.total_seconds()/3600:.1f} hours)")
-
-            # Try to get hostname from switches table if we don't have one
-            if not ip_addr.hostname:
-                # Query switches table by IP address (use host() to strip netmask)
-                from sqlalchemy.sql import text as sql_text
-                switch_result = await db.execute(
-                    select(Switch.name)
-                    .where(sql_text("host(switches.ip_address) = :ip"))
-                    .params(ip=ip_str)
-                )
-                switch_name = switch_result.scalar_one_or_none()
-
-                if switch_name:
-                    ip_addr.hostname = switch_name
-                    ip_addr.hostname_source = 'SWITCH'
-                    logger.info(f"Hostname from switches table for {ip_str}: {switch_name}")
-
-            # Update switch info if we have MAC address
-            if mac_to_lookup:
-                await self._update_switch_info(db, ip_addr, mac_to_lookup)
-
-            # Create history record
-            history = IPScanHistory(
-                ip_address_id=ip_addr.id,
-                is_reachable=scan_result['is_reachable'],
-                response_time=scan_result['response_time'],
-                hostname=scan_result['hostname'],
-                mac_address=scan_result['mac_address'],
-                os_type=scan_result['os_type'],
-                os_name=scan_result['os_name'],
-                status_changed=status_changed,
-                hostname_changed=hostname_changed,
-                os_changed=os_changed
+            # Scan all IPs with SNMP profile (if configured) and DNS servers
+            ip_list = [str(ip.ip_address) for ip in ip_addresses]
+            scan_results = await ip_scan_service.scan_multiple_ips(
+                ip_list,
+                scan_type,
+                snmp_profile,  # Pass SNMP profile to scanning service
+                dns_servers    # Pass DNS servers for PTR lookups
             )
-            db.add(history)
 
-        # Update subnet last scan time
-        subnet.last_scan_at = datetime.now(timezone.utc)
+            # Update database
+            new_devices = 0
+            changed_devices = 0
 
-        await db.commit()
+            for scan_result in scan_results:
+                ip_str = scan_result['ip_address']
 
-        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-        reachable = sum(1 for r in scan_results if r['is_reachable'])
+                # Find IP address record
+                ip_addr = next((ip for ip in ip_addresses if str(ip.ip_address) == ip_str), None)
+                if not ip_addr:
+                    continue
 
-        summary = {
-            'total_scanned': len(scan_results),
-            'reachable': reachable,
-            'unreachable': len(scan_results) - reachable,
-            'new_devices': new_devices,
-            'changed_devices': changed_devices,
-            'scan_duration': elapsed,
-            'results': scan_results
-        }
+                # Detect changes
+                status_changed = ip_addr.is_reachable != scan_result['is_reachable']
+                hostname_changed = ip_addr.hostname != scan_result['hostname']
+                os_changed = ip_addr.os_name != scan_result['os_name']
 
-        logger.info(f"Subnet scan completed: {summary}")
-        return summary
+                if scan_result['is_reachable'] and not ip_addr.last_seen_at:
+                    new_devices += 1
+
+                if status_changed or hostname_changed or os_changed:
+                    changed_devices += 1
+
+                # Try to find MAC address
+                # First, try with MAC from scan result
+                mac_to_lookup = scan_result['mac_address']
+
+                # If scan didn't get MAC and IP is reachable, try to find it from ARP/MAC tables
+                if not mac_to_lookup and scan_result['is_reachable']:
+                    from models.arp_table import ARPTable
+                    from models.mac_table import MACTable
+
+                    # Try ARP table first
+                    arp_result = await db.execute(
+                        select(ARPTable)
+                        .where(cast(ARPTable.ip_address, Text) == ip_str)
+                        .order_by(ARPTable.last_seen.desc())
+                        .limit(1)
+                    )
+                    arp_entry = arp_result.scalar_one_or_none()
+                    if arp_entry:
+                        mac_to_lookup = str(arp_entry.mac_address)
+                        logger.info(f"Found MAC for {ip_str} from ARP table: {mac_to_lookup}")
+
+                # Update basic IP address fields
+                ip_addr.is_reachable = scan_result['is_reachable']
+                ip_addr.response_time = scan_result['response_time']
+
+                # Update hostname with source tracking (SolarWinds-style)
+                ip_addr.hostname = scan_result.get('hostname')
+                ip_addr.hostname_source = scan_result.get('hostname_source')  # SNMP, DNS, ARP, or None
+
+                # Update SolarWinds-style SNMP/DNS fields
+                ip_addr.dns_name = scan_result.get('dns_name')  # DNS PTR result
+                ip_addr.system_name = scan_result.get('system_name')  # SNMP sysName
+                ip_addr.contact = scan_result.get('contact')  # SNMP sysContact
+                ip_addr.location = scan_result.get('location')  # SNMP sysLocation
+                ip_addr.machine_type = scan_result.get('machine_type')  # SNMP sysDescr parsed
+                ip_addr.vendor = scan_result.get('vendor')  # SNMP vendor parsed
+
+                # Update last_boot_time from SNMP sysUpTime
+                if scan_result.get('last_boot_time'):
+                    # Parse ISO format datetime string
+                    try:
+                        ip_addr.last_boot_time = datetime.fromisoformat(scan_result['last_boot_time'])
+                    except:
+                        pass
+
+                # Only update MAC if we have one (don't overwrite with None)
+                if mac_to_lookup:
+                    ip_addr.mac_address = mac_to_lookup
+
+                # If we still don't have MAC but IP already has one in DB, use existing MAC
+                elif ip_addr.mac_address and scan_result['is_reachable']:
+                    mac_to_lookup = str(ip_addr.mac_address)
+                    logger.info(f"Using existing MAC for {ip_str}: {mac_to_lookup}")
+
+                ip_addr.os_type = scan_result['os_type']
+                ip_addr.os_name = scan_result['os_name']
+                ip_addr.os_version = scan_result['os_version']
+                ip_addr.os_vendor = scan_result['os_vendor']
+                ip_addr.last_scan_at = datetime.now(timezone.utc)
+                ip_addr.scan_count += 1
+
+                # Intelligent status update logic
+                if scan_result['is_reachable']:
+                    # IP is reachable now
+                    ip_addr.last_seen_at = datetime.now(timezone.utc)
+
+                    # If status is AVAILABLE or OFFLINE, mark as USED
+                    if ip_addr.status in [IPStatus.AVAILABLE.value, IPStatus.OFFLINE.value]:
+                        ip_addr.status = IPStatus.USED.value
+                else:
+                    # IP is NOT reachable
+                    # Only mark as OFFLINE if it hasn't been seen for a long time
+                    # This prevents temporary network issues from marking IPs as offline
+                    if ip_addr.last_seen_at:
+                        time_since_last_seen = datetime.now(timezone.utc) - ip_addr.last_seen_at
+                        offline_threshold_hours = settings.IPAM_OFFLINE_THRESHOLD_HOURS
+
+                        if time_since_last_seen.total_seconds() > offline_threshold_hours * 3600:
+                            # Mark as OFFLINE only if USED (don't change RESERVED or AVAILABLE)
+                            if ip_addr.status == IPStatus.USED.value:
+                                ip_addr.status = IPStatus.OFFLINE.value
+                                logger.info(f"Marking {ip_str} as OFFLINE (not seen for {time_since_last_seen.total_seconds()/3600:.1f} hours)")
+
+                # Try to get hostname from switches table if we don't have one
+                if not ip_addr.hostname:
+                    # Query switches table by IP address (use host() to strip netmask)
+                    from sqlalchemy.sql import text as sql_text
+                    switch_result = await db.execute(
+                        select(Switch.name)
+                        .where(sql_text("host(switches.ip_address) = :ip"))
+                        .params(ip=ip_str)
+                    )
+                    switch_name = switch_result.scalar_one_or_none()
+
+                    if switch_name:
+                        ip_addr.hostname = switch_name
+                        ip_addr.hostname_source = 'SWITCH'
+                        logger.info(f"Hostname from switches table for {ip_str}: {switch_name}")
+
+                # Update switch info if we have MAC address
+                if mac_to_lookup:
+                    await self._update_switch_info(db, ip_addr, mac_to_lookup)
+
+                # Create history record
+                history = IPScanHistory(
+                    ip_address_id=ip_addr.id,
+                    is_reachable=scan_result['is_reachable'],
+                    response_time=scan_result['response_time'],
+                    hostname=scan_result['hostname'],
+                    mac_address=scan_result['mac_address'],
+                    os_type=scan_result['os_type'],
+                    os_name=scan_result['os_name'],
+                    status_changed=status_changed,
+                    hostname_changed=hostname_changed,
+                    os_changed=os_changed
+                )
+                db.add(history)
+
+            # Update subnet last scan time
+            subnet.last_scan_at = datetime.now(timezone.utc)
+
+            await db.commit()
+
+            elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+            reachable = sum(1 for r in scan_results if r['is_reachable'])
+
+            summary = {
+                'total_scanned': len(scan_results),
+                'reachable': reachable,
+                'unreachable': len(scan_results) - reachable,
+                'new_devices': new_devices,
+                'changed_devices': changed_devices,
+                'scan_duration': elapsed,
+                'results': scan_results
+            }
+
+            logger.info(f"Subnet scan completed: {summary}")
+            return summary
+
+        except Exception as e:
+            # Rollback transaction on any error
+            await db.rollback()
+            logger.error(f"Error during subnet scan {subnet_id}: {str(e)}")
+            logger.exception(e)
+            raise
 
     async def _update_switch_info(
         self,

@@ -24,6 +24,9 @@ class IPScanService:
 
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=settings.IPAM_SCAN_WORKERS)
+        # Semaphore to limit concurrent scan operations (prevent resource exhaustion)
+        # Limit to 20 concurrent scans to prevent ping failures due to network congestion
+        self.semaphore = asyncio.Semaphore(20)
         # Find ping command path at initialization
         # Always use absolute paths to avoid PATH issues
         import os
@@ -31,15 +34,15 @@ class IPScanService:
         self.arp_cmd = '/usr/sbin/arp' if os.path.exists('/usr/sbin/arp') else '/sbin/arp'
         self.nmap_cmd = shutil.which('nmap')
 
-        logger.info(f"IP scan service initialized: ping={self.ping_cmd}, arp={self.arp_cmd}, nmap={self.nmap_cmd}")
+        logger.info(f"IP scan service initialized: ping={self.ping_cmd}, arp={self.arp_cmd}, nmap={self.nmap_cmd}, concurrency_limit=20")
 
-    def _ping_ip(self, ip: str, timeout: int = 3) -> tuple[bool, Optional[int]]:
+    def _ping_ip(self, ip: str, timeout: int = 5) -> tuple[bool, Optional[int]]:
         """
         Ping an IP address to check reachability
         Returns: (is_reachable, response_time_ms)
 
-        Note: Default timeout increased to 3 seconds to accommodate slower-responding hosts
-        (Windows hosts, hosts waking from sleep, etc.)
+        Note: Default timeout increased to 5 seconds to handle network congestion
+        during mass scanning (Windows hosts, hosts waking from sleep, network delays)
         """
         try:
             # Use ping command with full path
@@ -307,26 +310,25 @@ class IPScanService:
                         os_info['os_type'] = 'windows'
                         os_info['os_vendor'] = 'Microsoft'
 
-                        # Extract version
-                        if 'windows 11' in os_lower:
-                            os_info['os_version'] = '11'
-                        elif 'windows 10' in os_lower:
-                            os_info['os_version'] = '10'
-                        elif 'windows server 2022' in os_lower:
-                            os_info['os_version'] = 'Server 2022'
-                        elif 'windows server 2019' in os_lower:
-                            os_info['os_version'] = 'Server 2019'
-                        elif 'windows server 2016' in os_lower:
-                            os_info['os_version'] = 'Server 2016'
-                        elif 'windows 8' in os_lower:
-                            os_info['os_version'] = '8'
-                        elif 'windows 7' in os_lower:
-                            os_info['os_version'] = '7'
+                        # Extract version using regex
+                        match = re.search(r'Windows\s+(Server\s+)?([0-9]+(?:\.[0-9]+)?|\d{4})', os_lower, re.IGNORECASE)
+                        if match:
+                            if match.group(1):  # "Server" exists
+                                os_info['os_version'] = f"Server {match.group(2)}"
+                                os_info['os_name'] = f"Windows Server {match.group(2)}"
+                            else:
+                                os_info['os_version'] = match.group(2)
+                                os_info['os_name'] = f"Windows {match.group(2)}"
 
                     elif 'linux' in os_lower or 'ubuntu' in os_lower or 'centos' in os_lower or 'redhat' in os_lower or 'debian' in os_lower:
                         os_info['os_type'] = 'linux'
 
-                        # Extract distribution
+                        # Extract kernel version first (more generic)
+                        kernel_match = re.search(r'Linux\s+([0-9]+\.[0-9]+(?:\.[0-9]+)?)', os_lower, re.IGNORECASE)
+                        if kernel_match:
+                            os_info['os_version'] = kernel_match.group(1)
+
+                        # Extract distribution (may override os_version)
                         if 'ubuntu' in os_lower:
                             os_info['os_vendor'] = 'Canonical'
                             match = re.search(r'ubuntu\s+(\d+\.\d+)', os_lower)
@@ -353,14 +355,31 @@ class IPScanService:
                         os_info['os_vendor'] = 'Apple'
 
                     # Detect network devices
+                    # Cisco devices
                     elif any(keyword in os_lower for keyword in ['cisco', 'ios', 'catalyst', 'nexus']):
                         os_info['os_type'] = 'network'
                         os_info['os_vendor'] = 'Cisco'
-                        os_info['os_name'] = 'Cisco Network Device'
+
+                        # Extract IOS version
+                        version_match = re.search(r'IOS\s+([0-9]+\.[0-9]+)', os_lower, re.IGNORECASE)
+                        if version_match:
+                            os_info['os_version'] = version_match.group(1)
+                            os_info['os_name'] = f"Cisco IOS {os_info['os_version']}"
+                        else:
+                            os_info['os_name'] = 'Cisco Network Device'
+
+                    # Juniper devices
                     elif any(keyword in os_lower for keyword in ['juniper', 'junos']):
                         os_info['os_type'] = 'network'
                         os_info['os_vendor'] = 'Juniper'
-                        os_info['os_name'] = 'Juniper Network Device'
+
+                        # Extract JUNOS version
+                        version_match = re.search(r'JUNOS\s+([0-9]+\.[0-9]+)', os_lower, re.IGNORECASE)
+                        if version_match:
+                            os_info['os_version'] = version_match.group(1)
+                            os_info['os_name'] = f"Juniper JUNOS {os_info['os_version']}"
+                        else:
+                            os_info['os_name'] = 'Juniper Network Device'
                     elif any(keyword in os_lower for keyword in ['hp', 'aruba', 'procurve']):
                         os_info['os_type'] = 'network'
                         os_info['os_vendor'] = 'HP/Aruba'
@@ -453,6 +472,7 @@ class IPScanService:
 
         # Step 3: SNMP device identification (HIGHEST PRIORITY)
         # Try SNMP first if profile is provided
+        snmp_os_data = None  # Track SNMP OS info separately
         if snmp_profile:
             try:
                 from services.snmp_service import snmp_service
@@ -472,6 +492,18 @@ class IPScanService:
                         result['last_boot_time'] = snmp_data.get('last_boot_time')
                         result['machine_type'] = snmp_data.get('machine_type')
                         result['vendor'] = snmp_data.get('vendor')
+
+                        # Capture SNMP OS data (highest priority)
+                        snmp_os_data = {
+                            'os_type': snmp_data.get('os_type'),
+                            'os_name': snmp_data.get('os_name'),
+                            'os_version': snmp_data.get('os_version')
+                        }
+
+                        # Set OS data from SNMP (highest priority)
+                        result['os_type'] = snmp_os_data['os_type']
+                        result['os_name'] = snmp_os_data['os_name']
+                        result['os_version'] = snmp_os_data['os_version']
 
                         # SNMP sysName is the highest priority hostname
                         if result['system_name']:
@@ -499,9 +531,34 @@ class IPScanService:
         if mac:
             result['mac_address'] = mac
 
-        # Step 6: OS detection
-        os_info = self._detect_os(ip)
-        result.update(os_info)
+        # Step 6: OS detection (smart merging with SNMP data)
+        nmap_os_info = self._detect_os(ip)
+
+        # Smart merging: only use Nmap data if SNMP didn't provide it
+        if snmp_os_data and any(snmp_os_data.values()):
+            # SNMP data exists - use as primary source, fill gaps with Nmap
+            logger.debug(f"Using SNMP OS data for {ip} (highest priority)")
+
+            # Fill missing fields from Nmap
+            if not result.get('os_type') and nmap_os_info.get('os_type'):
+                result['os_type'] = nmap_os_info['os_type']
+                logger.debug(f"Filled os_type from Nmap: {nmap_os_info['os_type']}")
+
+            if not result.get('os_name') and nmap_os_info.get('os_name'):
+                result['os_name'] = nmap_os_info['os_name']
+                logger.debug(f"Filled os_name from Nmap: {nmap_os_info['os_name']}")
+
+            if not result.get('os_version') and nmap_os_info.get('os_version'):
+                result['os_version'] = nmap_os_info['os_version']
+                logger.debug(f"Filled os_version from Nmap: {nmap_os_info['os_version']}")
+
+            # os_vendor: prefer SNMP vendor over Nmap os_vendor
+            if not result.get('os_vendor') and nmap_os_info.get('os_vendor'):
+                result['os_vendor'] = nmap_os_info['os_vendor']
+        else:
+            # No SNMP data - use Nmap as primary source
+            logger.debug(f"Using Nmap OS data for {ip} (SNMP unavailable)")
+            result.update(nmap_os_info)
 
         return result
 
@@ -520,17 +577,21 @@ class IPScanService:
             scan_type: 'quick' or 'full'
             snmp_profile: Optional SNMP profile for device identification
             dns_servers: Optional list of DNS server IPs for PTR lookups
+
+        Note: Uses semaphore to limit concurrency and prevent resource exhaustion
         """
-        loop = asyncio.get_event_loop()
-        from functools import partial
-        scan_func = partial(
-            self._scan_single_ip,
-            ip=ip,
-            scan_type=scan_type,
-            snmp_profile=snmp_profile,
-            dns_servers=dns_servers
-        )
-        return await loop.run_in_executor(self.executor, scan_func)
+        # Acquire semaphore to limit concurrent scans
+        async with self.semaphore:
+            loop = asyncio.get_event_loop()
+            from functools import partial
+            scan_func = partial(
+                self._scan_single_ip,
+                ip=ip,
+                scan_type=scan_type,
+                snmp_profile=snmp_profile,
+                dns_servers=dns_servers
+            )
+            return await loop.run_in_executor(self.executor, scan_func)
 
     async def scan_multiple_ips(
         self,

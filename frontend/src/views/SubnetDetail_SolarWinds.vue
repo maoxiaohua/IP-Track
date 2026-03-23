@@ -22,7 +22,7 @@
               <el-icon><Edit /></el-icon>
               编辑子网
             </el-button>
-            <el-button type="success" plain @click="scanSubnet" :loading="scanning">
+            <el-button type="success" @click="scanSubnet" :loading="scanning">
               <el-icon><Refresh /></el-icon>
               扫描子网
             </el-button>
@@ -143,6 +143,38 @@
         <el-table-column prop="machine_type" label="Machine Type" min-width="150">
           <template #default="{ row }">
             {{ row.machine_type || '-' }}
+          </template>
+        </el-table-column>
+
+        <!-- Vendor -->
+        <el-table-column prop="vendor" label="Vendor" width="120">
+          <template #default="{ row }">
+            {{ row.vendor || '-' }}
+          </template>
+        </el-table-column>
+
+        <!-- OS Type -->
+        <el-table-column prop="os_type" label="OS Type" width="100">
+          <template #default="{ row }">
+            <el-tag v-if="row.os_type === 'windows'" type="primary" size="small">Windows</el-tag>
+            <el-tag v-else-if="row.os_type === 'linux'" type="success" size="small">Linux</el-tag>
+            <el-tag v-else-if="row.os_type === 'network'" type="warning" size="small">Network</el-tag>
+            <el-tag v-else-if="row.os_type === 'unix'" type="info" size="small">Unix</el-tag>
+            <span v-else style="color: #909399">-</span>
+          </template>
+        </el-table-column>
+
+        <!-- OS Name -->
+        <el-table-column prop="os_name" label="OS Name" min-width="140">
+          <template #default="{ row }">
+            {{ row.os_name || '-' }}
+          </template>
+        </el-table-column>
+
+        <!-- OS Version -->
+        <el-table-column prop="os_version" label="OS Version" width="120">
+          <template #default="{ row }">
+            {{ row.os_version || '-' }}
           </template>
         </el-table-column>
 
@@ -316,19 +348,32 @@ const loadIPs = async () => {
   }
 }
 
-// Scan subnet
+// Scan subnet (SYNC mode - waits for completion)
 const scanSubnet = async () => {
   scanning.value = true
   try {
+    // API call is SYNCHRONOUS - it will wait 2-3 minutes until scan completes
     const response = await apiClient.post('/api/v1/ipam/scan', {
       subnet_id: subnetId,
       scan_type: 'full'
     })
+
+    // When we reach here, scan is ALREADY COMPLETED
     const result = response.data
-    ElMessage.success(`扫描完成：${result.reachable} 个在线，${result.unreachable} 个离线`)
-    // Immediately refresh data after scan completes
+
+    // Show success message with results
+    if (result.message) {
+      // This was an async/background scan (shouldn't happen in sync mode)
+      ElMessage.success(result.message)
+    } else {
+      // Normal completion
+      ElMessage.success(`扫描完成：${result.reachable} 个在线，${result.unreachable} 个离线`)
+    }
+
+    // Immediately refresh data (scan is already done)
     await loadSubnet()
     await loadIPs()
+
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '扫描失败')
   } finally {

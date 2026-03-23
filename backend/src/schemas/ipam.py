@@ -179,6 +179,7 @@ class IPScanSummary(BaseModel):
     changed_devices: int
     scan_duration: float
     results: List[IPScanResult]
+    message: Optional[str] = None  # Optional message for async scan status
 
 
 # Statistics Schemas

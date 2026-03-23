@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # IPAM Settings
     IPAM_OFFLINE_THRESHOLD_HOURS: int = 6  # Hours without response before marking as offline
 
+    # OS Detection Settings
+    OS_DETECTION_PREFER_SNMP: bool = True  # Prefer SNMP over Nmap when both available
+    NMAP_OS_TIMEOUT: int = 30  # Timeout for nmap OS detection (seconds)
+
     # Worker Pools
     COLLECTION_WORKERS: int = 10
     IP_LOOKUP_WORKERS: int = 50

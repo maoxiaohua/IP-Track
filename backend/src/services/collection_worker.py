@@ -83,6 +83,9 @@ class CollectionWorker:
                 job.started_at = datetime.utcnow()
                 await db.commit()
                 logger.debug(f"Worker {self.worker_id} claimed job {job.id}")
+            else:
+                # No job found, commit to close transaction
+                await db.commit()
 
             return job
 
