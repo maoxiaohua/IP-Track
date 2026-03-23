@@ -1201,12 +1201,12 @@ async def trigger_port_analysis(
         # Convert MAC entries to dict format expected by port_analysis_service
         mac_dicts = [
             {
-                'port_name': entry.get('port'),
-                'vlan_id': entry.get('vlan'),
-                'mac_address': entry.get('mac')
+                'port_name': entry.get('port_name'),
+                'vlan_id': entry.get('vlan_id'),
+                'mac_address': entry.get('mac_address')
             }
             for entry in mac_entries
-            if entry.get('port') and entry.get('mac')
+            if entry.get('port_name') and entry.get('mac_address')
         ]
 
         port_results = port_analysis_service.analyze_port_statistics(mac_dicts)
@@ -1244,7 +1244,7 @@ async def trigger_port_analysis(
                 existing.mac_count = analysis['mac_count']
                 existing.unique_vlans = analysis['unique_vlans']
                 existing.port_type = analysis['port_type']
-                existing.confidence_score = analysis['confidence']
+                existing.confidence_score = analysis['confidence_score']
                 existing.is_trunk_by_name = 1 if analysis.get('is_trunk_by_name') else 0
                 existing.is_access_by_name = 1 if analysis.get('is_access_by_name') else 0
                 existing.analyzed_at = analyzed_at
@@ -1257,7 +1257,7 @@ async def trigger_port_analysis(
                     mac_count=analysis['mac_count'],
                     unique_vlans=analysis['unique_vlans'],
                     port_type=analysis['port_type'],
-                    confidence_score=analysis['confidence'],
+                    confidence_score=analysis['confidence_score'],
                     is_trunk_by_name=1 if analysis.get('is_trunk_by_name') else 0,
                     is_access_by_name=1 if analysis.get('is_access_by_name') else 0,
                     analyzed_at=analyzed_at

@@ -85,16 +85,25 @@ class PortAnalysisService:
             reasoning.append(f"{mac_count} MACs - uplink port")
 
         # === Rule 2: VLAN Count Adjustment ===
+        # Note: For service-based switches (e.g., Nokia 7250), same MAC can appear in
+        # multiple VLANs/services. Only use VLAN count as weak indicator, not absolute rule.
 
         if unique_vlans > 1:
-            # Multiple VLANs is strong indicator of trunk
-            if port_type == PortType.ACCESS:
+            # Multiple VLANs - only weak indicator, don't override mac_count classification
+            if port_type == PortType.ACCESS and mac_count == 1:
+                # Single MAC in multiple VLANs - keep as ACCESS
+                # This is common for service-based switches or voice+data VLAN configs
+                confidence = max(confidence - 15, 50)  # Reduce confidence slightly
+                reasoning.append(f"Single MAC in {unique_vlans} VLANs - likely service-based config or voice VLAN")
+            elif port_type == PortType.ACCESS and mac_count > 1:
+                # Multiple MACs in multiple VLANs - likely trunk
                 port_type = PortType.TRUNK
                 confidence = max(confidence, 80)
-                reasoning.append(f"Multiple VLANs ({unique_vlans}) - must be trunk")
+                reasoning.append(f"{mac_count} MACs in {unique_vlans} VLANs - trunk")
             else:
+                # Already classified as trunk/uplink, VLANs confirm
                 confidence = min(confidence + 10, 100)
-                reasoning.append(f"Multiple VLANs ({unique_vlans}) confirms trunk")
+                reasoning.append(f"Multiple VLANs ({unique_vlans}) confirms classification")
 
         return {
             'port_type': port_type.value,
