@@ -31,7 +31,7 @@ async def create_switch(
     try:
         # Check if switch with same IP already exists
         result = await db.execute(
-            select(Switch).where(Switch.ip_address == str(switch_data.ip_address))
+            select(Switch).where(Switch.ip_address == switch_data.ip_address)
         )
         existing = result.scalar_one_or_none()
         if existing:
@@ -66,8 +66,6 @@ async def create_switch(
             ip_address=str(switch_data.ip_address),
             vendor=switch_data.vendor,
             model=switch_data.model,
-            role=switch_data.role,
-            priority=switch_data.priority,
             enabled=switch_data.enabled,
             
             # SSH fields (optional)
@@ -440,7 +438,7 @@ async def bulk_create_switches(
         try:
             # Check if switch with same IP already exists
             result = await db.execute(
-                select(Switch).where(Switch.ip_address == str(switch_data.ip_address))
+                select(Switch).where(Switch.ip_address == switch_data.ip_address)
             )
             existing = result.scalar_one_or_none()
             if existing:
@@ -471,8 +469,6 @@ async def bulk_create_switches(
                 ip_address=str(switch_data.ip_address),
                 vendor=switch_data.vendor,
                 model=switch_data.model,
-                role=switch_data.role,
-                priority=switch_data.priority,
                 ssh_port=switch_data.ssh_port,
                 username=switch_data.username,
                 password_encrypted=password_encrypted,
