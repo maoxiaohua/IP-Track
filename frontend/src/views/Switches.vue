@@ -26,21 +26,61 @@
 
       <!-- Search Bar -->
       <div class="search-bar">
-        <el-input
-          v-model="searchQuery"
-          placeholder="搜索交换机名称或IP地址..."
-          clearable
-          @clear="handleSearch"
-          @keyup.enter="handleSearch"
-          style="max-width: 400px;"
-        >
-          <template #prefix>
-            <el-icon><Search /></el-icon>
-          </template>
-        </el-input>
-        <el-button type="primary" @click="handleSearch" :loading="loading">
-          搜索
-        </el-button>
+        <div class="search-controls">
+          <el-input
+            v-model="searchQuery"
+            placeholder="搜索交换机名称或IP地址..."
+            clearable
+            @clear="handleSearch"
+            @keyup.enter="handleSearch"
+            class="search-input"
+          >
+            <template #prefix>
+              <el-icon><Search /></el-icon>
+            </template>
+          </el-input>
+          <el-button type="primary" @click="handleSearch" :loading="loading">
+            搜索
+          </el-button>
+          <el-button
+            :type="showPendingTrunkOnly ? 'warning' : 'info'"
+            @click="togglePendingTrunkFilter"
+          >
+            {{ showPendingTrunkOnly ? '只看待处理: 开' : '只看待处理: 关' }}
+          </el-button>
+        </div>
+
+        <div class="sort-controls">
+          <span class="sort-label">排序</span>
+          <el-select
+            v-model="selectedSortField"
+            placeholder="默认顺序"
+            clearable
+            class="sort-field-select"
+            @change="applySortControls"
+            @clear="clearSort"
+          >
+            <el-option
+              v-for="option in sortFieldOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <el-radio-group v-if="selectedSortField" v-model="sortOrder" @change="applySortControls">
+            <el-radio-button
+              v-for="option in sortDirectionOptions"
+              :key="option.value"
+              :label="option.value"
+            >
+              {{ option.label }}
+            </el-radio-button>
+          </el-radio-group>
+          <el-button v-if="selectedSortField" text @click="clearSort">
+            恢复默认
+          </el-button>
+          <span class="sort-hint">{{ currentSortHint }}</span>
+        </div>
       </div>
 
       <!-- Batch Operation Toolbar -->
@@ -76,6 +116,7 @@
         @delete="handleDelete"
         @test="handleTest"
         @selection-change="handleSelectionChange"
+        @sort-change="handleSortChange"
       />
 
       <!-- Pagination -->
@@ -321,7 +362,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, h } from 'vue'
+import { ref, reactive, onMounted, h, computed } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus, Refresh, Check, Close, Setting, Delete, Monitor, Search } from '@element-plus/icons-vue'
 import { switchesApi, type Switch, type SwitchCreate } from '@/api/switches'
@@ -342,6 +383,51 @@ const searchQuery = ref('')
 const currentPage = ref(1)
 const pageSize = ref(100)
 const totalSwitches = ref(0)
+const showPendingTrunkOnly = ref(false)
+type SortField = 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'connection_status'
+
+const sortBy = ref<SortField | null>(null)
+const selectedSortField = ref<SortField | null>(null)
+const sortOrder = ref<'asc' | 'desc'>('asc')
+
+const sortFieldOptions: Array<{ label: string; value: SortField }> = [
+  { label: '名称', value: 'name' },
+  { label: 'IP 地址', value: 'ip_address' },
+  { label: '厂商 / 型号', value: 'model' },
+  { label: '上次采集', value: 'last_collection_time' },
+  { label: '连接状态', value: 'connection_status' }
+]
+
+const sortDirectionOptions = computed(() => {
+  if (selectedSortField.value === 'last_collection_time') {
+    return [
+      { label: '旧到新', value: 'asc' },
+      { label: '新到旧', value: 'desc' }
+    ]
+  }
+
+  if (selectedSortField.value === 'connection_status') {
+    return [
+      { label: '离线优先', value: 'asc' },
+      { label: '在线优先', value: 'desc' }
+    ]
+  }
+
+  return [
+    { label: '正序', value: 'asc' },
+    { label: '倒序', value: 'desc' }
+  ]
+})
+
+const currentSortHint = computed(() => {
+  if (!selectedSortField.value) {
+    return '当前: 默认顺序'
+  }
+
+  const fieldLabel = sortFieldOptions.find(option => option.value === selectedSortField.value)?.label || '默认顺序'
+  const directionLabel = sortDirectionOptions.value.find(option => option.value === sortOrder.value)?.label || '正序'
+  return `当前: ${fieldLabel} · ${directionLabel}`
+})
 
 // Batch operation states
 const selectedSwitches = ref<Switch[]>([])
@@ -408,7 +494,10 @@ const loadSwitches = async () => {
     const params = {
       skip: (currentPage.value - 1) * pageSize.value,
       limit: pageSize.value,
-      search: searchQuery.value.trim() || undefined
+      search: searchQuery.value.trim() || undefined,
+      trunk_review_completed: showPendingTrunkOnly.value ? false : undefined,
+      sort_by: sortBy.value || undefined,
+      sort_order: sortBy.value ? sortOrder.value : undefined
     }
     const result = await switchesApi.list(params)
     switches.value = result.items
@@ -433,6 +522,38 @@ const handlePageChange = (page: number) => {
 const handlePageSizeChange = (size: number) => {
   pageSize.value = size
   currentPage.value = 1 // Reset to first page when changing page size
+  loadSwitches()
+}
+
+const togglePendingTrunkFilter = () => {
+  showPendingTrunkOnly.value = !showPendingTrunkOnly.value
+  currentPage.value = 1
+  selectedSwitches.value = []
+  loadSwitches()
+}
+
+const applySortControls = () => {
+  sortBy.value = selectedSortField.value
+  currentPage.value = 1
+  loadSwitches()
+}
+
+const clearSort = () => {
+  selectedSortField.value = null
+  sortBy.value = null
+  sortOrder.value = 'asc'
+  currentPage.value = 1
+  loadSwitches()
+}
+
+const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc' | null) => {
+  const allowedSortFields = ['name', 'ip_address', 'model', 'last_collection_time', 'connection_status']
+  selectedSortField.value = newSortOrder && allowedSortFields.includes(newSortBy)
+    ? newSortBy as SortField
+    : null
+  sortBy.value = selectedSortField.value
+  sortOrder.value = newSortOrder || 'asc'
+  currentPage.value = 1
   loadSwitches()
 }
 
@@ -1135,9 +1256,49 @@ onMounted(() => {
 
 .search-bar {
   display: flex;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 16px;
   margin-bottom: 16px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.search-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex: 1 1 420px;
+  flex-wrap: wrap;
+}
+
+.search-input {
+  max-width: 420px;
+}
+
+.sort-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: #f5f7fa;
+  border: 1px solid #e4e7ed;
+  border-radius: 10px;
+}
+
+.sort-label {
+  font-size: 13px;
+  color: #606266;
+  font-weight: 600;
+}
+
+.sort-field-select {
+  width: 150px;
+}
+
+.sort-hint {
+  font-size: 12px;
+  color: #909399;
 }
 
 .pagination-container {
@@ -1166,5 +1327,18 @@ onMounted(() => {
 .batch-actions {
   display: flex;
   gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .search-controls,
+  .sort-controls {
+    width: 100%;
+  }
+
+  .search-input,
+  .sort-field-select {
+    width: 100%;
+    max-width: none;
+  }
 }
 </style>

@@ -110,6 +110,15 @@ class CLIService:
                         else:
                             logger.debug(f"Already in enable mode on {host}")
 
+                        # Disable paging so long MAC/ARP tables are not truncated at '--More--'.
+                        try:
+                            connection.send_command_timing('terminal length 0', delay_factor=2)
+                            logger.debug(f"Disabled pagination on Dell Force10 {host}")
+                        except Exception as paging_error:
+                            logger.warning(
+                                f"Failed to disable pagination on Dell Force10 {host}: {str(paging_error)[:100]}"
+                            )
+
                     # For Cisco, use standard method
                     else:
                         connection.clear_buffer()
@@ -328,6 +337,59 @@ class CLIService:
 
         return mac_entries
 
+    def _parse_cisco_nxos_mac_table(self, output: str) -> List[Dict]:
+        """
+        Parse Cisco NX-OS 'show mac address-table' output.
+
+        Example output:
+        *  998     0007.3285.73b7   dynamic  0         F      F    Eth1/48
+        """
+        mac_entries = []
+        lines = output.split('\n')
+
+        for line in lines:
+            line = line.strip()
+            if (
+                not line
+                or line.startswith('Legend:')
+                or 'MAC Address' in line
+                or 'Ports' in line
+                or '----' in line
+            ):
+                continue
+
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+
+            # NX-OS may prefix entries with markers like "*" or "+"
+            if parts[0] in {'*', '+', '#', 'G', '(R)', 'O'}:
+                parts = parts[1:]
+
+            if len(parts) < 4:
+                continue
+
+            vlan_id = parts[0]
+            mac_address = parts[1]
+            mac_type = parts[2]
+            interface = parts[-1]
+
+            if '.' in mac_address and len(mac_address.replace('.', '')) == 12:
+                mac_clean = mac_address.replace('.', '')
+                mac_address = ':'.join([mac_clean[i:i+2] for i in range(0, 12, 2)])
+
+            if not re.match(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$', mac_address):
+                continue
+
+            mac_entries.append({
+                'mac_address': mac_address.lower(),
+                'port_name': interface,
+                'vlan_id': int(vlan_id) if vlan_id.isdigit() else None,
+                'is_dynamic': 1 if 'dynamic' in mac_type.lower() else 0
+            })
+
+        return mac_entries
+
     def _parse_nokia_7220_arp_table(self, output: str) -> List[Dict]:
         """
         Parse Nokia 7220 'show arpnd arp-entries' output
@@ -528,6 +590,210 @@ class CLIService:
                 })
 
         return arp_entries
+
+    def _parse_cisco_nxos_arp_table(self, output: str) -> List[Dict]:
+        """
+        Parse Cisco NX-OS 'show ip arp' output.
+
+        Example output:
+        Address         Age       MAC Address     Interface
+        10.108.139.1    00:05:44  e4f0.0428.7d80  Vlan998
+        """
+        arp_entries = []
+        lines = output.split('\n')
+
+        for line in lines:
+            line = line.strip()
+            if (
+                not line
+                or line.startswith('Flags:')
+                or line.startswith('IP ARP Table')
+                or line.startswith('Total number of entries:')
+                or 'MAC Address' in line
+                or '---' in line
+            ):
+                continue
+
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+
+            ip_address = parts[0]
+            age = parts[1]
+            mac_address = parts[2]
+            interface = parts[3]
+
+            if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip_address):
+                continue
+
+            if '.' in mac_address and len(mac_address.replace('.', '')) == 12:
+                mac_clean = mac_address.replace('.', '')
+                mac_address = ':'.join([mac_clean[i:i+2] for i in range(0, 12, 2)])
+
+            if not re.match(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$', mac_address):
+                continue
+
+            vlan_id = None
+            if 'vlan' in interface.lower():
+                vlan_match = re.search(r'vlan(\d+)', interface, re.IGNORECASE)
+                if vlan_match:
+                    vlan_id = int(vlan_match.group(1))
+
+            arp_entries.append({
+                'ip_address': ip_address,
+                'mac_address': mac_address.lower(),
+                'vlan_id': vlan_id,
+                'interface': interface,
+                'age_seconds': None if age == '-' else None
+            })
+
+        return arp_entries
+
+    def _parse_dell_force10_arp_table(self, output: str) -> List[Dict]:
+        """
+        Parse Dell Force10 (FTOS) 'show arp' output
+
+        Example output:
+        Protocol    Address         Age(min)  Hardware Address    Interface      VLAN             CPU
+        ---------------------------------------------------------------------------------------------
+        Internet    10.71.194.134        63   8c:47:be:b1:50:95   Fo 1/51         -               CP
+        Internet    10.71.197.161         -   68:4f:64:fb:58:79        -         Vl 999           CP
+        Internet    10.71.202.36         22   00:0e:c6:66:52:1c   Te 1/5         Vl 7             CP
+
+        Note: Dell Force10 format is similar to Cisco IOS but:
+        - MAC address uses colon format (aa:bb:cc:dd:ee:ff) instead of dot format
+        - Interface may have space (e.g., "Te 1/5" or "Fo 1/51")
+        - VLAN column is separate (not part of interface name)
+        """
+        arp_entries = []
+        lines = output.split('\n')
+
+        for line in lines:
+            line = line.strip()
+            # Skip headers, separators, and empty lines
+            if not line or 'Protocol' in line or 'Address' in line or '---' in line or len(line) < 20:
+                continue
+
+            # Parse line
+            parts = line.split()
+            if len(parts) >= 5:
+                protocol = parts[0]
+                ip_address = parts[1]
+                # age = parts[2]  # Can be '-' or a number
+                mac_address = parts[3]
+                interface_part1 = parts[4] if len(parts) > 4 else None
+
+                # Only process Internet protocol entries
+                if protocol.lower() != 'internet':
+                    continue
+
+                # Validate IP address format
+                if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ip_address):
+                    continue
+
+                # Dell Force10 uses colon format (aa:bb:cc:dd:ee:ff)
+                # But also accepts dot format in some cases
+                if '.' in mac_address and ':' not in mac_address:
+                    # Convert dot format to colon format
+                    mac_clean = mac_address.replace('.', '')
+                    if len(mac_clean) == 12:
+                        mac_address = ':'.join([mac_clean[i:i+2] for i in range(0, 12, 2)])
+
+                # Validate MAC address format (colon-separated)
+                if not re.match(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$', mac_address):
+                    continue
+
+                # Dell Force10 interfaces may have space: "Te 1/5" → parts[4]="Te", parts[5]="1/5"
+                interface = interface_part1
+                if len(parts) > 5 and ('/' in parts[5] or parts[5].isdigit()):
+                    interface = interface_part1 + ' ' + parts[5]
+
+                # Extract VLAN from dedicated VLAN column (e.g., "Vl 999")
+                # VLAN column is usually after interface column
+                vlan_id = None
+                for part in parts[5:]:  # Check columns after interface
+                    if part.lower().startswith('vl'):
+                        # Format: "Vl999" or "Vl 999"
+                        vlan_match = re.search(r'vl\s*(\d+)', part, re.IGNORECASE)
+                        if vlan_match:
+                            vlan_id = int(vlan_match.group(1))
+                            break
+                    elif part.isdigit() and int(part) < 4096:  # Valid VLAN range
+                        vlan_id = int(part)
+                        break
+
+                # Also check if interface itself contains VLAN info (e.g., "Vlan999")
+                if not vlan_id and interface and 'vlan' in interface.lower():
+                    vlan_match = re.search(r'vlan(\d+)', interface, re.IGNORECASE)
+                    if vlan_match:
+                        vlan_id = int(vlan_match.group(1))
+
+                arp_entries.append({
+                    'ip_address': ip_address,
+                    'mac_address': mac_address.lower(),
+                    'vlan_id': vlan_id,
+                    'interface': interface,
+                    'age_seconds': None
+                })
+
+        return arp_entries
+
+    def _parse_dell_force10_mac_table(self, output: str) -> List[Dict]:
+        """
+        Parse Dell Force10 (FTOS) 'show mac-address-table' output
+
+        Example output:
+        VlanId  Mac Address         Type      Interface
+        ------  -----------------   -------   -----------------------
+        7       00:0e:c6:66:52:1c   Dynamic   Te 1/5
+        999     a4:ed:43:60:35:9f   Dynamic   Te 1/48
+
+        Note: Dell Force10 format similar to Cisco but:
+        - MAC uses colon format (not dot format like Cisco)
+        - Interface may have space between type and port number
+        """
+        mac_entries = []
+        lines = output.split('\n')
+
+        for line in lines:
+            line = line.strip()
+            # Skip headers and separator lines
+            if not line or 'Mac Address' in line or 'VlanId' in line or '---' in line or 'Total' in line:
+                continue
+
+            # Parse line
+            parts = line.split()
+            if len(parts) >= 4:
+                vlan_id = parts[0]
+                mac_address = parts[1]
+                mac_type = parts[2]
+                interface = parts[3]
+
+                # Dell Force10 interface may have space: "Te 1/5" → parts[3]="Te", parts[4]="1/5"
+                if len(parts) >= 5 and ('/' in parts[4] or parts[4].isdigit()):
+                    interface = parts[3] + ' ' + parts[4]
+
+                # Dell Force10 already uses colon format
+                # But also convert dot format if present
+                if '.' in mac_address and ':' not in mac_address:
+                    mac_clean = mac_address.replace('.', '')
+                    if len(mac_clean) == 12:
+                        mac_address = ':'.join([mac_clean[i:i+2] for i in range(0, 12, 2)])
+
+                # Validate MAC address format
+                if not re.match(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$', mac_address):
+                    continue
+
+                is_dynamic = 1 if 'dynamic' in mac_type.lower() else 0
+
+                mac_entries.append({
+                    'mac_address': mac_address.lower(),
+                    'port_name': interface,
+                    'vlan_id': int(vlan_id) if vlan_id.isdigit() else None,
+                    'is_dynamic': is_dynamic
+                })
+
+        return mac_entries
 
     def _parse_nokia_7220_mac_table(self, output: str) -> List[Dict]:
         """
@@ -1444,10 +1710,10 @@ class CLIService:
                     'model_pattern': 's*',
                     'device_type': 'dell_force10',
                     'arp_command': 'show arp',
-                    'arp_parser_type': 'cisco_ios',
+                    'arp_parser_type': 'dell_force10',
                     'arp_enabled': True,
                     'mac_command': 'show mac address-table',
-                    'mac_parser_type': 'cisco_ios',
+                    'mac_parser_type': 'dell_force10',
                     'mac_enabled': True,
                     'priority': 160,
                     'enabled': True
@@ -1538,19 +1804,33 @@ class CLIService:
             logger.info(f"Executing ARP command on {switch_ip}: {command}")
 
             try:
-                # Use send_command_timing for devices with problematic prompts
-                # This uses delays instead of pattern matching
+                # Clear buffer before sending command to flush any residual data
+                # from the SSH handshake / enable-mode sequence
                 try:
-                    output = connection.send_command(command, read_timeout=90)
-                except Exception as cmd_error:
-                    # Fallback to send_command_timing if send_command fails
-                    logger.debug(f"send_command failed, trying send_command_timing: {str(cmd_error)[:100]}")
-                    output = connection.send_command_timing(command, delay_factor=2, max_loops=150)
+                    connection.clear_buffer()
+                except Exception:
+                    pass
+
+                # Dell Force10 (FTOS) devices have prompt-detection timing issues
+                # that cause send_command to drop the first character of the command.
+                # Use send_command_timing (delay-based) instead to avoid this.
+                device_type = template.get('device_type', '')
+                if device_type == 'dell_force10':
+                    output = connection.send_command_timing(
+                        command, delay_factor=3, max_loops=200
+                    )
+                else:
+                    try:
+                        output = connection.send_command(command, read_timeout=90)
+                    except Exception as cmd_error:
+                        # Fallback to send_command_timing if send_command fails
+                        logger.debug(f"send_command failed, trying send_command_timing: {str(cmd_error)[:100]}")
+                        output = connection.send_command_timing(command, delay_factor=2, max_loops=150)
 
                 arp_entries = parser(output)
 
                 # Debug: Log first 1000 chars of output if parsing returns 0 results for Dell Force10
-                if not arp_entries and template.get('device_type') == 'dell_force10':
+                if not arp_entries and device_type == 'dell_force10':
                     logger.warning(f"Dell Force10 '{command}' parsing returned 0 entries. Output sample (first 1000 chars):\n{output[:1000]}")
 
                 if arp_entries:
@@ -1735,9 +2015,17 @@ class CLIService:
                 'arp': self._parse_dell_os10_arp_table,
                 'mac': self._parse_dell_os10_mac_table
             },
+            'dell_force10': {
+                'arp': self._parse_dell_force10_arp_table,
+                'mac': self._parse_dell_force10_mac_table
+            },
             'cisco_ios': {
                 'arp': self._parse_cisco_ios_arp_table,
                 'mac': self._parse_cisco_ios_mac_table
+            },
+            'cisco_nxos': {
+                'arp': self._parse_cisco_nxos_arp_table,
+                'mac': self._parse_cisco_nxos_mac_table
             },
             'juniper': {
                 'arp': self._parse_juniper_arp_table,
@@ -1746,6 +2034,26 @@ class CLIService:
         }
 
         return parser_map.get(parser_type, {}).get(data_type)
+
+    def _resolve_device_type(
+        self,
+        vendor: str,
+        model: str,
+        name: str = '',
+        configured_device_type: Optional[str] = None
+    ) -> str:
+        """Resolve the CLI device type from templates, falling back to the provided config."""
+        template = self._find_matching_template(vendor, model, name)
+        if template and template.get('device_type'):
+            resolved_device_type = template['device_type']
+            if configured_device_type and configured_device_type != resolved_device_type:
+                logger.info(
+                    f"Overriding device_type for {vendor} {model} from "
+                    f"{configured_device_type} to {resolved_device_type}"
+                )
+            return resolved_device_type
+
+        return configured_device_type or 'cisco_ios'
 
     def collect_optical_modules_cli(
         self,
@@ -1777,12 +2085,18 @@ class CLIService:
         try:
             # Create SSH connection
             from core.security import decrypt_password
+            device_type = self._resolve_device_type(
+                vendor,
+                model,
+                cli_config.get('name', ''),
+                cli_config.get('device_type')
+            )
 
             connection = self._create_ssh_connection(
                 switch_ip,
                 cli_config['username'],
                 decrypt_password(cli_config['password_encrypted']),
-                cli_config.get('device_type', 'cisco_ios'),
+                device_type,
                 cli_config.get('ssh_port', 22),
                 cli_config.get('connection_timeout', 30),
                 decrypt_password(cli_config.get('enable_password_encrypted')) if cli_config.get('enable_password_encrypted') else None
@@ -1796,8 +2110,15 @@ class CLIService:
             vendor_lower = vendor.lower() if vendor else ''
             model_upper = model.upper() if model else ''
             
-            # Dell S3048/S4048: show inventory media
-            if vendor_lower == 'dell' and ('3048' in model_upper or '4048' in model_upper or 's3048' in model_upper or 's4048' in model_upper):
+            # Dell OS10 platforms (for example S3048/S4048/S5232): show inventory media
+            if vendor_lower == 'dell' and (
+                '3048' in model_upper or
+                '4048' in model_upper or
+                '5232' in model_upper or
+                'S3048' in model_upper or
+                'S4048' in model_upper or
+                'S5232' in model_upper
+            ):
                 logger.info(f"Using 'show inventory media' for Dell {model}")
                 command = 'show inventory media'
                 output = connection.send_command_timing(command, delay_factor=2)
@@ -1815,11 +2136,18 @@ class CLIService:
             
             # Cisco: show interfaces transceiver
             elif vendor_lower == 'cisco':
-                logger.info(f"Using 'show interfaces transceiver' for Cisco {model}")
-                command = 'show interfaces transceiver'
+                logger.info(f"Using 'show inventory' for Cisco {model}")
+                command = 'show inventory'
                 output = connection.send_command_timing(command, delay_factor=2)
                 logger.debug(f"Command output length: {len(output)} bytes")
-                modules = self._parse_cisco_transceiver(output)
+                modules = self._parse_cisco_inventory(output)
+
+                if not modules:
+                    logger.info(f"No transceivers parsed from Cisco inventory on {switch_ip}, trying 'show interfaces transceiver'")
+                    command = 'show interfaces transceiver'
+                    output = connection.send_command_timing(command, delay_factor=2)
+                    logger.debug(f"Fallback command output length: {len(output)} bytes")
+                    modules = self._parse_cisco_transceiver(output)
             
             # Alcatel/Nokia: per-port query
             elif vendor_lower in ['alcatel', 'nokia', 'alcatel-lucent']:
@@ -1865,22 +2193,43 @@ class CLIService:
                 import re
                 parts = re.split(r'\s{2,}', line.strip())
 
-                # Expected format: [Slot, Port, Type, Media, Serial_Number, Dell_Qualified]
-                # Sometimes Type column might be empty, so we need flexible parsing
-                if len(parts) < 4:
+                if len(parts) < 2:
                     continue
 
                 try:
-                    slot = parts[0].strip()
-                    port = parts[1].strip()
+                    # OS10 format:
+                    # [Node/Slot/Port, Form-Factor, Media, Serial-Number, Qualified]
+                    if '/' in parts[0]:
+                        port_name = parts[0].strip()
+                        form_factor = parts[1].strip() if len(parts) > 1 else ''
+                        media = parts[2].strip() if len(parts) > 2 else ''
+                        serial = parts[3].strip() if len(parts) > 3 else None
 
-                    # Check if we have module type/media info
+                        if not media or 'not present' in media.lower():
+                            continue
+
+                        module = {
+                            'port_name': port_name,
+                            'module_type': self._identify_module_type(form_factor or media),
+                            'model': media or form_factor,
+                            'serial_number': serial,
+                            'vendor': None,
+                            'speed_gbps': self._extract_speed_gbps(media or form_factor)
+                        }
+
+                        modules.append(module)
+                        logger.debug(f"Parsed Dell OS10 module: {port_name} = {form_factor} / {media} / {serial}")
+                        continue
+
+                    # Legacy table format:
+                    # [Slot, Port, Type, Media, Serial_Number, Dell_Qualified]
                     if len(parts) >= 5:
+                        slot = parts[0].strip()
+                        port = parts[1].strip()
                         module_type_str = parts[2].strip()
                         media = parts[3].strip()
                         serial = parts[4].strip() if len(parts) > 4 else None
 
-                        # Build port name as "Port {port}"
                         port_name = f"Port {port}"
 
                         module = {
@@ -1888,7 +2237,7 @@ class CLIService:
                             'module_type': self._identify_module_type(module_type_str),
                             'model': media if media else module_type_str,
                             'serial_number': serial,
-                            'vendor': None,  # Not available in this output format
+                            'vendor': None,
                             'speed_gbps': self._extract_speed_gbps(media if media else module_type_str)
                         }
 
@@ -1905,28 +2254,102 @@ class CLIService:
         return modules
     
     def _parse_dell_transceiver(self, output: str) -> List[Dict]:
-        """Parse Dell 'show interface transceiver' output"""
+        """Parse Dell 'show interface transceiver' output.
+
+        Force10/OS9 platforms return a per-interface block with serial-id and
+        diagnostics sections. The old line-by-line parser treated every
+        diagnostic line as a separate module record, producing hundreds of fake
+        rows like "RX1 / Power". Parse the output block-wise instead.
+        """
         modules = []
         try:
-            lines = output.strip().split('\n')
-            
-            for line in lines:
-                line = line.strip()
-                if not line or line.startswith('Port') or line.startswith('---'):
+            blocks: List[tuple[str, List[str]]] = []
+            current_interface = None
+            current_lines: List[str] = []
+
+            for raw_line in output.splitlines():
+                line = raw_line.rstrip()
+                interface_match = re.match(r'^\s*Interface Name\s*:\s*(.+?)\s*$', line)
+                if interface_match:
+                    if current_interface is not None:
+                        blocks.append((current_interface, current_lines))
+                    current_interface = interface_match.group(1).strip()
+                    current_lines = []
                     continue
-                
-                # Example: Gi 1/1    SFP-10GBase-SR    FINISAR CORP.    FTLX8571D3BCL-FC    1234567
-                parts = line.split()
-                if len(parts) >= 4:
-                    module = {
-                        'port_name': parts[0],
-                        'model': parts[1] if len(parts) > 1 else None,
-                        'vendor': parts[2] if len(parts) > 2 else None,
-                        'serial_number': parts[3] if len(parts) > 3 else None,
-                        'module_type': self._identify_module_type(parts[1] if len(parts) > 1 else ''),
-                        'speed_gbps': None
-                    }
-                    modules.append(module)
+
+                if current_interface is not None:
+                    current_lines.append(line)
+
+            if current_interface is not None:
+                blocks.append((current_interface, current_lines))
+
+            for interface_name, block_lines in blocks:
+                block_text = '\n'.join(block_lines)
+                if 'pluggable optics cannot be read or is not present' in block_text.lower():
+                    continue
+
+                serial_match = re.search(
+                    r'^\s*(?:QSFP28|QSFP|QSFP\+|SFP\+|SFP)\s+\S+\s+Vendor SN\s*=\s*(.+?)\s*$',
+                    block_text,
+                    re.MULTILINE
+                )
+                vendor_match = re.search(
+                    r'^\s*(?:QSFP28|QSFP|QSFP\+|SFP\+|SFP)\s+\S+\s+Vendor Name\s*=\s*(.+?)\s*$',
+                    block_text,
+                    re.MULTILINE
+                )
+                part_match = re.search(
+                    r'^\s*(?:QSFP28|QSFP|QSFP\+|SFP\+|SFP)\s+\S+\s+Vendor (?:PN|Part Number|Part)\s*=\s*(.+?)\s*$',
+                    block_text,
+                    re.MULTILINE
+                )
+                family_match = re.search(
+                    r'^\s*((?:QSFP28|QSFP|QSFP\+|SFP\+|SFP))\s+\S+\s+Serial ID Base Fields',
+                    block_text,
+                    re.MULTILINE
+                )
+
+                media_model = None
+                for candidate in reversed(block_lines):
+                    candidate = candidate.strip()
+                    if (
+                        not candidate or
+                        '=' in candidate or
+                        candidate.startswith('Interface Name') or
+                        set(candidate) == {'='}
+                    ):
+                        continue
+                    if re.search(r'(BASE|AOC|DAC|SFP|QSFP)', candidate, re.IGNORECASE):
+                        media_model = candidate
+                        break
+
+                vendor = vendor_match.group(1).strip() if vendor_match else None
+                part_number = part_match.group(1).strip() if part_match else None
+                serial_number = serial_match.group(1).strip() if serial_match else None
+                module_family = family_match.group(1).strip() if family_match else None
+                port_name = self._normalize_optical_port_name(interface_name)
+
+                model_hint = ' '.join(
+                    value for value in [module_family, media_model, part_number, interface_name] if value
+                )
+                module_type = self._identify_module_type(model_hint)
+                if module_type == 'Transceiver':
+                    module_type = self._infer_module_type_from_port_name(interface_name)
+
+                speed_gbps = self._extract_speed_gbps(model_hint)
+
+                # Only keep interface blocks that expose real identity data.
+                if not any([serial_number, vendor, part_number, media_model]):
+                    continue
+
+                modules.append({
+                    'port_name': port_name,
+                    'model': part_number or media_model,
+                    'vendor': vendor,
+                    'serial_number': serial_number,
+                    'module_type': module_type,
+                    'speed_gbps': speed_gbps
+                })
         
         except Exception as e:
             logger.error(f"Error parsing Dell transceiver output: {str(e)}")
@@ -1937,6 +2360,19 @@ class CLIService:
         """Parse Cisco 'show interfaces transceiver' output"""
         modules = []
         try:
+            # Catalyst IOS often returns DOM telemetry rather than module identity.
+            # In that format the output contains temperatures/voltages/currents, not
+            # vendor/model/serial data. Returning fake records is worse than returning none.
+            if (
+                'Temperature' in output and
+                'Voltage' in output and
+                'Current' in output and
+                'Tx Power' in output and
+                'Rx Power' in output
+            ):
+                logger.warning("Cisco transceiver output is telemetry-only; skipping parser to avoid fake module records")
+                return []
+
             lines = output.strip().split('\n')
             
             for line in lines:
@@ -1960,6 +2396,58 @@ class CLIService:
         except Exception as e:
             logger.error(f"Error parsing Cisco transceiver output: {str(e)}")
         
+        return modules
+
+    def _parse_cisco_inventory(self, output: str) -> List[Dict]:
+        """Parse Cisco 'show inventory' output for pluggable optics."""
+        modules = []
+        try:
+            blocks = [block.strip() for block in re.split(r'\n\s*\n', output) if block.strip()]
+
+            for block in blocks:
+                name_match = re.search(r'NAME:\s+"([^"]+)",\s*DESCR:\s+"([^"]*)"', block)
+                pid_match = re.search(r'PID:\s*([^,]*),\s*VID:\s*([^,]*),\s*SN:\s*(.+)', block)
+
+                if not name_match:
+                    continue
+
+                port_name = name_match.group(1).strip()
+                description = name_match.group(2).strip()
+
+                # Keep only interface-like inventory entries, not chassis/PSU/stack items.
+                if not re.match(r'^(Te|Gi|Fa|Fo|Hu|Twe|Eth|Ethernet|FortyGig|TwentyFiveGig|HundredGig)', port_name, re.IGNORECASE):
+                    continue
+
+                identity_text = description.lower()
+                pid = pid_match.group(1).strip() if pid_match else ''
+                serial = pid_match.group(3).strip() if pid_match else ''
+                unsupported_identity = description.lower() in {'unsupported', 'unknown', 'not supported'}
+
+                if not any(keyword in identity_text for keyword in ['sfp', 'qsfp', 'gbic', 'transceiver', '1000base', '10gbase', '40gbase', '100g']):
+                    # Older Catalyst platforms sometimes expose pluggables as
+                    # interface inventory entries with DESCR "unsupported" but
+                    # still provide a real serial number.
+                    if not (unsupported_identity and serial):
+                        continue
+
+                model = pid or (None if unsupported_identity else description) or None
+                module_hint = f"{description} {pid} {port_name}".strip()
+                module_type = self._identify_module_type(module_hint)
+                if module_type == 'Transceiver':
+                    module_type = self._infer_module_type_from_port_name(port_name)
+
+                modules.append({
+                    'port_name': port_name,
+                    'model': model if model else None,
+                    'vendor': 'Cisco',
+                    'serial_number': serial if serial else None,
+                    'module_type': module_type,
+                    'speed_gbps': self._extract_speed_gbps(module_hint)
+                })
+
+        except Exception as e:
+            logger.error(f"Error parsing Cisco inventory output: {str(e)}")
+
         return modules
     
     def _collect_alcatel_transceivers(self, connection) -> List[Dict]:
@@ -2030,17 +2518,17 @@ class CLIService:
             if not vendor_match:
                 vendor_match = re.search(r'^\s*vendor\s+(\S+)', output, re.MULTILINE)
             if vendor_match:
-                module['vendor'] = vendor_match.group(1).strip()
+                module['vendor'] = vendor_match.group(1).strip().strip('"')
 
             # Extract part number (model)
             model_match = re.search(r'vendor-part-number\s+(\S+)', output)
             if model_match:
-                module['model'] = model_match.group(1).strip()
+                module['model'] = model_match.group(1).strip().strip('"')
 
             # Extract serial number - SR Linux format: "serial-number FR213902505" (no vendor- prefix)
             serial_match = re.search(r'serial-number\s+(\S+)', output)
             if serial_match:
-                module['serial_number'] = serial_match.group(1).strip()
+                module['serial_number'] = serial_match.group(1).strip().strip('"')
 
             # Extract module type from form-factor (SFP/SFPplus/QSFP/etc)
             if 'form-factor' in output:
@@ -2059,8 +2547,10 @@ class CLIService:
 
             module['speed_gbps'] = None
 
-            # Return module only if we have at least one identifying field
-            if 'vendor' in module or 'model' in module or 'serial_number' in module or 'module_type' in module:
+            # Only keep modules that carry at least one real identifying attribute.
+            # A generic "Transceiver" placeholder without vendor/model/serial pollutes the search page.
+            has_identity = any(module.get(key) for key in ['vendor', 'model', 'serial_number'])
+            if has_identity:
                 return module
             return None
 
@@ -2087,6 +2577,56 @@ class CLIService:
             return 'SFP'
         else:
             return 'Transceiver'
+
+    def _infer_module_type_from_port_name(self, port_name: str) -> str:
+        """Infer a generic optical module type when the platform hides the PID."""
+        port_lower = (port_name or '').lower()
+
+        if port_lower.startswith(('hundredgige', 'hundredgig', 'hu')):
+            return 'QSFP28'
+        if port_lower.startswith(('fortygige', 'fortygig', 'fo')):
+            return 'QSFP+'
+        if port_lower.startswith(('tengigabitethernet', 'tengige', 'te', 'twentyfivegig', 'twe')):
+            return 'SFP+'
+        if port_lower.startswith(('gigabitethernet', 'gi', 'fastethernet', 'fa', 'ethernet')):
+            return 'SFP'
+        return 'Transceiver'
+
+    def _normalize_optical_port_name(self, interface_name: str) -> str:
+        """Normalize vendor-specific interface labels to the canonical port token."""
+        if not interface_name:
+            return interface_name
+
+        cleaned = interface_name.strip()
+        match = re.search(r'(\d+(?:/\d+){1,2})$', cleaned)
+        if match:
+            return match.group(1)
+        return cleaned
+
+    def _infer_module_type_from_port_name(self, port_name: str) -> str:
+        """Infer a generic optical module type when the platform hides the PID."""
+        port_lower = (port_name or '').lower()
+
+        if port_lower.startswith(('hundredgige', 'hundredgig', 'hu')):
+            return 'QSFP28'
+        if port_lower.startswith(('fortygige', 'fortygig', 'fo')):
+            return 'QSFP+'
+        if port_lower.startswith(('tengigabitethernet', 'tengige', 'te', 'twentyfivegig', 'twe')):
+            return 'SFP+'
+        if port_lower.startswith(('gigabitethernet', 'gi', 'fastethernet', 'fa', 'ethernet')):
+            return 'SFP'
+        return 'Transceiver'
+
+    def _normalize_optical_port_name(self, interface_name: str) -> str:
+        """Normalize vendor-specific interface labels to the canonical port token."""
+        if not interface_name:
+            return interface_name
+
+        cleaned = interface_name.strip()
+        match = re.search(r'(\d+(?:/\d+){1,2})$', cleaned)
+        if match:
+            return match.group(1)
+        return cleaned
     
     def _extract_speed_gbps(self, speed_str: str) -> Optional[int]:
         """Extract speed in Gbps from speed string"""

@@ -46,16 +46,23 @@ export interface ParserInfo {
   description: string
 }
 
-export interface AvailableParsers {
+export interface DeviceTypeInfo {
+  type: string
+  name: string
+  description: string
+}
+
+export interface CommandTemplateOptions {
+  device_types: DeviceTypeInfo[]
   arp: ParserInfo[]
   mac: ParserInfo[]
 }
 
 /**
- * Get available parsers for ARP and MAC collection
+ * Get supported device types and parsers for command templates
  */
 export function getAvailableParsers() {
-  return apiClient.get<AvailableParsers>('/api/v1/command-templates/parsers')
+  return apiClient.get<CommandTemplateOptions>('/api/v1/command-templates/parsers')
 }
 
 /**

@@ -1,10 +1,13 @@
 from typing import Optional, List, Dict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_, cast, Text, String
+from sqlalchemy import select, func, and_, or_, cast, Text, String, Integer
 from models.ipam import IPSubnet, IPAddress, IPScanHistory, IPStatus
 from models.switch import Switch
+from models.mac_table import MACTable
+from models.port_analysis import PortAnalysis
 from services.ip_scan import ip_scan_service
 from services.ip_lookup import ip_lookup_service
+from services.port_lookup_policy_service import build_lookup_eligible_clause
 from core.config import settings
 from utils.logger import logger
 import ipaddress
@@ -14,6 +17,16 @@ import asyncio
 
 class IPAMService:
     """Service for IP Address Management"""
+
+    def _ip_address_order_by(self):
+        """Return numeric IPv4 ordering expressions for subnet detail listings."""
+        ip_text = func.host(IPAddress.ip_address)
+        return [
+            cast(func.split_part(ip_text, '.', 1), Integer),
+            cast(func.split_part(ip_text, '.', 2), Integer),
+            cast(func.split_part(ip_text, '.', 3), Integer),
+            cast(func.split_part(ip_text, '.', 4), Integer),
+        ]
 
     async def create_subnet(
         self,
@@ -242,7 +255,7 @@ class IPAMService:
         if conditions:
             query = query.where(and_(*conditions))
 
-        query = query.order_by(IPAddress.ip_address).offset(skip).limit(limit)
+        query = query.order_by(*self._ip_address_order_by()).offset(skip).limit(limit)
 
         result = await db.execute(query)
         return result.scalars().all()
@@ -527,51 +540,36 @@ class IPAMService:
         Only matches access ports (ports with 1-3 MAC addresses), not trunk ports
         """
         try:
-            # First, try to find MAC address in mac_table (most accurate)
-            from models.mac_table import MACTable
-
             result = await db.execute(
-                select(MACTable, Switch)
+                select(MACTable, Switch, PortAnalysis)
                 .join(Switch, MACTable.switch_id == Switch.id)
+                .outerjoin(
+                    PortAnalysis,
+                    and_(
+                        PortAnalysis.switch_id == MACTable.switch_id,
+                        PortAnalysis.port_name == MACTable.port_name
+                    )
+                )
                 .where(
                     cast(MACTable.mac_address, Text) == cast(mac_address.lower(), Text)
                 )
+                .where(build_lookup_eligible_clause(PortAnalysis))
                 .order_by(MACTable.last_seen.desc())
                 .limit(1)
             )
             row = result.first()
 
             if row:
-                mac_entry, switch = row
-
-                # Check how many MAC addresses are on this port
-                mac_count_result = await db.execute(
-                    select(func.count(MACTable.id))
-                    .where(
-                        and_(
-                            MACTable.switch_id == switch.id,
-                            MACTable.port_name == mac_entry.port_name
-                        )
-                    )
+                mac_entry, switch, port_analysis = row
+                mac_count = port_analysis.mac_count if port_analysis else None
+                ip_addr.switch_id = switch.id
+                ip_addr.switch_port = mac_entry.port_name
+                ip_addr.vlan_id = mac_entry.vlan_id
+                logger.info(
+                    f"Found switch info for {ip_addr.ip_address} (MAC: {mac_address}): "
+                    f"{switch.name} port {mac_entry.port_name} VLAN {mac_entry.vlan_id} "
+                    f"(lookup-eligible port, mac_count={mac_count if mac_count is not None else 'n/a'})"
                 )
-                mac_count = mac_count_result.scalar()
-
-                # Only use this port if it has 3 or fewer MAC addresses (likely an access port)
-                # Ports with many MACs are trunk/uplink ports
-                if mac_count <= 3:
-                    ip_addr.switch_id = switch.id
-                    ip_addr.switch_port = mac_entry.port_name
-                    ip_addr.vlan_id = mac_entry.vlan_id
-                    logger.info(
-                        f"Found switch info for {ip_addr.ip_address} (MAC: {mac_address}): "
-                        f"{switch.name} port {mac_entry.port_name} VLAN {mac_entry.vlan_id} "
-                        f"(port has {mac_count} MACs - access port)"
-                    )
-                else:
-                    logger.debug(
-                        f"Skipping port {mac_entry.port_name} for {ip_addr.ip_address}: "
-                        f"has {mac_count} MACs (likely trunk/uplink port)"
-                    )
                 return
 
             # If not found in mac_table, try arp_table (may have switch but not port)

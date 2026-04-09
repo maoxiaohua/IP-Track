@@ -97,6 +97,10 @@ class SwitchUpdate(BaseModel):
     snmp_priv_password: Optional[str] = None
     snmp_community: Optional[str] = None
 
+    # Manual trunk-review workflow
+    trunk_review_completed: Optional[bool] = None
+    trunk_review_note: Optional[str] = Field(None, max_length=1000)
+
 
 class SwitchResponse(SwitchBase):
     """Schema for switch response"""
@@ -125,6 +129,9 @@ class SwitchResponse(SwitchBase):
     last_mac_collection_at: Optional[datetime] = None
     last_collection_status: Optional[str] = None
     last_collection_message: Optional[str] = None
+    trunk_review_completed: bool = False
+    trunk_review_completed_at: Optional[datetime] = None
+    trunk_review_note: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -26,10 +26,61 @@ class ParserInfo(BaseModel):
     description: str
 
 
-@router.get("/parsers", response_model=dict)
+class DeviceTypeInfo(BaseModel):
+    """Supported Netmiko device type information"""
+    type: str
+    name: str
+    description: str
+
+
+class CommandTemplateOptionsResponse(BaseModel):
+    """Supported device types and parser types for command templates"""
+    device_types: List[DeviceTypeInfo]
+    arp: List[ParserInfo]
+    mac: List[ParserInfo]
+
+
+@router.get("/parsers", response_model=CommandTemplateOptionsResponse)
 async def get_available_parsers():
-    """Get all available parsers for ARP and MAC collection"""
-    parsers = {
+    """Get supported device types and parsers for command template editing."""
+    return {
+        "device_types": [
+            {
+                "type": "nokia_srl",
+                "name": "Nokia SR Linux",
+                "description": "Used for Nokia/Alcatel 7220 IXR series"
+            },
+            {
+                "type": "nokia_sros",
+                "name": "Nokia SR OS",
+                "description": "Used for Nokia/Alcatel 7250 and WBX series"
+            },
+            {
+                "type": "dell_force10",
+                "name": "Dell Force10 / DNOS9",
+                "description": "Used for Dell Force10, DNOS9, and Z9100 platforms"
+            },
+            {
+                "type": "dell_os10",
+                "name": "Dell OS10",
+                "description": "Used for Dell OS10 platforms such as S5232F-ON"
+            },
+            {
+                "type": "cisco_ios",
+                "name": "Cisco IOS / IOS-XE",
+                "description": "Used for Cisco Catalyst and IOS-XE devices"
+            },
+            {
+                "type": "cisco_nxos",
+                "name": "Cisco NX-OS",
+                "description": "Used for Cisco Nexus and NX-OS devices"
+            },
+            {
+                "type": "juniper_junos",
+                "name": "Juniper JunOS",
+                "description": "Used for Juniper switches"
+            }
+        ],
         "arp": [
             {
                 "type": "nokia_7220",
@@ -47,9 +98,19 @@ async def get_available_parsers():
                 "description": "Parser for Dell OS10 ARP table output"
             },
             {
+                "type": "dell_force10",
+                "name": "Dell Force10 / DNOS9",
+                "description": "Parser for Dell Force10 and DNOS9 ARP output"
+            },
+            {
                 "type": "cisco_ios",
                 "name": "Cisco IOS/IOS-XE",
                 "description": "Parser for Cisco IOS/IOS-XE ARP table output"
+            },
+            {
+                "type": "cisco_nxos",
+                "name": "Cisco NX-OS",
+                "description": "Parser for Cisco NX-OS ARP table output"
             },
             {
                 "type": "juniper",
@@ -74,9 +135,19 @@ async def get_available_parsers():
                 "description": "Parser for Dell OS10 MAC table output"
             },
             {
+                "type": "dell_force10",
+                "name": "Dell Force10 / DNOS9",
+                "description": "Parser for Dell Force10 and DNOS9 MAC table output"
+            },
+            {
                 "type": "cisco_ios",
                 "name": "Cisco IOS/IOS-XE",
                 "description": "Parser for Cisco IOS/IOS-XE MAC table output"
+            },
+            {
+                "type": "cisco_nxos",
+                "name": "Cisco NX-OS",
+                "description": "Parser for Cisco NX-OS MAC table output"
             },
             {
                 "type": "juniper",
@@ -85,7 +156,6 @@ async def get_available_parsers():
             }
         ]
     }
-    return parsers
 
 
 class TestConnectionRequest(BaseModel):

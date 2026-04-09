@@ -13,6 +13,7 @@ on multiple switches.
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from utils.logger import logger
+from services.port_lookup_policy_service import resolve_lookup_policy
 
 
 class IPLocationEngine:
@@ -151,12 +152,16 @@ class IPLocationEngine:
             port_info = port_analysis.get(port_key, {})
             port_type = port_info.get('port_type', 'unknown')
             mac_count = port_info.get('mac_count', 0)
+            resolved_lookup_policy = resolve_lookup_policy(
+                port_type=port_info.get('port_type'),
+                lookup_policy_override=port_info.get('lookup_policy_override'),
+                has_analysis=bool(port_info)
+            )
 
-            # Explicitly filter out trunk/uplink ports (don't even consider them as candidates)
-            if port_type in ['trunk', 'uplink']:
+            if not resolved_lookup_policy['included']:
                 logger.debug(
-                    f"Skipping trunk/uplink port {port_name} on switch {switch_id} "
-                    f"for MAC {primary_mac} (port_type={port_type})"
+                    f"Skipping port {port_name} on switch {switch_id} "
+                    f"for MAC {primary_mac} ({resolved_lookup_policy['reason']})"
                 )
                 continue
 
@@ -190,7 +195,10 @@ class IPLocationEngine:
                 'port_mac_count': mac_count,
                 'appears_on_switches': unique_switches,
                 'port_type': port_type,
-                'reasoning': f"MAC on {unique_switches} switch(es), port has {mac_count} MACs, type={port_type}"
+                'reasoning': (
+                    f"MAC on {unique_switches} switch(es), port has {mac_count} MACs, "
+                    f"type={port_type}, policy={resolved_lookup_policy['reason']}"
+                )
             })
 
         # Step 4: Select best candidate

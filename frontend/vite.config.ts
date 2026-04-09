@@ -4,6 +4,38 @@ import { fileURLToPath, URL } from 'node:url'
 
 export default defineConfig({
   plugins: [vue()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return
+          }
+
+          if (id.includes('xlsx')) {
+            return 'vendor-xlsx'
+          }
+
+          if (id.includes('echarts') || id.includes('zrender')) {
+            return 'vendor-echarts'
+          }
+
+          if (id.includes('element-plus') || id.includes('@element-plus')) {
+            return 'vendor-element-plus'
+          }
+
+          if (
+            id.includes('/vue/') ||
+            id.includes('@vue') ||
+            id.includes('vue-router') ||
+            id.includes('pinia')
+          ) {
+            return 'vendor-vue'
+          }
+        }
+      }
+    }
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url))

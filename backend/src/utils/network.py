@@ -3,10 +3,10 @@ Network utilities for ping and connectivity checks
 """
 import asyncio
 import platform
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 
-async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, any]:
+async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, Any]:
     """
     Ping a host to check if it's reachable
 
@@ -90,7 +90,11 @@ async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, an
         }
 
 
-async def ping_multiple_hosts(hosts: list, timeout: int = 2) -> Dict[str, Dict]:
+async def ping_multiple_hosts(
+    hosts: list[str],
+    timeout: int = 2,
+    concurrency: int = 50
+) -> Dict[str, Dict[str, Any]]:
     """
     Ping multiple hosts concurrently
 
@@ -101,7 +105,13 @@ async def ping_multiple_hosts(hosts: list, timeout: int = 2) -> Dict[str, Dict]:
     Returns:
         Dict mapping host to ping result
     """
-    tasks = [ping_host(host, timeout) for host in hosts]
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def ping_with_limit(host: str) -> Dict[str, Any]:
+        async with semaphore:
+            return await ping_host(host, timeout)
+
+    tasks = [ping_with_limit(host) for host in hosts]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     return {

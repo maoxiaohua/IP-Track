@@ -146,14 +146,12 @@
 
         <el-form-item label="NetMiko设备类型" prop="device_type">
           <el-select v-model="templateForm.device_type" placeholder="选择设备类型" style="width: 100%">
-            <el-option label="Nokia SR Linux (nokia_srl)" value="nokia_srl" />
-            <el-option label="Dell OS10 (dell_os10)" value="dell_os10" />
-            <el-option label="Cisco IOS (cisco_ios)" value="cisco_ios" />
-            <el-option label="Cisco NX-OS (cisco_nxos)" value="cisco_nxos" />
-            <el-option label="Huawei (huawei)" value="huawei" />
-            <el-option label="HP ProCurve (hp_procurve)" value="hp_procurve" />
-            <el-option label="Arista EOS (arista_eos)" value="arista_eos" />
-            <el-option label="Juniper JunOS (juniper_junos)" value="juniper_junos" />
+            <el-option
+              v-for="deviceType in availableOptions.device_types"
+              :key="deviceType.type"
+              :label="`${deviceType.name} (${deviceType.type})`"
+              :value="deviceType.type"
+            />
           </el-select>
         </el-form-item>
 
@@ -170,7 +168,7 @@
         <el-form-item label="ARP解析器类型" v-if="templateForm.arp_enabled">
           <el-select v-model="templateForm.arp_parser_type" placeholder="选择解析器" style="width: 100%">
             <el-option
-              v-for="parser in availableParsers.arp"
+              v-for="parser in availableOptions.arp"
               :key="parser.type"
               :label="parser.name"
               :value="parser.type"
@@ -194,7 +192,7 @@
         <el-form-item label="MAC解析器类型" v-if="templateForm.mac_enabled">
           <el-select v-model="templateForm.mac_parser_type" placeholder="选择解析器" style="width: 100%">
             <el-option
-              v-for="parser in availableParsers.mac"
+              v-for="parser in availableOptions.mac"
               :key="parser.type"
               :label="parser.name"
               :value="parser.type"
@@ -337,7 +335,12 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Edit, Delete, View, Connection } from '@element-plus/icons-vue'
-import type { CommandTemplate, TestConnectionRequest, TestConnectionResponse, AvailableParsers } from '@/api/commandTemplates'
+import type {
+  CommandTemplate,
+  TestConnectionRequest,
+  TestConnectionResponse,
+  CommandTemplateOptions
+} from '@/api/commandTemplates'
 import {
   getCommandTemplates,
   createCommandTemplate,
@@ -348,7 +351,7 @@ import {
 } from '@/api/commandTemplates'
 
 const templates = ref<CommandTemplate[]>([])
-const availableParsers = ref<AvailableParsers>({ arp: [], mac: [] })
+const availableOptions = ref<CommandTemplateOptions>({ device_types: [], arp: [], mac: [] })
 const loading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
@@ -403,7 +406,7 @@ onMounted(() => {
 const loadParsers = async () => {
   try {
     const response = await getAvailableParsers()
-    availableParsers.value = response.data
+    availableOptions.value = response.data
   } catch (error: any) {
     ElMessage.error('加载解析器列表失败: ' + error.message)
   }

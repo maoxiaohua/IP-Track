@@ -2,7 +2,6 @@ import apiClient from './index'
 
 export interface IPLookupRequest {
   ip_address: string
-  mode?: 'auto' | 'cache' | 'realtime'  // Query mode
 }
 
 export interface IPLookupResult {
@@ -49,10 +48,9 @@ export interface QueryHistoryListResponse {
 
 export const lookupApi = {
   // Lookup an IP address
-  lookupIP: async (ipAddress: string, mode: 'auto' | 'cache' | 'realtime' = 'cache'): Promise<IPLookupResponse> => {
+  lookupIP: async (ipAddress: string): Promise<IPLookupResponse> => {
     const response = await apiClient.post('/api/v1/lookup/ip', {
-      ip_address: ipAddress,
-      mode: mode
+      ip_address: ipAddress
     })
     return response.data
   },

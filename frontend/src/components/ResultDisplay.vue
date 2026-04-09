@@ -33,12 +33,6 @@
           <el-tag type="warning">VLAN {{ result.vlan_id }}</el-tag>
         </el-descriptions-item>
 
-        <el-descriptions-item label="Query Mode">
-          <el-tag :type="getQueryModeType(result.query_mode)" size="small">
-            {{ getQueryModeLabel(result.query_mode) }}
-          </el-tag>
-        </el-descriptions-item>
-
         <el-descriptions-item label="Query Time">
           {{ result.query_time_ms }} ms
         </el-descriptions-item>
@@ -67,12 +61,6 @@
           <p>Target IP: <strong>{{ result.target_ip }}</strong></p>
           <p v-if="result.mac_address">MAC Address: <strong>{{ result.mac_address }}</strong></p>
           <p>Query Time: {{ result.query_time_ms }} ms</p>
-          <p v-if="result.query_mode">
-            Query Mode: 
-            <el-tag :type="getQueryModeType(result.query_mode)" size="small">
-              {{ getQueryModeLabel(result.query_mode) }}
-            </el-tag>
-          </p>
         </template>
       </el-result>
     </el-card>
@@ -85,26 +73,6 @@ import type { IPLookupResult } from '@/api/lookup'
 defineProps<{
   result: IPLookupResult
 }>()
-
-const getQueryModeType = (mode?: string) => {
-  if (!mode) return 'info'
-  switch (mode) {
-    case 'cache': return 'success'
-    case 'realtime': return 'warning'
-    case 'auto_fallback': return 'danger'
-    default: return 'info'
-  }
-}
-
-const getQueryModeLabel = (mode?: string) => {
-  if (!mode) return 'Unknown'
-  switch (mode) {
-    case 'cache': return 'Cache (Fast)'
-    case 'realtime': return 'Realtime (Live)'
-    case 'auto_fallback': return 'Auto (Fallback)'
-    default: return mode
-  }
-}
 
 const formatDataAge = (seconds: number) => {
   if (seconds < 60) return `${seconds} seconds ago`

@@ -16,21 +16,19 @@ async def lookup_ip_address(
     """
     Lookup an IP address to find which switch port it's connected to
 
-    Query modes:
-    - 'cache' (default): Fast query from database (~100ms). Data may be up to 10 minutes old.
-    - 'realtime': Direct SSH query to switches (~20-30s). Most accurate but slow.
-    - 'auto': Try cache first, fallback to realtime if not found.
+    Fast query from database cache (~100ms).
+    Returns data from the last collection cycle.
+    Data window is configurable via IP_LOOKUP_CACHE_HOURS (default: 24 hours).
 
     This endpoint:
-    1. Queries cached ARP/MAC tables (if mode='cache' or 'auto')
-    2. Falls back to live switch queries (if mode='realtime' or auto fallback)
-    3. Returns switch name, port, VLAN, and data freshness information
+    1. Queries cached ARP/MAC tables from the database
+    2. Returns switch name, port, VLAN, and data freshness information
     """
     try:
-        logger.info(f"Received IP lookup request for {request.ip_address}, mode={request.mode}")
+        logger.info(f"Received IP lookup request for {request.ip_address}")
 
-        # Perform the lookup with specified mode
-        result = await ip_lookup_service.lookup_ip(db, str(request.ip_address), mode=request.mode)
+        # Perform the lookup
+        result = await ip_lookup_service.lookup_ip(db, str(request.ip_address))
 
         # Convert to response format
         if result['found']:

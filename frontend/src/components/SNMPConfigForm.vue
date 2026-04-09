@@ -188,7 +188,7 @@
 import { ref, reactive, watch } from 'vue';
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
 import { InfoFilled, WarningFilled, Connection, Check, Close } from '@element-plus/icons-vue';
-import type { SNMPConfig, SNMPTestResponse } from '@/api/snmp';
+import { testSNMPConnection, type SNMPConfig, type SNMPTestResponse } from '@/api/snmp';
 
 interface Props {
   switchId?: number;
@@ -281,8 +281,6 @@ const handleTest = async () => {
   testing.value = true;
 
   try {
-    const { testSNMPConnection } = await import('@/api/snmp');
-
     const testConfig = {
       target_ip: props.switchIp,
       snmp_version: formData.snmp_version,

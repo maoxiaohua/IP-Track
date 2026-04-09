@@ -45,6 +45,10 @@
               <el-icon><Clock /></el-icon>
               <span>History</span>
             </el-menu-item>
+            <el-menu-item index="/settings">
+              <el-icon><Tools /></el-icon>
+              <span>Settings</span>
+            </el-menu-item>
           </el-menu>
         </div>
       </el-header>

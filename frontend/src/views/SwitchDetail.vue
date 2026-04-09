@@ -30,13 +30,13 @@
     <el-card v-else-if="switchInfo" class="info-card" shadow="hover">
       <template #header>
         <div class="card-header">
-          <span style="font-weight: 600; font-size: 16px;">交换机信息</span>
+          <span class="section-title">交换机信息</span>
           <el-button
             type="success"
             size="small"
+            class="detail-action-button"
             @click="refreshDeviceInfo"
             :loading="deviceInfoLoading"
-            plain
           >
             <template #icon><el-icon><Refresh /></el-icon></template>
             刷新设备信息
@@ -80,6 +80,16 @@
             {{ switchInfo.snmp_enabled ? '已启用' : '未启用' }}
           </el-tag>
         </el-descriptions-item>
+        <el-descriptions-item label="Trunk 人工识别" label-class-name="desc-label">
+          <div class="trunk-review-status">
+            <el-tag :type="switchInfo.trunk_review_completed ? 'success' : 'warning'" size="small">
+              {{ switchInfo.trunk_review_completed ? '已完成' : '待处理' }}
+            </el-tag>
+            <span v-if="switchInfo.trunk_review_completed_at" class="trunk-review-time">
+              {{ formatDateTime(switchInfo.trunk_review_completed_at) }}
+            </span>
+          </div>
+        </el-descriptions-item>
       </el-descriptions>
     </el-card>
 
@@ -89,8 +99,8 @@
         <el-card shadow="hover">
           <template #header>
             <div class="card-header">
-              <span style="font-weight: 600;">ARP 表 ({{ arpData.length }} 条记录)</span>
-              <el-button type="primary" size="small" @click="collectArpData" :loading="arpLoading" plain>
+              <span class="section-title">ARP 表 ({{ arpData.length }} 条记录)</span>
+              <el-button type="primary" size="small" class="detail-action-button" @click="collectArpData" :loading="arpLoading">
                 <template #icon><el-icon><Refresh /></el-icon></template>
                 立即收集
               </el-button>
@@ -148,8 +158,8 @@
         <el-card shadow="hover">
           <template #header>
             <div class="card-header">
-              <span style="font-weight: 600;">MAC 地址表 ({{ macData.length }} 条记录)</span>
-              <el-button type="primary" size="small" @click="collectMacData" :loading="macLoading" plain>
+              <span class="section-title">MAC 地址表 ({{ macData.length }} 条记录)</span>
+              <el-button type="primary" size="small" class="detail-action-button" @click="collectMacData" :loading="macLoading">
                 <template #icon><el-icon><Refresh /></el-icon></template>
                 立即收集
               </el-button>
@@ -202,12 +212,171 @@
         </el-card>
       </el-tab-pane>
 
+      <el-tab-pane label="端口策略" name="port-policy">
+        <el-card shadow="hover">
+          <template #header>
+            <div class="card-header">
+              <div class="port-policy-header">
+                <span class="section-title">端口定位策略</span>
+                <el-tag v-if="portAnalysisSummary" type="success" size="small">
+                  可参与定位 {{ portAnalysisSummary.lookup_included_ports }}/{{ portAnalysisSummary.total_ports }}
+                </el-tag>
+                <el-tag
+                  v-if="switchInfo"
+                  :type="switchInfo.trunk_review_completed ? 'success' : 'warning'"
+                  effect="dark"
+                >
+                  {{ switchInfo.trunk_review_completed ? '人工识别已完成' : '人工识别待处理' }}
+                </el-tag>
+                <el-button
+                  v-if="switchInfo && !switchInfo.trunk_review_completed"
+                  type="success"
+                  size="small"
+                  class="detail-action-button"
+                  :loading="trunkReviewUpdating"
+                  @click="setTrunkReview(true)"
+                >
+                  标记已完成
+                </el-button>
+                <el-button
+                  v-else-if="switchInfo"
+                  type="info"
+                  size="small"
+                  class="detail-action-button"
+                  :loading="trunkReviewUpdating"
+                  @click="setTrunkReview(false)"
+                >
+                  取消完成标记
+                </el-button>
+              </div>
+              <el-space>
+                <el-button
+                  type="primary"
+                  size="small"
+                  class="detail-action-button"
+                  @click="loadPortAnalysis"
+                  :loading="portPolicyLoading"
+                >
+                  <template #icon><el-icon><Refresh /></el-icon></template>
+                  刷新策略
+                </el-button>
+                <el-button
+                  type="warning"
+                  size="small"
+                  class="detail-action-button"
+                  @click="analyzePorts"
+                  :loading="portAnalyzing"
+                >
+                  重新分析端口
+                </el-button>
+              </el-space>
+            </div>
+          </template>
+
+          <el-alert
+            v-if="portAnalysisData.length === 0 && !portPolicyLoading"
+            title="暂无端口分析数据"
+            type="info"
+            description="请先执行一次端口分析。系统会基于 MAC 表生成端口分析，然后你可以人工设置某些端口强制参与或排除定位。"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 20px;"
+          />
+
+          <div v-if="portAnalysisSummary" class="policy-summary">
+            <el-tag type="info">Access {{ portAnalysisSummary.access_ports }}</el-tag>
+            <el-tag type="warning">Trunk {{ portAnalysisSummary.trunk_ports }}</el-tag>
+            <el-tag type="danger">Uplink {{ portAnalysisSummary.uplink_ports }}</el-tag>
+            <el-tag>Unknown {{ portAnalysisSummary.unknown_ports }}</el-tag>
+            <el-tag type="success">Lookup Included {{ portAnalysisSummary.lookup_included_ports }}</el-tag>
+            <el-tag type="danger">Lookup Excluded {{ portAnalysisSummary.lookup_excluded_ports }}</el-tag>
+          </div>
+
+          <el-table
+            v-if="portAnalysisData.length > 0"
+            :data="portAnalysisData"
+            stripe
+            border
+            style="width: 100%"
+            :default-sort="{ prop: 'port_name', order: 'ascending' }"
+          >
+            <el-table-column prop="port_name" label="端口" min-width="160" sortable />
+            <el-table-column prop="mac_count" label="MAC 数" width="90" sortable align="center" />
+            <el-table-column prop="unique_vlans" label="VLAN 数" width="100" sortable align="center" />
+            <el-table-column prop="port_type" label="自动判定" width="120" sortable align="center">
+              <template #default="{ row }">
+                <el-tag :type="getPortTypeTag(row.port_type)" size="small">
+                  {{ getPortTypeLabel(row.port_type) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="lookup_policy_override" label="人工覆盖" width="120" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.lookup_policy_override" :type="row.lookup_policy_override === 'include' ? 'success' : 'danger'" size="small">
+                  {{ row.lookup_policy_override === 'include' ? '强制包含' : '强制排除' }}
+                </el-tag>
+                <span v-else style="color: #909399;">自动</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="effective_lookup_status" label="生效结果" width="120" align="center">
+              <template #default="{ row }">
+                <el-tag :type="getLookupStatusTag(row.effective_lookup_status)" size="small">
+                  {{ row.effective_lookup_status === 'included' ? '参与定位' : '排除定位' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="effective_lookup_reason" label="生效原因" min-width="160" show-overflow-tooltip />
+            <el-table-column prop="analyzed_at" label="分析时间" min-width="180" sortable>
+              <template #default="{ row }">
+                {{ formatDateTime(row.analyzed_at) }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" min-width="240" fixed="right">
+              <template #default="{ row }">
+                <el-space wrap>
+                  <el-button
+                    size="small"
+                    type="success"
+                    class="detail-table-button"
+                    :disabled="row.lookup_policy_override === 'include'"
+                    :loading="portPolicyUpdatingPort === row.port_name"
+                    @click="setPortLookupPolicy(row, 'include')"
+                  >
+                    强制包含
+                  </el-button>
+                  <el-button
+                    size="small"
+                    type="danger"
+                    class="detail-table-button"
+                    :disabled="row.lookup_policy_override === 'exclude'"
+                    :loading="portPolicyUpdatingPort === row.port_name"
+                    @click="setPortLookupPolicy(row, 'exclude')"
+                  >
+                    强制排除
+                  </el-button>
+                  <el-button
+                    size="small"
+                    type="info"
+                    class="detail-table-button"
+                    :disabled="!row.lookup_policy_override"
+                    :loading="portPolicyUpdatingPort === row.port_name"
+                    @click="setPortLookupPolicy(row, null)"
+                  >
+                    清除覆盖
+                  </el-button>
+                </el-space>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-tab-pane>
+
       <el-tab-pane label="光模块" name="optical">
         <el-card shadow="hover">
           <template #header>
             <div class="card-header">
-              <span style="font-weight: 600;">光模块信息 ({{ opticalData.length }} 个模块)</span>
-              <el-button type="primary" size="small" @click="collectOpticalData" :loading="opticalLoading" plain>
+              <span class="section-title">光模块信息 ({{ opticalData.length }} 个模块)</span>
+              <el-button type="primary" size="small" class="detail-action-button" @click="collectOpticalData" :loading="opticalLoading">
                 <template #icon><el-icon><Refresh /></el-icon></template>
                 立即收集
               </el-button>
@@ -279,7 +448,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import apiClient from '@/api'
-import { switchesApi } from '@/api/switches'
+import { switchesApi, type PortAnalysisEntry, type PortAnalysisResponse } from '@/api/switches'
 
 const route = useRoute()
 const router = useRouter()
@@ -293,9 +462,15 @@ const deviceInfoLoading = ref(false)
 const arpData = ref<any[]>([])
 const macData = ref<any[]>([])
 const opticalData = ref<any[]>([])
+const portAnalysisData = ref<PortAnalysisEntry[]>([])
+const portAnalysisSummary = ref<PortAnalysisResponse['summary'] | null>(null)
 const arpLoading = ref(false)
 const macLoading = ref(false)
 const opticalLoading = ref(false)
+const portPolicyLoading = ref(false)
+const portAnalyzing = ref(false)
+const portPolicyUpdatingPort = ref<string | null>(null)
+const trunkReviewUpdating = ref(false)
 
 const arpCurrentPage = ref(1)
 const macCurrentPage = ref(1)
@@ -366,6 +541,30 @@ const getPriorityType = (priority: number) => {
   if (priority <= 10) return 'danger'
   if (priority <= 50) return 'warning'
   return 'info'
+}
+
+const getPortTypeTag = (portType: PortAnalysisEntry['port_type']) => {
+  const types: Record<PortAnalysisEntry['port_type'], string> = {
+    access: 'success',
+    trunk: 'warning',
+    uplink: 'danger',
+    unknown: 'info'
+  }
+  return types[portType] || 'info'
+}
+
+const getPortTypeLabel = (portType: PortAnalysisEntry['port_type']) => {
+  const labels: Record<PortAnalysisEntry['port_type'], string> = {
+    access: 'Access',
+    trunk: 'Trunk',
+    uplink: 'Uplink',
+    unknown: 'Unknown'
+  }
+  return labels[portType] || portType
+}
+
+const getLookupStatusTag = (status: PortAnalysisEntry['effective_lookup_status']) => {
+  return status === 'included' ? 'success' : 'danger'
 }
 
 const searchIP = (ip: string) => {
@@ -487,6 +686,72 @@ const loadOpticalData = async () => {
   }
 }
 
+const loadPortAnalysis = async () => {
+  portPolicyLoading.value = true
+  try {
+    const response = await switchesApi.getPortAnalysis(switchId.value)
+    portAnalysisData.value = response.ports || []
+    portAnalysisSummary.value = response.summary || null
+  } catch (error: any) {
+    portAnalysisData.value = []
+    portAnalysisSummary.value = null
+
+    if (error.response?.status !== 404) {
+      console.error('Failed to load port analysis:', error)
+      ElMessage.error(error.response?.data?.detail || '加载端口策略失败')
+    }
+  } finally {
+    portPolicyLoading.value = false
+  }
+}
+
+const analyzePorts = async () => {
+  portAnalyzing.value = true
+  try {
+    ElMessage.info('正在分析端口，请稍候...')
+    const response = await switchesApi.analyzePorts(switchId.value)
+    if (response.success) {
+      ElMessage.success(response.message || '端口分析完成')
+      await loadPortAnalysis()
+    } else {
+      ElMessage.warning(response.message || '端口分析未产生结果')
+    }
+  } catch (error: any) {
+    console.error('Failed to analyze ports:', error)
+    ElMessage.error(error.response?.data?.detail || '端口分析失败')
+  } finally {
+    portAnalyzing.value = false
+  }
+}
+
+const setPortLookupPolicy = async (
+  row: PortAnalysisEntry,
+  lookupPolicyOverride: 'include' | 'exclude' | null
+) => {
+  portPolicyUpdatingPort.value = row.port_name
+  try {
+    await switchesApi.updatePortLookupPolicy(switchId.value, {
+      port_name: row.port_name,
+      lookup_policy_override: lookupPolicyOverride
+    })
+
+    const actionText = lookupPolicyOverride === 'include'
+      ? '已强制包含'
+      : lookupPolicyOverride === 'exclude'
+        ? '已强制排除'
+        : '已清除覆盖'
+
+    ElMessage.success(`${row.port_name} ${actionText}`)
+    await loadPortAnalysis()
+    await loadMacData()
+  } catch (error: any) {
+    console.error('Failed to update port lookup policy:', error)
+    ElMessage.error(error.response?.data?.detail || '更新端口策略失败')
+  } finally {
+    portPolicyUpdatingPort.value = null
+  }
+}
+
 const collectOpticalData = async () => {
   opticalLoading.value = true
   try {
@@ -535,10 +800,29 @@ const refreshDeviceInfo = async () => {
   }
 }
 
+const setTrunkReview = async (value: boolean) => {
+  if (!switchInfo.value) return
+
+  trunkReviewUpdating.value = true
+  try {
+    const response = await switchesApi.update(switchId.value, {
+      trunk_review_completed: value
+    })
+    switchInfo.value = response
+    ElMessage.success(value ? '已标记为人工识别完成' : '已取消完成标记')
+  } catch (error: any) {
+    console.error('Failed to update trunk review status:', error)
+    ElMessage.error(error.response?.data?.detail || '更新 trunk 识别状态失败')
+  } finally {
+    trunkReviewUpdating.value = false
+  }
+}
+
 onMounted(async () => {
   await loadSwitchInfo()
   await loadArpData()
   await loadMacData()
+  await loadPortAnalysis()
   await loadOpticalData()
 })
 </script>
@@ -571,6 +855,48 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.port-policy-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.section-title {
+  font-weight: 700;
+  font-size: 15px;
+  color: #1f2937 !important;
+}
+
+.detail-action-button {
+  font-weight: 600;
+}
+
+.detail-table-button {
+  font-weight: 600;
+}
+
+.trunk-review-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.trunk-review-time {
+  color: #909399;
+  font-size: 12px;
+}
+
+.policy-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
 }
 
 .data-tabs {
@@ -591,13 +917,23 @@ onMounted(async () => {
   border-bottom: 1px solid #ebeef5;
 }
 
-:deep(.el-button.is-plain) {
-  background-color: #fff;
+:deep(.el-card__header .el-tag) {
+  color: inherit !important;
 }
 
-:deep(.el-button.is-plain:hover) {
-  background-color: #ecf5ff;
-  border-color: #409eff;
-  color: #409eff;
+:deep(.el-card__header .el-button--primary) {
+  color: #fff !important;
+}
+
+:deep(.el-card__header .el-button--success) {
+  color: #fff !important;
+}
+
+:deep(.el-card__header .el-button--warning) {
+  color: #fff !important;
+}
+
+:deep(.el-card__header .el-button--info) {
+  color: #fff !important;
 }
 </style>

@@ -9,10 +9,11 @@ Provides endpoints to:
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, func, cast, Text, desc
 from typing import Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from core.database import get_db
 from models.ip_location import IPLocation
@@ -23,8 +24,19 @@ from models.port_analysis import PortAnalysis
 from models.switch import Switch
 from services.network_data_collector import network_data_collector
 from services.network_scheduler import network_scheduler
+from services.port_lookup_policy_service import (
+    build_lookup_eligible_clause,
+    normalize_lookup_policy_override,
+    serialize_lookup_policy,
+)
 
 router = APIRouter(prefix="/network", tags=["network"])
+
+
+class PortLookupPolicyUpdateRequest(BaseModel):
+    port_name: str
+    lookup_policy_override: Optional[str] = None
+    lookup_policy_note: Optional[str] = None
 
 
 @router.get("/ip-location/{ip_address}")
@@ -166,7 +178,8 @@ async def get_port_analysis(
                 "unique_vlans": port.unique_vlans,
                 "port_type": port.port_type,
                 "confidence_score": port.confidence_score,
-                "analyzed_at": port.analyzed_at.isoformat()
+                "analyzed_at": port.analyzed_at.isoformat(),
+                **serialize_lookup_policy(port)
             }
             for port, _ in rows
         ],
@@ -175,8 +188,76 @@ async def get_port_analysis(
             "access_ports": sum(1 for p, _ in rows if p.port_type == 'access'),
             "trunk_ports": sum(1 for p, _ in rows if p.port_type == 'trunk'),
             "uplink_ports": sum(1 for p, _ in rows if p.port_type == 'uplink'),
-            "unknown_ports": sum(1 for p, _ in rows if p.port_type == 'unknown')
+            "unknown_ports": sum(1 for p, _ in rows if p.port_type == 'unknown'),
+            "lookup_included_ports": sum(
+                1 for p, _ in rows if serialize_lookup_policy(p)["lookup_included"]
+            ),
+            "lookup_excluded_ports": sum(
+                1 for p, _ in rows if not serialize_lookup_policy(p)["lookup_included"]
+            )
         }
+    }
+
+
+@router.put("/port-analysis/{switch_id}/lookup-policy")
+async def update_port_lookup_policy(
+    switch_id: int,
+    request: PortLookupPolicyUpdateRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Create or update a manual lookup policy override for a switch port."""
+    result = await db.execute(
+        select(Switch).where(Switch.id == switch_id)
+    )
+    switch = result.scalar_one_or_none()
+
+    if not switch:
+        raise HTTPException(status_code=404, detail=f"Switch {switch_id} not found")
+
+    try:
+        lookup_policy_override = normalize_lookup_policy_override(request.lookup_policy_override)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    port_name = request.port_name.strip()
+    if not port_name:
+        raise HTTPException(status_code=400, detail="port_name is required")
+
+    result = await db.execute(
+        select(PortAnalysis).where(
+            and_(
+                PortAnalysis.switch_id == switch_id,
+                PortAnalysis.port_name == port_name
+            )
+        )
+    )
+    port = result.scalar_one_or_none()
+
+    if not port:
+        port = PortAnalysis(
+            switch_id=switch_id,
+            port_name=port_name,
+            mac_count=0,
+            unique_vlans=0,
+            port_type="unknown",
+            confidence_score=0.0
+        )
+        db.add(port)
+
+    port.lookup_policy_override = lookup_policy_override
+    port.lookup_policy_note = (request.lookup_policy_note or "").strip() or None
+    port.lookup_policy_updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(port)
+
+    return {
+        "switch_id": switch_id,
+        "switch_name": switch.name,
+        "port_name": port.port_name,
+        "port_type": port.port_type,
+        "mac_count": port.mac_count,
+        **serialize_lookup_policy(port)
     }
 
 
@@ -192,7 +273,7 @@ async def get_mac_locations(
     # Normalize MAC format
     mac_normalized = mac_address.lower().replace('-', ':')
 
-    # Join with port_analysis to filter out trunk/uplink ports
+    # Join with port_analysis to filter out ports excluded from lookup matching
     result = await db.execute(
         select(MACTable, Switch)
         .join(Switch, MACTable.switch_id == Switch.id)
@@ -204,14 +285,7 @@ async def get_mac_locations(
             )
         )
         .where(cast(MACTable.mac_address, Text) == mac_normalized)
-        .where(
-            or_(
-                # If no port_analysis: include (will be classified later)
-                PortAnalysis.id.is_(None),
-                # If port_analysis exists: only exclude explicit trunk/uplink
-                PortAnalysis.port_type.notin_(['trunk', 'uplink'])
-            )
-        )
+        .where(build_lookup_eligible_clause(PortAnalysis))
         .order_by(desc(MACTable.last_seen))
     )
     rows = result.all()

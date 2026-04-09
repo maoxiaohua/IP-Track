@@ -9,7 +9,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -125,10 +125,27 @@ class CollectionWorker:
                 mac_entries = await self.collector.collect_mac_single_switch(db, switch)
                 arp_entries = await self.collector.collect_arp_single_switch(db, switch)
                 optical_entries = await self.collector.collect_optical_single_switch(db, switch)
+                mac_count = len(mac_entries) if mac_entries else 0
+                arp_count = len(arp_entries) if arp_entries else 0
+                optical_count = len(optical_entries) if optical_entries else 0
                 job.entries_collected = (
-                    (len(mac_entries) if mac_entries else 0) +
-                    (len(arp_entries) if arp_entries else 0) +
-                    (len(optical_entries) if optical_entries else 0)
+                    mac_count +
+                    arp_count +
+                    optical_count
+                )
+
+                # The switches page primarily reflects whether network data collection
+                # produced any usable L2/L3 entries. Optical modules can legitimately be
+                # absent, and some devices are considered healthy even when only ARP or
+                # only MAC data is populated in a collection run.
+                if mac_count == 0 and arp_count == 0:
+                    switch.last_collection_status = 'failed'
+                else:
+                    switch.last_collection_status = 'success'
+
+                switch.last_collection_message = (
+                    f"MAC: {mac_count} entries, ARP: {arp_count} entries, "
+                    f"Optical: {optical_count} entries"
                 )
 
             # Mark job as successful
@@ -140,12 +157,13 @@ class CollectionWorker:
             # Ensure switch changes (capability learning) are committed
             db.add(switch)
             
-            # Auto-resolve any existing alarms for this switch (collection succeeded)
-            await alarm_service.auto_resolve_alarms(
-                db=db,
-                source_type=AlarmSourceType.SWITCH,
-                source_id=switch.id
-            )
+            # Only auto-resolve alarms when the switch collected usable ARP/MAC data.
+            if switch.last_collection_status == 'success':
+                await alarm_service.auto_resolve_alarms(
+                    db=db,
+                    source_type=AlarmSourceType.SWITCH,
+                    source_id=switch.id
+                )
             
             await db.commit()
             logger.info(f"Job {job.id} completed: {job.entries_collected} entries")
@@ -259,6 +277,9 @@ class CollectionWorkerPool:
         # Import here to avoid circular dependency
         from core.database import AsyncSessionLocal
 
+        async with AsyncSessionLocal() as session:
+            await self._reclaim_stale_running_jobs(session)
+
         # Create workers
         for i in range(self.max_workers):
             worker_id = f"worker-{i+1}"
@@ -274,6 +295,27 @@ class CollectionWorkerPool:
             self.worker_tasks.append(task)
 
         logger.info(f"Worker pool started with {len(self.workers)} workers")
+
+    async def _reclaim_stale_running_jobs(self, db: AsyncSession) -> int:
+        """Move orphaned RUNNING jobs back to PENDING on process startup."""
+        stmt = (
+            update(CollectionJob)
+            .where(CollectionJob.status == JobStatus.RUNNING)
+            .values(
+                status=JobStatus.PENDING,
+                worker_id=None,
+                started_at=None
+            )
+        )
+        result = await db.execute(stmt)
+        await db.commit()
+
+        reclaimed = result.rowcount or 0
+        if reclaimed:
+            logger.warning(f"Reclaimed {reclaimed} stale running collection jobs on startup")
+        else:
+            logger.info("No stale running collection jobs found on startup")
+        return reclaimed
 
     async def stop(self):
         """Stop worker pool gracefully"""
@@ -303,8 +345,21 @@ class CollectionWorkerPool:
         if not batch_id:
             batch_id = str(uuid.uuid4())
 
+        switch_ids = [switch.id for switch in switches]
+        active_result = await db.execute(
+            select(CollectionJob.switch_id).where(
+                CollectionJob.switch_id.in_(switch_ids),
+                CollectionJob.job_type == job_type.value,
+                CollectionJob.status.in_([JobStatus.PENDING, JobStatus.RUNNING])
+            )
+        )
+        active_switch_ids = set(active_result.scalars().all())
+
         jobs_created = 0
         for switch in switches:
+            if switch.id in active_switch_ids:
+                continue
+
             job = CollectionJob(
                 switch_id=switch.id,
                 job_type=job_type,

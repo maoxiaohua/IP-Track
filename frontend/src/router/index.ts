@@ -1,18 +1,24 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import Home from '@/views/Home.vue'
-import Switches from '@/views/Switches.vue'
-import SwitchDetail from '@/views/SwitchDetail.vue'
-import History from '@/views/History.vue'
-import Discovery from '@/views/Discovery.vue'
-import IPAM from '@/views/IPAM_Simple.vue'
-import SubnetDetail from '@/views/SubnetDetail_SolarWinds.vue'
-import CommandTemplates from '@/views/CommandTemplates.vue'
-import Alarms from '@/views/Alarms.vue'
-import OpticalModules from '@/views/OpticalModules.vue'
-import SNMPProfiles from '@/views/SNMPProfiles.vue'
+
+const Home = () => import('@/views/Home.vue')
+const Switches = () => import('@/views/Switches.vue')
+const SwitchDetail = () => import('@/views/SwitchDetail.vue')
+const History = () => import('@/views/History.vue')
+const Discovery = () => import('@/views/Discovery.vue')
+const IPAM = () => import('@/views/IPAM_Simple.vue')
+const SubnetDetail = () => import('@/views/SubnetDetail_SolarWinds.vue')
+const CommandTemplates = () => import('@/views/CommandTemplates.vue')
+const Alarms = () => import('@/views/Alarms.vue')
+const OpticalModules = () => import('@/views/OpticalModules.vue')
+const SNMPProfiles = () => import('@/views/SNMPProfiles.vue')
+const SNMPConfig = () => import('@/views/SNMPConfig.vue')
+const Settings = () => import('@/views/Settings.vue')
 
 const router = createRouter({
   history: createWebHistory(),
+  scrollBehavior() {
+    return { top: 0 }
+  },
   routes: [
     {
       path: '/',
@@ -53,7 +59,7 @@ const router = createRouter({
     {
       path: '/snmp-config',
       name: 'SNMPConfig',
-      component: () => import('@/views/SNMPConfig.vue'),
+      component: SNMPConfig,
       meta: { title: 'SNMP Configuration', icon: 'Setting' }
     },
     {
@@ -73,6 +79,12 @@ const router = createRouter({
       name: 'OpticalModules',
       component: OpticalModules,
       meta: { title: 'Optical Modules', icon: 'Connection' }
+    },
+    {
+      path: '/settings',
+      name: 'Settings',
+      component: Settings,
+      meta: { title: 'Settings', icon: 'Setting' }
     },
     {
       path: '/ipam/subnets/:id',

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import cast, func, Integer, String
 from typing import List, Optional
 from api.deps import get_db
 from schemas.ipam import (
@@ -502,7 +503,7 @@ async def list_ip_addresses(
     - **skip**: Number of records to skip (pagination)
     - **limit**: Maximum number of records to return (1-10000)
     """
-    from sqlalchemy import select, and_, or_, func
+    from sqlalchemy import select, and_, or_
     from models.switch import Switch
 
     # Build query with switch join
@@ -539,7 +540,13 @@ async def list_ip_addresses(
     total = count_result.scalar() or 0
 
     # Apply pagination and ordering
-    query = query.order_by(IPAddress.ip_address).offset(skip).limit(limit)
+    ip_text = func.host(IPAddress.ip_address)
+    query = query.order_by(
+        cast(func.split_part(ip_text, '.', 1), Integer),
+        cast(func.split_part(ip_text, '.', 2), Integer),
+        cast(func.split_part(ip_text, '.', 3), Integer),
+        cast(func.split_part(ip_text, '.', 4), Integer),
+    ).offset(skip).limit(limit)
 
     result = await db.execute(query)
     rows = result.all()

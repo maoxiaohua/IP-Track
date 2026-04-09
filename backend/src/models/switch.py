@@ -67,6 +67,11 @@ class Switch(Base):
     arp_collection_fail_count = Column(Integer, default=0)
     optical_collection_fail_count = Column(Integer, default=0)
 
+    # Manual trunk-review workflow
+    trunk_review_completed = Column(Boolean, default=False, nullable=False, index=True)
+    trunk_review_completed_at = Column(DateTime(timezone=True), nullable=True)
+    trunk_review_note = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

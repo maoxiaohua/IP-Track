@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 from typing import List
 import json
 
@@ -60,6 +61,14 @@ class Settings(BaseSettings):
     # IPAM Settings
     IPAM_OFFLINE_THRESHOLD_HOURS: int = 6  # Hours without response before marking as offline
 
+    # IP Lookup Settings
+    IP_LOOKUP_CACHE_HOURS: int = Field(
+        default=24,
+        ge=1,
+        le=168,  # Maximum 7 days (aligned with data retention period)
+        description="IP Lookup cache mode query window in hours"
+    )
+
     # OS Detection Settings
     OS_DETECTION_PREFER_SNMP: bool = True  # Prefer SNMP over Nmap when both available
     NMAP_OS_TIMEOUT: int = 30  # Timeout for nmap OS detection (seconds)
@@ -108,6 +117,11 @@ class Settings(BaseSettings):
     FEATURE_PORT_ANALYSIS: bool = True
     FEATURE_STATUS_CHECKER: bool = True
     FEATURE_QUERY_HISTORY: bool = True
+
+    # Lightweight switch reachability checker
+    STATUS_CHECK_INTERVAL_SECONDS: int = 300
+    STATUS_CHECK_PING_TIMEOUT_SECONDS: int = 2
+    STATUS_CHECK_CONCURRENCY: int = 50
 
     # Hybrid Collection Strategy (vendor-specific)
     CISCO_PRIMARY_METHOD: str = "cli"

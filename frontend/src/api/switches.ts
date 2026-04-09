@@ -26,6 +26,9 @@ export interface Switch {
   last_mac_collection_at?: string | null
   last_collection_status?: string | null
   last_collection_message?: string | null
+  trunk_review_completed: boolean
+  trunk_review_completed_at?: string | null
+  trunk_review_note?: string | null
 
   // SNMP fields
   snmp_enabled: boolean
@@ -98,6 +101,8 @@ export interface SwitchUpdate {
   snmp_priv_protocol?: string
   snmp_priv_password?: string
   snmp_community?: string
+  trunk_review_completed?: boolean
+  trunk_review_note?: string | null
 }
 
 export interface SwitchTestResponse {
@@ -110,11 +115,47 @@ export interface SwitchListParams {
   skip?: number
   limit?: number
   search?: string
+  trunk_review_completed?: boolean
+  sort_by?: 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'connection_status'
+  sort_order?: 'asc' | 'desc'
 }
 
 export interface SwitchListResponse {
   items: Switch[]
   total: number
+}
+
+export interface PortAnalysisEntry {
+  port_name: string
+  mac_count: number
+  unique_vlans: number
+  port_type: 'access' | 'trunk' | 'uplink' | 'unknown'
+  confidence_score: number
+  analyzed_at: string
+  lookup_policy_override: 'include' | 'exclude' | null
+  lookup_policy_note?: string | null
+  lookup_policy_updated_at?: string | null
+  effective_lookup_status: 'included' | 'excluded'
+  effective_lookup_reason: string
+  lookup_included: boolean
+}
+
+export interface PortAnalysisResponse {
+  switch: {
+    id: number
+    name: string
+    ip_address: string
+  }
+  ports: PortAnalysisEntry[]
+  summary: {
+    total_ports: number
+    access_ports: number
+    trunk_ports: number
+    uplink_ports: number
+    unknown_ports: number
+    lookup_included_ports: number
+    lookup_excluded_ports: number
+  }
 }
 
 export const switchesApi = {
@@ -124,6 +165,9 @@ export const switchesApi = {
     if (params?.skip !== undefined) queryParams.append('skip', params.skip.toString())
     if (params?.limit !== undefined) queryParams.append('limit', params.limit.toString())
     if (params?.search) queryParams.append('search', params.search)
+    if (params?.trunk_review_completed !== undefined) queryParams.append('trunk_review_completed', String(params.trunk_review_completed))
+    if (params?.sort_by) queryParams.append('sort_by', params.sort_by)
+    if (params?.sort_order) queryParams.append('sort_order', params.sort_order)
 
     const url = `/api/v1/switches${queryParams.toString() ? '?' + queryParams.toString() : ''}`
     const response = await apiClient.get(url)
@@ -196,6 +240,31 @@ export const switchesApi = {
   // Collect optical modules
   collectOpticalModules: async (id: number): Promise<any> => {
     const response = await apiClient.post(`/api/v1/switches/${id}/collect/optical-modules`)
+    return response.data
+  },
+
+  // Analyze switch ports from MAC table data
+  analyzePorts: async (id: number): Promise<any> => {
+    const response = await apiClient.post(`/api/v1/switches/${id}/analyze-ports`)
+    return response.data
+  },
+
+  // Get per-port lookup policy state
+  getPortAnalysis: async (id: number): Promise<PortAnalysisResponse> => {
+    const response = await apiClient.get(`/api/v1/network/port-analysis/${id}`)
+    return response.data
+  },
+
+  // Override whether a port participates in lookup matching
+  updatePortLookupPolicy: async (
+    id: number,
+    data: {
+      port_name: string
+      lookup_policy_override: 'include' | 'exclude' | null
+      lookup_policy_note?: string | null
+    }
+  ): Promise<PortAnalysisEntry> => {
+    const response = await apiClient.put(`/api/v1/network/port-analysis/${id}/lookup-policy`, data)
     return response.data
   }
 }

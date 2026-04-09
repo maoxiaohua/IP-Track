@@ -1055,7 +1055,8 @@ class NetworkDataCollector:
             (p.switch_id, p.port_name): {
                 'port_type': p.port_type,
                 'mac_count': p.mac_count,
-                'confidence_score': p.confidence_score
+                'confidence_score': p.confidence_score,
+                'lookup_policy_override': p.lookup_policy_override
             }
             for p in port_analysis_records
         }
@@ -1221,7 +1222,9 @@ class NetworkDataCollector:
                 else:
                     switches_failed += 1
 
-        await db.commit()
+            # Persist each batch so long-running full optical collection improves
+            # the search page progressively instead of holding all updates until the end.
+            await db.commit()
 
         elapsed = (datetime.now() - start_time).total_seconds()
 
@@ -1262,6 +1265,7 @@ class NetworkDataCollector:
             collected_at = datetime.now()
             modules = []
             collection_method = None
+            empty_collection_confirmed = False
 
             # Strategy 1: Try SNMP first for Cisco/Dell vendors
             if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
@@ -1285,6 +1289,8 @@ class NetworkDataCollector:
 
                     if modules:
                         collection_method = 'SNMP'
+                    elif not (switch.cli_enabled and switch.password_encrypted):
+                        empty_collection_confirmed = True
                 except asyncio.TimeoutError:
                     logger.debug(f"  SNMP timeout for {switch.name}, trying CLI")
                 except Exception as e:
@@ -1293,15 +1299,7 @@ class NetworkDataCollector:
             # Strategy 2: Try CLI if SNMP didn't work or not enabled
             if not modules and switch.cli_enabled and switch.password_encrypted:
                 try:
-                    cli_config = {
-                        'username': switch.username,
-                        'password_encrypted': switch.password_encrypted,
-                        'enable_password_encrypted': switch.enable_password_encrypted,
-                        'device_type': 'cisco_ios',
-                        'ssh_port': switch.ssh_port,
-                        'connection_timeout': switch.connection_timeout,
-            'enable_password_encrypted': switch.enable_password_encrypted
-                    }
+                    cli_config = self._build_cli_config(switch)
 
                     # Longer timeout for Alcatel/Nokia (needs per-port query)
                     timeout_seconds = 300.0 if switch.vendor and switch.vendor.lower() in ['alcatel', 'nokia'] else 90.0
@@ -1319,6 +1317,8 @@ class NetworkDataCollector:
 
                     if modules:
                         collection_method = 'CLI'
+                    else:
+                        empty_collection_confirmed = True
                 except asyncio.TimeoutError:
                     logger.warning(f"  CLI timeout for {switch.name} after {timeout_seconds}s")
                     return None
@@ -1356,6 +1356,15 @@ class NetworkDataCollector:
                     'modules_count': len(modules),
                     'collection_method': collection_method
                 }
+            elif empty_collection_confirmed:
+                await db.execute(
+                    OpticalModule.__table__.delete().where(OpticalModule.switch_id == switch.id)
+                )
+
+                return {
+                    'modules_count': 0,
+                    'collection_method': collection_method or 'None'
+                }
             else:
                 return {
                     'modules_count': 0,
@@ -1374,7 +1383,7 @@ class NetworkDataCollector:
         from services.snmp_service import snmp_service
         from services.cli_service import cli_service
 
-        start_time = datetime.utcnow()
+        collected_at = datetime.utcnow()
         mac_entries = []
         method_used = None
         snmp_duration = 0
@@ -1463,11 +1472,17 @@ class NetworkDataCollector:
             logger.warning(f"⚠️  Zero MAC entries from {switch.name} after trying all methods")
         else:
             # Store collected data
-            await self._store_mac_entries_bulk(db, switch.id, mac_entries, datetime.utcnow())
-            switch.last_mac_collection_at = datetime.utcnow()
+            await self._store_mac_entries_bulk(db, switch.id, mac_entries, collected_at)
+            switch.last_mac_collection_at = collected_at
             switch.last_collection_status = 'success'
             switch.last_collection_message = f"MAC: {len(mac_entries)} entries via {method_used}"
+            return mac_entries
 
+        # A zero-entry run is still a fresh collection attempt. Refresh the timestamp
+        # so the UI reflects the latest attempt instead of showing stale "1 day ago" data.
+        switch.last_mac_collection_at = collected_at
+        switch.last_collection_status = 'partial'
+        switch.last_collection_message = "MAC: 0 entries after trying all available methods"
         return mac_entries
 
     async def collect_arp_single_switch(self, db: AsyncSession, switch: Switch) -> List[Dict]:
@@ -1478,7 +1493,7 @@ class NetworkDataCollector:
         from services.snmp_service import snmp_service
         from services.cli_service import cli_service
 
-        start_time = datetime.utcnow()
+        collected_at = datetime.utcnow()
         arp_entries = []
         method_used = None
         snmp_duration = 0
@@ -1567,11 +1582,17 @@ class NetworkDataCollector:
             logger.warning(f"⚠️  Zero ARP entries from {switch.name} after trying all methods")
         else:
             # Store collected data
-            await self._store_arp_entries_bulk(db, switch.id, arp_entries, datetime.utcnow())
-            switch.last_arp_collection_at = datetime.utcnow()
+            await self._store_arp_entries_bulk(db, switch.id, arp_entries, collected_at)
+            switch.last_arp_collection_at = collected_at
             switch.last_collection_status = 'success'
             switch.last_collection_message = f"ARP: {len(arp_entries)} entries via {method_used}"
+            return arp_entries
 
+        # A zero-entry run is still a fresh collection attempt. Refresh the timestamp
+        # so the UI reflects the latest attempt instead of showing stale "1 day ago" data.
+        switch.last_arp_collection_at = collected_at
+        switch.last_collection_status = 'partial'
+        switch.last_collection_message = "ARP: 0 entries after trying all available methods"
         return arp_entries
 
     async def collect_optical_single_switch(self, db: AsyncSession, switch: Switch) -> List[Dict]:
@@ -1587,6 +1608,7 @@ class NetworkDataCollector:
         method_used = None
         snmp_duration = 0
         cli_duration = 0
+        empty_collection_confirmed = False
 
         # Determine collection method based on learned preference
         if switch.optical_method_override:
@@ -1627,6 +1649,10 @@ class NetworkDataCollector:
                     if switch.optical_collection_method != 'snmp' and not switch.optical_method_override:
                         switch.optical_collection_method = 'snmp'  # Learn preference
                         logger.info(f"Learned: {switch.name} prefers SNMP for optical collection")
+                elif not (switch.cli_enabled and switch.password_encrypted) or (
+                    preferred_method == 'snmp' and switch.optical_method_override
+                ):
+                    empty_collection_confirmed = True
 
             except asyncio.TimeoutError:
                 snmp_duration = (datetime.utcnow() - snmp_start).total_seconds()
@@ -1667,6 +1693,8 @@ class NetworkDataCollector:
                         if switch.optical_collection_method != 'cli' and not switch.optical_method_override:
                             switch.optical_collection_method = 'cli'  # Learn preference
                             logger.info(f"Learned: {switch.name} prefers CLI for optical collection")
+                    else:
+                        empty_collection_confirmed = True
 
                 except asyncio.TimeoutError:
                     cli_duration = (datetime.utcnow() - cli_start).total_seconds()
@@ -1677,15 +1705,19 @@ class NetworkDataCollector:
 
         # Handle failure case
         if len(optical_modules) == 0:
-            switch.optical_collection_fail_count += 1
-            logger.warning(f"⚠️  Zero optical modules from {switch.name} after trying all methods")
+            if empty_collection_confirmed:
+                await db.execute(
+                    delete(OpticalModule).where(OpticalModule.switch_id == switch.id)
+                )
+                logger.info(f"Cleared stale optical modules for {switch.name} after confirmed empty collection")
+            else:
+                switch.optical_collection_fail_count += 1
+                logger.warning(f"⚠️  Zero optical modules from {switch.name} after trying all methods")
         else:
             # Store collected data - delete old, insert new (replace strategy)
-            from models.optical_module import OpticalModule
             collected_at = datetime.utcnow()
 
             # Delete old entries for this switch
-            from sqlalchemy import delete
             await db.execute(
                 delete(OpticalModule).where(OpticalModule.switch_id == switch.id)
             )
@@ -1696,8 +1728,8 @@ class NetworkDataCollector:
                     switch_id=switch.id,
                     switch_name=switch.name,
                     switch_ip=str(switch.ip_address),
-                    port_name=module_data.get('port'),
-                    module_type=module_data.get('type'),
+                    port_name=module_data.get('port_name') or module_data.get('port'),
+                    module_type=module_data.get('module_type') or module_data.get('type'),
                     model=module_data.get('model'),
                     part_number=module_data.get('part_number'),
                     serial_number=module_data.get('serial_number'),

@@ -1,15 +1,11 @@
 from pydantic import BaseModel, Field, IPvAnyAddress
-from typing import Optional, Literal
+from typing import Optional
 from datetime import datetime
 
 
 class IPLookupRequest(BaseModel):
     """Schema for IP lookup request"""
     ip_address: IPvAnyAddress = Field(..., description="Target IP address to lookup")
-    mode: Literal['auto', 'cache', 'realtime'] = Field(
-        default='cache',
-        description="Query mode: 'auto' (cache then realtime), 'cache' (database only, fast), 'realtime' (SSH query, slow but accurate)"
-    )
 
 
 class IPLookupResult(BaseModel):

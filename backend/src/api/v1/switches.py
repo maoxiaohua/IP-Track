@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func, or_, and_, cast, String
+from sqlalchemy import select, desc, func, or_, and_, cast, String, case
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 import asyncio
@@ -16,10 +16,24 @@ from services.switch_manager import switch_manager
 from services.cli_service import cli_service
 # Temporarily disabled: from services.snmp_service import snmp_service
 from services.port_analysis_service import port_analysis_service
+from services.port_lookup_policy_service import build_lookup_eligible_clause
+from services.status_checker import switch_status_checker
 from utils.logger import logger
 from utils.network import ping_host, ping_multiple_hosts
 
 router = APIRouter(prefix="/switches", tags=["switches"])
+
+
+@router.get("/status-checker", response_model=Dict[str, Any])
+async def get_status_checker_status():
+    """Get lightweight switch reachability checker runtime status."""
+    return switch_status_checker.get_status()
+
+
+@router.post("/status-checker/run", response_model=Dict[str, Any])
+async def run_status_checker_once():
+    """Manually trigger one lightweight reachability sweep."""
+    return await switch_status_checker.check_all_switches()
 
 
 @router.post("", response_model=SwitchResponse, status_code=status.HTTP_201_CREATED)
@@ -109,6 +123,9 @@ async def list_switches(
     skip: int = 0,
     limit: int = 100,
     search: str = None,
+    trunk_review_completed: bool | None = Query(None),
+    sort_by: str = Query("id"),
+    sort_order: str = Query("asc", pattern="^(asc|desc)$"),
     db: AsyncSession = Depends(get_db)
 ):
     """List all switches with pagination and search"""
@@ -124,12 +141,40 @@ async def list_switches(
             )
             query = query.where(search_filter)
 
+        if trunk_review_completed is not None:
+            query = query.where(Switch.trunk_review_completed == trunk_review_completed)
+
         # Get total count
         count_query = select(Switch.id)
         if search:
             count_query = count_query.where(search_filter)
+        if trunk_review_completed is not None:
+            count_query = count_query.where(Switch.trunk_review_completed == trunk_review_completed)
         count_result = await db.execute(count_query)
         total = len(count_result.all())
+
+        collection_time_expr = func.coalesce(
+            func.greatest(Switch.last_arp_collection_at, Switch.last_mac_collection_at),
+            Switch.last_arp_collection_at,
+            Switch.last_mac_collection_at
+        )
+        connection_status_expr = case(
+            (Switch.is_reachable == False, 0),
+            (Switch.is_reachable.is_(None), 1),
+            else_=2
+        )
+
+        sort_columns = {
+            "id": Switch.id,
+            "name": Switch.name,
+            "ip_address": Switch.ip_address,
+            "model": Switch.model,
+            "last_collection_time": collection_time_expr,
+            "connection_status": connection_status_expr,
+        }
+        sort_expr = sort_columns.get(sort_by, Switch.id)
+        ordered_expr = sort_expr.desc() if sort_order == "desc" else sort_expr.asc()
+        query = query.order_by(ordered_expr.nulls_last(), Switch.name.asc(), Switch.id.asc())
 
         # Get paginated results
         query = query.offset(skip).limit(limit)
@@ -223,6 +268,11 @@ async def update_switch(
             update_data['snmp_auth_password_encrypted'] = credential_encryption.encrypt(update_data.pop('snmp_community'))
         elif 'snmp_community' in update_data:
             update_data.pop('snmp_community')
+
+        if 'trunk_review_completed' in update_data:
+            update_data['trunk_review_completed_at'] = (
+                datetime.now(timezone.utc) if update_data['trunk_review_completed'] else None
+            )
 
         # Update switch
         for field, value in update_data.items():
@@ -400,12 +450,14 @@ async def test_switch_connection(
                 )
         else:
             # Fallback to ping test
-            is_reachable, response_time = ping_host(str(switch.ip_address), timeout=5)
+            ping_result = await ping_host(str(switch.ip_address), timeout=5)
+            is_reachable = ping_result["reachable"]
+            response_time = ping_result.get("response_time_ms")
             
             if is_reachable:
                 return SwitchTestResponse(
                     success=True,
-                    message=f"Switch is reachable (ping: {response_time:.2f}ms)",
+                    message=f"Switch is reachable (ping: {response_time:.2f}ms)" if response_time is not None else "Switch is reachable",
                     details={"response_time_ms": response_time, "connection_type": "ping"}
                 )
             else:
@@ -589,13 +641,9 @@ async def get_switch_mac_table(
                 detail=f"Switch with ID {switch_id} not found"
             )
 
-        # Get MAC entries, excluding trunk/uplink ports
-        # Strategy:
-        # 1. If port_analysis exists: use port_type to filter (only exclude trunk/uplink)
-        # 2. If no port_analysis: show all MACs (analysis will be created in next collection cycle)
-        #    - This is safer than using arbitrary MAC count threshold
-        #    - Cascaded switches and APs typically have 5-30 MACs, which are NOT trunks
-        #    - Temporary display of trunk MACs is acceptable until port_analysis is available
+        # Get MAC entries that are currently eligible for endpoint/device lookup.
+        # Raw MAC collection remains unchanged; this only filters the displayed
+        # set to honor manual lookup policy overrides and the shared auto policy.
 
         result = await db.execute(
             select(MACTable)
@@ -607,14 +655,7 @@ async def get_switch_mac_table(
                 )
             )
             .where(MACTable.switch_id == switch_id)
-            .where(
-                or_(
-                    # If no port_analysis: show all (will be classified in next collection)
-                    PortAnalysis.id.is_(None),
-                    # If port_analysis exists: only exclude explicit trunk/uplink
-                    PortAnalysis.port_type.notin_(['trunk', 'uplink'])
-                )
-            )
+            .where(build_lookup_eligible_clause(PortAnalysis))
             .order_by(desc(MACTable.last_seen))
             .limit(limit)
         )
@@ -1384,6 +1425,7 @@ async def collect_switch_optical_modules(
         collected_at = datetime.now(timezone.utc)
         modules = []
         collection_method = None
+        empty_collection_confirmed = False
 
         # Try SNMP first if enabled
         if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
@@ -1411,6 +1453,8 @@ async def collect_switch_optical_modules(
                     logger.info(f"✅ Collected {len(modules)} optical modules via SNMP from {switch.name}")
                 else:
                     logger.info(f"SNMP returned 0 modules, falling back to CLI for {switch.name}")
+                    if not (switch.cli_enabled and switch.password_encrypted):
+                        empty_collection_confirmed = True
 
             except asyncio.TimeoutError:
                 logger.warning(f"SNMP optical module collection timeout for {switch.name}, trying CLI")
@@ -1425,7 +1469,9 @@ async def collect_switch_optical_modules(
                     'username': switch.username,
                     'password_encrypted': switch.password_encrypted,
                     'enable_password_encrypted': switch.enable_password_encrypted,
-                    'device_type': 'cisco_ios',
+                    'vendor': switch.vendor,
+                    'model': switch.model,
+                    'name': switch.name,
                     'ssh_port': switch.ssh_port,
                     'connection_timeout': switch.connection_timeout
                 }
@@ -1448,6 +1494,8 @@ async def collect_switch_optical_modules(
                 if modules:
                     collection_method = 'CLI'
                     logger.info(f"✅ Collected {len(modules)} optical modules via CLI from {switch.name}")
+                else:
+                    empty_collection_confirmed = True
 
             except asyncio.TimeoutError:
                 logger.error(f"CLI optical module collection timeout for {switch.name} after {timeout_seconds}s")
@@ -1455,6 +1503,12 @@ async def collect_switch_optical_modules(
                 logger.error(f"CLI optical module collection failed for {switch.name}: {str(e)}")
 
         if not modules:
+            if empty_collection_confirmed:
+                await db.execute(
+                    OpticalModule.__table__.delete().where(OpticalModule.switch_id == switch_id)
+                )
+                await db.commit()
+
             return {
                 'switch_id': switch_id,
                 'switch_name': switch.name,

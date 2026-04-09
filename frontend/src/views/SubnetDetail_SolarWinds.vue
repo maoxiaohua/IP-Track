@@ -95,7 +95,7 @@
         </el-table-column>
 
         <!-- IP Address -->
-        <el-table-column prop="ip_address" label="IP Address" width="140" sortable>
+        <el-table-column prop="ip_address" label="IP Address" width="140" sortable :sort-method="sortByIpAddress">
           <template #default="{ row }">
             <span style="font-family: monospace; font-weight: 500">{{ row.ip_address }}</span>
           </template>
@@ -338,6 +338,7 @@ const loadIPs = async () => {
 
     const response = await apiClient.get('/api/v1/ipam/ip-addresses', { params })
     ipAddresses.value = response.data.items || []
+    ipAddresses.value.sort((a, b) => sortByIpAddress(a, b))
 
     // Log for debugging
     console.log(`Loaded ${ipAddresses.value.length} IP addresses for subnet ${subnetId}`)
@@ -454,6 +455,14 @@ const sortByLastResponse = (a: IPAddress, b: IPAddress): number => {
   const dateA = new Date(a.last_seen_at || a.last_scan_at || 0).getTime()
   const dateB = new Date(b.last_seen_at || b.last_scan_at || 0).getTime()
   return dateB - dateA  // Most recent first
+}
+
+const ipToNumber = (ip: string): number => {
+  return ip.split('.').reduce((acc, octet) => acc * 256 + Number(octet), 0)
+}
+
+const sortByIpAddress = (a: IPAddress, b: IPAddress): number => {
+  return ipToNumber(a.ip_address) - ipToNumber(b.ip_address)
 }
 
 // Get status tooltip

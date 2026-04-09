@@ -6,6 +6,7 @@
       stripe
       style="width: 100%"
       @selection-change="handleSelectionChange"
+      @sort-change="handleSortChange"
       ref="tableRef"
     >
       <el-table-column type="selection" width="45" />
@@ -20,14 +21,14 @@
       </el-table-column>
 
       <!-- IP Address -->
-      <el-table-column prop="ip_address" label="IP 地址" width="135">
+      <el-table-column prop="ip_address" label="IP 地址" width="135" sortable="custom">
         <template #default="{ row }">
           <el-tag type="primary" size="small">{{ row.ip_address }}</el-tag>
         </template>
       </el-table-column>
 
       <!-- Vendor + Model combined -->
-      <el-table-column label="厂商 / 型号" min-width="160">
+      <el-table-column prop="model" label="厂商 / 型号" min-width="160" sortable="custom">
         <template #default="{ row }">
           <div>
             <el-tag :type="getVendorTagType(row.vendor)" size="small">
@@ -68,8 +69,24 @@
         </template>
       </el-table-column>
 
+      <el-table-column label="Trunk 识别" width="140">
+        <template #default="{ row }">
+          <div style="font-size: 12px;">
+            <el-tag :type="row.trunk_review_completed ? 'success' : 'warning'" size="small">
+              {{ row.trunk_review_completed ? '已完成' : '待处理' }}
+            </el-tag>
+            <div
+              v-if="row.trunk_review_completed_at"
+              style="color: #909399; margin-top: 2px; font-size: 11px;"
+            >
+              {{ formatRelativeTime(row.trunk_review_completed_at) }}
+            </div>
+          </div>
+        </template>
+      </el-table-column>
+
       <!-- 上次采集 -->
-      <el-table-column label="上次采集" width="110">
+      <el-table-column label="上次采集" width="110" column-key="last_collection_time" sortable="custom">
         <template #default="{ row }">
           <div v-if="row.last_collection_status" style="font-size: 12px;">
             <el-tag
@@ -87,7 +104,7 @@
       </el-table-column>
 
       <!-- Ping 状态 + 响应时间 combined -->
-      <el-table-column label="连接状态" width="120">
+      <el-table-column prop="is_reachable" column-key="connection_status" label="连接状态" width="120" sortable="custom">
         <template #default="{ row }">
           <div v-if="row.is_reachable === true">
             <el-tag type="success" size="small" effect="dark">
@@ -174,6 +191,7 @@ const emit = defineEmits<{
   delete: [switchItem: Switch]
   test: [switchItem: Switch]
   selectionChange: [switches: Switch[]]
+  sortChange: [sortBy: string, sortOrder: 'asc' | 'desc' | null]
 }>()
 
 const tableRef = ref()
@@ -184,6 +202,12 @@ const goToDetail = (switchItem: Switch) => {
 
 const handleSelectionChange = (selection: Switch[]) => {
   emit('selectionChange', selection)
+}
+
+const handleSortChange = ({ prop, column, order }: { prop: string; column: any; order: 'ascending' | 'descending' | null }) => {
+  const sortKey = column?.columnKey || prop
+  const sortOrder = order === 'ascending' ? 'asc' : order === 'descending' ? 'desc' : null
+  emit('sortChange', sortKey, sortOrder)
 }
 
 const getVendorTagType = (vendor: string) => {
@@ -211,6 +235,18 @@ const formatCollectionTime = (row: Switch) => {
     return `${Math.floor(diffMins / 1440)}天前`
   }
   return '-'
+}
+
+const formatRelativeTime = (time: string) => {
+  const date = new Date(time)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
+
+  if (diffMins < 1) return '刚刚'
+  if (diffMins < 60) return `${diffMins}分钟前`
+  if (diffMins < 1440) return `${Math.floor(diffMins / 60)}小时前`
+  return `${Math.floor(diffMins / 1440)}天前`
 }
 
 // Handle dropdown menu actions

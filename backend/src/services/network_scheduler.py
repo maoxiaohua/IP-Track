@@ -10,6 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime
+from sqlalchemy import select, func
 from utils.logger import logger
 from core.database import get_db
 from core.config import settings
@@ -103,6 +104,25 @@ class NetworkCollectionScheduler:
             self.is_running = False
             logger.info("Network collection scheduler stopped")
 
+    async def _get_active_job_counts(self, db, job_type: str) -> tuple[int, int]:
+        """Return pending/running queue depth for a given job type."""
+        from models.collection_job import CollectionJob, JobStatus
+
+        result = await db.execute(
+            select(
+                func.count(CollectionJob.id).filter(
+                    (CollectionJob.job_type == job_type) &
+                    (CollectionJob.status == JobStatus.PENDING)
+                ).label('pending_count'),
+                func.count(CollectionJob.id).filter(
+                    (CollectionJob.job_type == job_type) &
+                    (CollectionJob.status == JobStatus.RUNNING)
+                ).label('running_count')
+            )
+        )
+        row = result.one()
+        return int(row.pending_count or 0), int(row.running_count or 0)
+
     async def _run_collection(self):
         """Run a single collection cycle by creating jobs for worker pool"""
         logger.info("Scheduled collection started - creating jobs for worker pool")
@@ -113,11 +133,19 @@ class NetworkCollectionScheduler:
             from services.collection_worker import worker_pool
             from models.switch import Switch
             from models.collection_job import JobType
-            from sqlalchemy import select, and_, or_
+            from sqlalchemy import and_, or_
 
             # Get database session
             async for db in get_db():
                 try:
+                    pending_jobs, running_jobs = await self._get_active_job_counts(db, JobType.ALL.value)
+                    if pending_jobs > 0 or running_jobs > 0:
+                        logger.warning(
+                            "Skipping scheduled full collection because queue is still busy "
+                            f"(pending={pending_jobs}, running={running_jobs})"
+                        )
+                        break
+
                     # Get all enabled switches with CLI or SNMP enabled
                     stmt = select(Switch).where(
                         and_(
@@ -217,11 +245,19 @@ class NetworkCollectionScheduler:
             from services.collection_worker import worker_pool
             from models.switch import Switch
             from models.collection_job import JobType
-            from sqlalchemy import select, and_, or_
+            from sqlalchemy import and_, or_
 
             # Get database session
             async for db in get_db():
                 try:
+                    pending_jobs, running_jobs = await self._get_active_job_counts(db, JobType.OPTICAL.value)
+                    if pending_jobs > 0 or running_jobs > 0:
+                        logger.warning(
+                            "Skipping scheduled optical collection because queue is still busy "
+                            f"(pending={pending_jobs}, running={running_jobs})"
+                        )
+                        break
+
                     # Get all enabled switches with CLI or SNMP enabled
                     stmt = select(Switch).where(
                         and_(

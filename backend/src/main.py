@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
-from api.v1 import switches, lookup, history, discovery, ipam, command_templates, alarms, collection, snmp_profiles
+from api.v1 import switches, lookup, history, discovery, ipam, command_templates, alarms, collection, snmp_profiles, settings as settings_module
 from api.routes import snmp_config, network
 from services.status_checker import switch_status_checker
 from services.network_scheduler import network_scheduler
@@ -51,6 +51,7 @@ app.include_router(collection.router, prefix=settings.API_V1_PREFIX)
 app.include_router(snmp_profiles.router, prefix=settings.API_V1_PREFIX)
 app.include_router(snmp_config.router, prefix=settings.API_V1_PREFIX)
 app.include_router(network.router, prefix=settings.API_V1_PREFIX)
+app.include_router(settings_module.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.on_event("startup")
@@ -63,10 +64,8 @@ async def startup_event():
     switch_status_checker.start()
     logger.info("Background switch status checker started")
 
-    # Start network data scheduler (120 minutes = 2 hours)
-    # Changed from 10 minutes to prevent task overlapping
-    # 339 switches take ~1+ hours to collect, so use 2-hour interval
-    network_scheduler.start(interval_minutes=120)
+    # Start network data scheduler using the configured interval.
+    network_scheduler.start(interval_minutes=settings.COLLECTION_INTERVAL_MINUTES)
     logger.info("Network data scheduler started")
 
     # Start collection worker pool
