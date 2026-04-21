@@ -55,6 +55,10 @@ class CollectionStrategy:
         },
 
         'cisco': {
+            # Nexus 9000系列 - NX-OS (支持SNMP)
+            'N9K': CollectionMethod.SNMP_PRIMARY,
+            'N9K-C9': CollectionMethod.SNMP_PRIMARY,
+
             # Catalyst 3650系列 - IOS-XE (支持SNMP)
             'C3650': CollectionMethod.SNMP_PRIMARY,
 
@@ -70,7 +74,7 @@ class CollectionStrategy:
             'C2960S-UNIVERSALK9-M': CollectionMethod.SNMP_PRIMARY,
             'C2960X-UNIVERSALK9-M': CollectionMethod.SNMP_PRIMARY,
 
-            # Nexus系列 - NX-OS (支持SNMP)
+            # Nexus系列 - NX-OS (支持SNMP) - 通用匹配
             'NX': CollectionMethod.SNMP_PRIMARY,
         },
 
@@ -348,6 +352,22 @@ OPTIMIZED_CLI_TEMPLATES: List[Dict] = [
         'priority': 200,
         'enabled': True,
         'description': 'Cisco Catalyst 2960系列 - IOS'
+    },
+
+    # Cisco Nexus 9000系列 - NX-OS (高优先级，匹配 N9K-C* 型号)
+    {
+        'vendor': 'cisco',
+        'model_pattern': 'n9k*',
+        'device_type': 'cisco_nxos',
+        'arp_command': 'show ip arp',
+        'arp_parser_type': 'cisco_nxos',
+        'arp_enabled': True,
+        'mac_command': 'show mac address-table',
+        'mac_parser_type': 'cisco_nxos',
+        'mac_enabled': True,
+        'priority': 210,
+        'enabled': True,
+        'description': 'Cisco Nexus 9000系列 - NX-OS'
     },
 
     # Cisco Nexus系列 - NX-OS

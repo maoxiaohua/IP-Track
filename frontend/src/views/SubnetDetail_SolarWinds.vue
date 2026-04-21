@@ -97,7 +97,10 @@
         <!-- IP Address -->
         <el-table-column prop="ip_address" label="IP Address" width="140" sortable :sort-method="sortByIpAddress">
           <template #default="{ row }">
-            <span style="font-family: monospace; font-weight: 500">{{ row.ip_address }}</span>
+            <span
+              style="font-family: monospace; font-weight: 500; color: #409eff; cursor: pointer"
+              @click="openIPDetail(row.id)"
+            >{{ row.ip_address }}</span>
           </template>
         </el-table-column>
 
@@ -107,13 +110,6 @@
             <span :style="{ color: getLastResponseColor(row) }">
               {{ getLastResponse(row) }}
             </span>
-          </template>
-        </el-table-column>
-
-        <!-- Comments/Description -->
-        <el-table-column prop="description" label="Comments" min-width="150">
-          <template #default="{ row }">
-            {{ row.description || '-' }}
           </template>
         </el-table-column>
 
@@ -153,6 +149,28 @@
           </template>
         </el-table-column>
 
+        <!-- Switch Name -->
+        <el-table-column prop="switch_name" label="Switch" min-width="200">
+          <template #default="{ row }">
+            <router-link
+              v-if="row.switch_id"
+              :to="`/switches/${row.switch_id}`"
+              style="color: #409eff; text-decoration: none"
+            >
+              {{ row.switch_name || '-' }}
+            </router-link>
+            <span v-else style="color: #909399">-</span>
+          </template>
+        </el-table-column>
+
+        <!-- Switch Port -->
+        <el-table-column prop="switch_port" label="Port" width="120">
+          <template #default="{ row }">
+            <el-tag v-if="row.switch_port" type="success" size="small">{{ row.switch_port }}</el-tag>
+            <span v-else style="color: #909399">-</span>
+          </template>
+        </el-table-column>
+
         <!-- OS Type -->
         <el-table-column prop="os_type" label="OS Type" width="100">
           <template #default="{ row }">
@@ -187,6 +205,9 @@
       </el-table>
 
     </el-card>
+
+    <!-- IP Detail Drawer -->
+    <IPDetailDrawer v-model="showDrawer" :ip-id="selectedIpId" />
 
     <!-- Edit Subnet Dialog -->
     <el-dialog v-model="showEditDialog" title="编辑 IP 子网" width="600px">
@@ -233,6 +254,7 @@ import {
   Remove
 } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
+import IPDetailDrawer from '@/components/IPDetailDrawer.vue'
 
 interface IPAddress {
   id: number
@@ -287,6 +309,14 @@ const filters = ref({
   is_reachable: '' as boolean | string,
   search: ''
 })
+
+const showDrawer = ref(false)
+const selectedIpId = ref<number | null>(null)
+
+const openIPDetail = (ipId: number) => {
+  selectedIpId.value = ipId
+  showDrawer.value = true
+}
 
 // Pagination removed - show all IPs for easier searching
 

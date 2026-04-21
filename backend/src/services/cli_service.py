@@ -2134,20 +2134,30 @@ class CLIService:
                 logger.debug(f"Command output length: {len(output)} bytes")
                 modules = self._parse_dell_transceiver(output)
             
-            # Cisco: show interfaces transceiver
+            # Cisco: show inventory and show interface transceiver
             elif vendor_lower == 'cisco':
-                logger.info(f"Using 'show inventory' for Cisco {model}")
+                # Detect if this is NX-OS device
+                is_nxos = model and ('N9K' in model.upper() or 'NX' in model.upper() or 'NEXUS' in model.upper())
+
+                logger.info(f"Using 'show inventory' for Cisco {model} (NX-OS: {is_nxos})")
                 command = 'show inventory'
                 output = connection.send_command_timing(command, delay_factor=2)
                 logger.debug(f"Command output length: {len(output)} bytes")
                 modules = self._parse_cisco_inventory(output)
 
                 if not modules:
-                    logger.info(f"No transceivers parsed from Cisco inventory on {switch_ip}, trying 'show interfaces transceiver'")
-                    command = 'show interfaces transceiver'
+                    logger.info(f"No transceivers parsed from Cisco inventory on {switch_ip}, trying 'show interface transceiver'")
+                    command = 'show interface transceiver'
                     output = connection.send_command_timing(command, delay_factor=2)
                     logger.debug(f"Fallback command output length: {len(output)} bytes")
-                    modules = self._parse_cisco_transceiver(output)
+
+                    # Choose parser based on device type
+                    if is_nxos:
+                        logger.info(f"Using NX-OS transceiver parser for {model}")
+                        modules = self._parse_cisco_nxos_transceiver(output)
+                    else:
+                        logger.info(f"Using IOS transceiver parser for {model}")
+                        modules = self._parse_cisco_transceiver(output)
             
             # Alcatel/Nokia: per-port query
             elif vendor_lower in ['alcatel', 'nokia', 'alcatel-lucent']:
@@ -2449,7 +2459,71 @@ class CLIService:
             logger.error(f"Error parsing Cisco inventory output: {str(e)}")
 
         return modules
-    
+
+    def _parse_cisco_nxos_transceiver(self, output: str) -> List[Dict]:
+        """Parse Cisco NX-OS 'show interface transceiver' output
+
+        NX-OS format is block-based, one block per interface:
+        Ethernet1/1
+            transceiver is present
+            type is 10Gbase-LR
+            name is WTD
+            part number is RTXM228-402-C40
+            serial number is FR210410162
+            nominal bitrate is 10300 MBit/sec
+        """
+        modules = []
+        try:
+            # Split by interface blocks (lines starting with Ethernet/Eth without leading spaces)
+            blocks = re.split(r'\n(?=\S)', output)
+
+            for block in blocks:
+                lines = block.strip().split('\n')
+                if not lines:
+                    continue
+
+                # First line should be interface name
+                port_name = lines[0].strip()
+                if not re.match(r'^(Ethernet|Eth)\d+/\d+', port_name, re.IGNORECASE):
+                    continue
+
+                # Check if transceiver is present
+                if 'transceiver is not present' in block.lower():
+                    continue
+
+                # Extract fields
+                module_type_match = re.search(r'type is\s+(.+)', block, re.IGNORECASE)
+                vendor_match = re.search(r'name is\s+(.+)', block, re.IGNORECASE)
+                part_number_match = re.search(r'part number is\s+(.+)', block, re.IGNORECASE)
+                serial_match = re.search(r'serial number is\s+(.+)', block, re.IGNORECASE)
+
+                module_type_str = module_type_match.group(1).strip() if module_type_match else ''
+                vendor = vendor_match.group(1).strip() if vendor_match else None
+                part_number = part_number_match.group(1).strip() if part_number_match else None
+                serial_number = serial_match.group(1).strip() if serial_match else None
+
+                # Identify module type from "type is" field
+                module_type = self._identify_module_type(module_type_str)
+                if module_type == 'Transceiver':
+                    module_type = self._infer_module_type_from_port_name(port_name)
+
+                # Extract speed
+                speed_gbps = self._extract_speed_gbps(module_type_str)
+
+                modules.append({
+                    'port_name': port_name,
+                    'model': part_number,
+                    'vendor': vendor,
+                    'serial_number': serial_number,
+                    'module_type': module_type,
+                    'speed_gbps': speed_gbps
+                })
+
+        except Exception as e:
+            logger.error(f"Error parsing Cisco NX-OS transceiver output: {str(e)}")
+
+        return modules
+
     def _collect_alcatel_transceivers(self, connection) -> List[Dict]:
         """Collect Alcatel/Nokia transceivers by querying each port individually
 

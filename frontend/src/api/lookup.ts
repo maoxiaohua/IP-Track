@@ -31,6 +31,7 @@ export interface QueryHistoryItem {
   target_ip: string
   found_mac?: string
   switch_id?: number
+  switch_name?: string
   port_name?: string
   vlan_id?: number
   query_status: 'success' | 'not_found' | 'error'

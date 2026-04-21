@@ -131,12 +131,19 @@ class SwitchDiscoveryService:
         d = sys_descr.strip()
 
         if vendor == 'cisco':
-            # NX-OS: "Cisco NX-OS(tm) n9000, Software ..."
+            # 1. NX-OS sysDescr format: "Cisco NX-OS(tm) n9000, Software ..."
             m = re.search(r'Cisco NX-OS\(tm\)\s+(\S+)', d, re.IGNORECASE)
             if m:
                 return m.group(1)
 
-            # IOS with embedded platform identifier:
+            # 2. Nexus hardware description format: "Nexus9000 93180YC-EX" or "Nexus 9000 93180YC-EX"
+            m = re.search(r'Nexus\s*(\d{4})\s+([A-Z0-9\-]+)', d, re.IGNORECASE)
+            if m:
+                series = m.group(1)  # 9000
+                model_suffix = m.group(2)   # 93180YC-EX
+                return f'N{series[0]}K-C{model_suffix}'  # N9K-C93180YC-EX
+
+            # 3. IOS with embedded platform identifier:
             #   "C3900 Software (C3900-UNIVERSALK9-M), ..."  → C3900
             #   "WS-C3750X-48P", "ASR1001-X", "ISR4321"
             m = re.search(
@@ -227,8 +234,23 @@ class SwitchDiscoveryService:
         model = 'Unknown'
 
         if vendor == 'cisco':
-            # Cisco IOS: "Model number  : WS-C3750X-48P"  or  "cisco WS-C3750X ..."
-            # Cisco NX-OS: "  cisco Nexus9000 ..."
+            # 1. Priority: Match PID format (most accurate for Nexus devices)
+            # Example: "PID: N9K-C93180YC-EX     ,  VID: V03 ,  SN: FDO22430K8X"
+            m = re.search(r'PID:\s*([A-Z0-9\-]+)', show_version_output, re.IGNORECASE)
+            if m:
+                pid = m.group(1).strip()
+                if pid and pid not in ['', 'N/A']:
+                    return pid
+
+            # 2. Match Nexus hardware description in show version
+            # Example: "cisco Nexus9000 93180YC-EX chassis"
+            m = re.search(r'cisco\s+Nexus(\d{4})\s+([A-Z0-9\-]+)', show_version_output, re.IGNORECASE)
+            if m:
+                series = m.group(1)  # 9000
+                model_suffix = m.group(2)   # 93180YC-EX
+                return f'N{series[0]}K-C{model_suffix}'  # N9K-C93180YC-EX
+
+            # 3. Cisco IOS: "Model number  : WS-C3750X-48P"  or  "cisco WS-C3750X ..."
             for line in lines:
                 ll = line.lower()
                 if 'model number' in ll or 'pid:' in ll:

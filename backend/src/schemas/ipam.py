@@ -137,9 +137,15 @@ class IPScanHistoryResponse(BaseModel):
     mac_address: Optional[str]
     os_type: Optional[str]
     os_name: Optional[str]
+    switch_id: Optional[int]
+    switch_port: Optional[str]
+    vlan_id: Optional[int]
     status_changed: bool
     hostname_changed: bool
     os_changed: bool
+    mac_changed: bool
+    switch_changed: bool
+    port_changed: bool
     scanned_at: datetime
 
     class Config:

@@ -1529,7 +1529,7 @@ async def collect_switch_optical_modules(
             module = OpticalModule(
                 switch_id=switch_id,
                 switch_name=switch.name,  # Add denormalized switch_name
-                switch_ip=switch.ip_address,  # Add denormalized switch_ip
+                switch_ip=str(switch.ip_address),  # Add denormalized switch_ip
                 port_name=module_data['port_name'],
                 module_type=module_data.get('module_type'),
                 model=module_data.get('model'),

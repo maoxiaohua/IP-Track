@@ -10,6 +10,7 @@ class QueryHistoryResponse(BaseModel):
     target_ip: str
     found_mac: Optional[str] = None
     switch_id: Optional[int] = None
+    switch_name: Optional[str] = None  # Denormalized switch name
     port_name: Optional[str] = None
     vlan_id: Optional[int] = None
     query_status: str

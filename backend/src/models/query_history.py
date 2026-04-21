@@ -13,6 +13,7 @@ class QueryHistory(Base):
     target_ip = Column(INET, nullable=False, index=True)
     found_mac = Column(MACADDR, nullable=True, index=True)
     switch_id = Column(Integer, ForeignKey("switches.id", ondelete="SET NULL"), nullable=True)
+    switch_name = Column(String(255), nullable=True)  # Denormalized switch name for display
     port_name = Column(String(50), nullable=True)
     vlan_id = Column(Integer, nullable=True)
     query_status = Column(String(20), nullable=False)  # 'success', 'not_found', 'error'

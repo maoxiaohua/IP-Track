@@ -14,6 +14,13 @@
         </template>
       </el-table-column>
 
+      <el-table-column prop="switch_name" label="Switch" width="200">
+        <template #default="{ row }">
+          <el-tag v-if="row.switch_name" type="primary">{{ row.switch_name }}</el-tag>
+          <span v-else class="text-muted">-</span>
+        </template>
+      </el-table-column>
+
       <el-table-column prop="port_name" label="Port" width="120">
         <template #default="{ row }">
           <el-tag v-if="row.port_name" type="success">{{ row.port_name }}</el-tag>

@@ -377,6 +377,11 @@ class IPAMService:
                 hostname_changed = ip_addr.hostname != scan_result['hostname']
                 os_changed = ip_addr.os_name != scan_result['os_name']
 
+                # Store old values for change detection
+                old_mac = str(ip_addr.mac_address) if ip_addr.mac_address else None
+                old_switch_id = ip_addr.switch_id
+                old_switch_port = ip_addr.switch_port
+
                 if scan_result['is_reachable'] and not ip_addr.last_seen_at:
                     new_devices += 1
 
@@ -486,7 +491,17 @@ class IPAMService:
                 if mac_to_lookup:
                     await self._update_switch_info(db, ip_addr, mac_to_lookup)
 
-                # Create history record
+                # Detect network location changes
+                new_mac = str(ip_addr.mac_address) if ip_addr.mac_address else None
+                mac_changed = old_mac != new_mac
+                switch_changed = old_switch_id != ip_addr.switch_id
+                port_changed = old_switch_port != ip_addr.switch_port
+
+                # Update changed_devices count if location changed
+                if mac_changed or switch_changed or port_changed:
+                    changed_devices += 1
+
+                # Create history record with network location tracking
                 history = IPScanHistory(
                     ip_address_id=ip_addr.id,
                     is_reachable=scan_result['is_reachable'],
@@ -495,9 +510,15 @@ class IPAMService:
                     mac_address=scan_result['mac_address'],
                     os_type=scan_result['os_type'],
                     os_name=scan_result['os_name'],
+                    switch_id=ip_addr.switch_id,
+                    switch_port=ip_addr.switch_port,
+                    vlan_id=ip_addr.vlan_id,
                     status_changed=status_changed,
                     hostname_changed=hostname_changed,
-                    os_changed=os_changed
+                    os_changed=os_changed,
+                    mac_changed=mac_changed,
+                    switch_changed=switch_changed,
+                    port_changed=port_changed
                 )
                 db.add(history)
 

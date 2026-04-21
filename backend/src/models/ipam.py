@@ -168,10 +168,18 @@ class IPScanHistory(Base):
     os_type = Column(String(50), nullable=True)
     os_name = Column(String(100), nullable=True)
 
+    # 网络位置信息
+    switch_id = Column(Integer, ForeignKey("switches.id", ondelete="SET NULL"), nullable=True, index=True)
+    switch_port = Column(String(50), nullable=True)
+    vlan_id = Column(Integer, nullable=True)
+
     # 变化检测
     status_changed = Column(Boolean, default=False, nullable=False)
     hostname_changed = Column(Boolean, default=False, nullable=False)
     os_changed = Column(Boolean, default=False, nullable=False)
+    mac_changed = Column(Boolean, default=False, nullable=False)
+    switch_changed = Column(Boolean, default=False, nullable=False)
+    port_changed = Column(Boolean, default=False, nullable=False)
 
     scanned_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 

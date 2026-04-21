@@ -21,35 +21,40 @@
               <el-icon><Grid /></el-icon>
               <span>IPAM</span>
             </el-menu-item>
-            <el-menu-item index="/snmp-profiles">
-              <el-icon><Key /></el-icon>
-              <span>SNMP Profiles</span>
-            </el-menu-item>
-            <el-menu-item index="/discovery">
-              <el-icon><Compass /></el-icon>
-              <span>Batch Discovery</span>
-            </el-menu-item>
-            <el-menu-item index="/command-templates">
-              <el-icon><Document /></el-icon>
-              <span>Templates</span>
-            </el-menu-item>
-            <el-menu-item index="/alarms">
-              <el-icon><Bell /></el-icon>
-              <span>Alarms</span>
-            </el-menu-item>
             <el-menu-item index="/optical-modules">
               <el-icon><Connection /></el-icon>
               <span>Optical Modules</span>
             </el-menu-item>
-            <el-menu-item index="/history">
-              <el-icon><Clock /></el-icon>
-              <span>History</span>
-            </el-menu-item>
-            <el-menu-item index="/settings">
-              <el-icon><Tools /></el-icon>
-              <span>Settings</span>
-            </el-menu-item>
           </el-menu>
+
+          <!-- More dropdown outside el-menu -->
+          <el-dropdown trigger="click" @command="handleMoreNav">
+            <div class="more-btn">
+              <el-icon :size="20"><MoreFilled /></el-icon>
+            </div>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="/snmp-profiles">
+                  <el-icon><Key /></el-icon> SNMP Profiles
+                </el-dropdown-item>
+                <el-dropdown-item command="/discovery">
+                  <el-icon><Compass /></el-icon> Batch Discovery
+                </el-dropdown-item>
+                <el-dropdown-item command="/command-templates">
+                  <el-icon><Document /></el-icon> Templates
+                </el-dropdown-item>
+                <el-dropdown-item command="/alarms">
+                  <el-icon><Bell /></el-icon> Alarms
+                </el-dropdown-item>
+                <el-dropdown-item command="/history">
+                  <el-icon><Clock /></el-icon> History
+                </el-dropdown-item>
+                <el-dropdown-item command="/settings">
+                  <el-icon><Tools /></el-icon> Settings
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </el-header>
       <el-main>
@@ -61,10 +66,16 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { MoreFilled } from '@element-plus/icons-vue'
 
 const route = useRoute()
+const router = useRouter()
 const activeRoute = computed(() => route.path)
+
+const handleMoreNav = (path: string) => {
+  router.push(path)
+}
 </script>
 
 <style scoped>
@@ -134,6 +145,44 @@ const activeRoute = computed(() => route.path)
 .el-menu-item .el-icon {
   font-size: 18px;
   margin-right: 6px;
+}
+
+/* Sub-menu styling */
+:deep(.el-sub-menu__title) {
+  color: #606266 !important;
+  font-weight: 500;
+  border-radius: 8px;
+  margin: 0 4px;
+  transition: all 0.3s ease;
+}
+
+:deep(.el-sub-menu__title:hover) {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(96, 165, 250, 0.1) 100%) !important;
+  color: #3B82F6 !important;
+}
+
+:deep(.el-menu--popup) {
+  min-width: 200px !important;
+  padding: 8px 0 !important;
+}
+
+.more-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: #606266;
+  transition: all 0.3s ease;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.more-btn:hover {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3B82F6;
 }
 
 .el-main {

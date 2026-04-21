@@ -142,7 +142,7 @@ class IPLookupService:
             if not row:
                 logger.info(f"No ARP entry found for IP {target_ip} in cache")
                 await self._log_query(
-                    db, target_ip, None, None, None, None,
+                    db, target_ip, None, None, None, None, None,
                     "not_found", "No ARP entry found in cached data",
                     int((time.time() - start_time) * 1000)
                 )
@@ -220,7 +220,7 @@ class IPLookupService:
                 # No port info at all
                 logger.info(f"No port information found for {mac_address}")
                 await self._log_query(
-                    db, target_ip, mac_address, None, None, None,
+                    db, target_ip, mac_address, None, None, None, None,
                     "not_found", "MAC address found but port information not available",
                     int((time.time() - start_time) * 1000)
                 )
@@ -244,7 +244,7 @@ class IPLookupService:
             # Step 4: Log successful query
             query_time_ms = int((time.time() - start_time) * 1000)
             await self._log_query(
-                db, target_ip, mac_address, switch.id,
+                db, target_ip, mac_address, switch.id, switch.name,
                 port_name, vlan_id,
                 "success", None, query_time_ms
             )
@@ -270,7 +270,7 @@ class IPLookupService:
         except Exception as e:
             logger.error(f"Unexpected error during cache lookup: {str(e)}", exc_info=True)
             await self._log_query(
-                db, target_ip, None, None, None, None,
+                db, target_ip, None, None, None, None, None,
                 "error", f"Cache lookup error: {str(e)}",
                 int((time.time() - start_time) * 1000)
             )
@@ -284,7 +284,7 @@ class IPLookupService:
 
     async def _log_query(
         self, db: AsyncSession, target_ip: str, mac: Optional[str],
-        switch_id: Optional[int], port: Optional[str], vlan: Optional[int],
+        switch_id: Optional[int], switch_name: Optional[str], port: Optional[str], vlan: Optional[int],
         status: str, error_msg: Optional[str], query_time_ms: int
     ):
         """Log query to history table"""
@@ -293,6 +293,7 @@ class IPLookupService:
                 target_ip=target_ip,
                 found_mac=mac,
                 switch_id=switch_id,
+                switch_name=switch_name,
                 port_name=port,
                 vlan_id=vlan,
                 query_status=status,
