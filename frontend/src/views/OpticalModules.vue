@@ -107,16 +107,42 @@
       </el-form>
     </el-card>
 
+    <el-alert
+      title="当前页面同时展示当前存在的光模块和历史缓存"
+      type="info"
+      description="当交换机离线、采集失败，或本轮成功采集未再次发现某模块时，系统会保留历史记录并标记为“历史缓存”，用于故障追踪和资产回溯。"
+      :closable="false"
+      show-icon
+      style="margin-bottom: 20px;"
+    />
+
     <!-- Statistics Card -->
     <el-card class="stats-card" v-if="statistics">
       <template #header>
         <span>统计信息</span>
       </template>
       <el-row :gutter="20">
-        <el-col :span="6">
+        <el-col :span="4">
           <el-statistic title="总计" :value="statistics.total_modules" />
         </el-col>
-        <el-col :span="6">
+        <el-col :span="4">
+          <el-statistic title="当前存在" :value="statistics.present_modules" />
+        </el-col>
+        <el-col :span="4">
+          <el-statistic title="历史缓存" :value="statistics.historical_modules" />
+        </el-col>
+        <el-col :span="4">
+          <el-statistic title="有模块交换机" :value="statistics.switches_with_modules" />
+        </el-col>
+        <el-col :span="4">
+          <el-statistic title="当前有模块交换机" :value="statistics.switches_with_present_modules" />
+        </el-col>
+        <el-col :span="4">
+          <el-statistic title="Stale交换机" :value="statistics.stale_switches" />
+        </el-col>
+      </el-row>
+      <el-row :gutter="20" style="margin-top: 16px;">
+        <el-col :span="8">
           <div class="stat-item">
             <div class="stat-title">按类型</div>
             <div class="stat-list">
@@ -127,7 +153,7 @@
             </div>
           </div>
         </el-col>
-        <el-col :span="6">
+        <el-col :span="8">
           <div class="stat-item">
             <div class="stat-title">按速率</div>
             <div class="stat-list">
@@ -138,13 +164,13 @@
             </div>
           </div>
         </el-col>
-        <el-col :span="6">
+        <el-col :span="8">
           <div class="stat-item">
             <div class="stat-title">Top厂商</div>
             <div class="stat-list">
-              <div v-for="(count, vendor) in Object.entries(statistics.by_vendor).slice(0, 5)" :key="vendor[0]" class="stat-line">
-                <span>{{ vendor[0] }}:</span>
-                <span>{{ vendor[1] }}</span>
+              <div v-for="([vendorName, vendorCount], index) in Object.entries(statistics.by_vendor).slice(0, 5)" :key="`${vendorName}-${index}`" class="stat-line">
+                <span>{{ vendorName }}:</span>
+                <span>{{ vendorCount }}</span>
               </div>
             </div>
           </div>
@@ -156,7 +182,12 @@
     <el-card class="results-card">
       <template #header>
         <div class="card-header">
-          <span>搜索结果 ({{ searchResults.total || 0 }})</span>
+          <span>
+            搜索结果 ({{ searchResults.total || 0 }})
+            <span v-if="searchResults.total > 0" style="font-size: 12px; color: #909399; margin-left: 8px;">
+              当前存在 {{ searchResults.present_count || 0 }} / 历史缓存 {{ searchResults.historical_count || 0 }}
+            </span>
+          </span>
           <el-button
             v-if="searchResults.modules && searchResults.modules.length > 0"
             size="small"
@@ -174,6 +205,13 @@
         style="width: 100%"
         @row-click="handleRowClick"
       >
+        <el-table-column prop="presence_status" label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag :type="row.is_present ? 'success' : 'warning'" size="small">
+              {{ row.is_present ? '当前存在' : '历史缓存' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="serial_number" label="序列号" width="150" />
         <el-table-column prop="model" label="型号" width="180" />
         <el-table-column prop="vendor" label="厂商" width="120" />
@@ -195,9 +233,19 @@
         <el-table-column prop="switch_name" label="交换机" width="200" />
         <el-table-column prop="switch_ip" label="交换机IP" width="140" />
         <el-table-column prop="port_name" label="端口" width="120" />
-        <el-table-column prop="collected_at" label="采集时间" width="180">
+        <el-table-column prop="last_seen" label="最近确认时间" width="180">
           <template #default="{ row }">
-            {{ formatDateTime(row.collected_at) }}
+            {{ formatDateTime(row.last_seen) }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="switch_last_optical_collection_status" label="交换机光模块状态" width="150">
+          <template #default="{ row }">
+            <el-tag
+              :type="row.switch_last_optical_collection_status === 'success' ? 'success' : row.switch_last_optical_collection_status === 'empty' ? 'info' : row.switch_last_optical_collection_status === 'failed' ? 'danger' : 'warning'"
+              size="small"
+            >
+              {{ row.switch_last_optical_collection_status || '-' }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="100" fixed="right">
@@ -263,6 +311,15 @@ interface OpticalModule {
   collected_at: string
   first_seen: string
   last_seen: string
+  presence_status: 'present' | 'historical'
+  is_present: boolean
+  freshness_status: 'fresh' | 'stale'
+  freshness_warning?: string | null
+  switch_is_reachable?: boolean | null
+  switch_last_optical_collection_at?: string | null
+  switch_last_optical_success_at?: string | null
+  switch_last_optical_collection_status?: string | null
+  switch_last_optical_collection_message?: string | null
 }
 
 interface SearchResults {
@@ -270,11 +327,18 @@ interface SearchResults {
   count: number
   offset: number
   limit: number
+  present_count: number
+  historical_count: number
   modules: OpticalModule[]
 }
 
 interface Statistics {
   total_modules: number
+  present_modules: number
+  historical_modules: number
+  switches_with_modules: number
+  switches_with_present_modules: number
+  stale_switches: number
   by_type: Record<string, number>
   by_vendor: Record<string, number>
   by_speed: Record<string, number>
@@ -296,6 +360,8 @@ const searchResults = ref<SearchResults>({
   count: 0,
   offset: 0,
   limit: 100,
+  present_count: 0,
+  historical_count: 0,
   modules: []
 })
 
@@ -428,7 +494,7 @@ function getModuleTypeTag(type: string | null): string {
   return 'info'
 }
 
-function formatDateTime(dateStr: string): string {
+function formatDateTime(dateStr?: string | null): string {
   if (!dateStr) return '-'
   const date = new Date(dateStr)
   return date.toLocaleString('zh-CN', {

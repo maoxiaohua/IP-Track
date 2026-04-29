@@ -10,6 +10,7 @@ Implements self-learning command cache to optimize command selection.
 from typing import Dict, List, Optional
 import re
 from netmiko import ConnectHandler
+from netmiko.ssh_dispatcher import CLASS_MAPPER
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, insert, update
 from utils.logger import logger
@@ -20,8 +21,91 @@ from fnmatch import fnmatch
 class CLIService:
     """Service for collecting data from switches via SSH CLI"""
 
+    SUPPORTED_CLI_TRANSPORTS = {'ssh', 'telnet'}
+    ENABLE_MODE_DEVICE_TYPES = {'cisco_ios', 'cisco_xe', 'dell_force10'}
+    PAGING_DISABLE_COMMANDS = {
+        'cisco_ios': ['terminal length 0'],
+        'cisco_xe': ['terminal length 0'],
+        'cisco_nxos': ['terminal length 0'],
+        'dell_force10': ['terminal length 0'],
+        'dell_os10': ['terminal length 0'],
+        'juniper_junos': ['set cli screen-length 0'],
+        'nokia_sros': ['environment more false'],
+        'nokia_srl': ['environment more false'],
+        'alcatel_aos': ['environment no more'],
+    }
+    TELNET_DEVICE_TYPE_ALIASES = {
+        'cisco_xe': 'cisco_ios_telnet',
+        'cisco_nxos': 'generic_telnet',
+        'dell_force10': 'generic_telnet',
+        'dell_os10': 'generic_telnet',
+        'nokia_srl': 'generic_telnet',
+        'alcatel_aos': 'generic_telnet',
+    }
+
     def __init__(self):
         logger.info("CLI service initialized")
+
+    def normalize_cli_transport(self, transport: Optional[str]) -> str:
+        """Normalize CLI transport to a supported value."""
+        normalized = (transport or 'ssh').strip().lower()
+        if normalized not in self.SUPPORTED_CLI_TRANSPORTS:
+            logger.warning(f"Unsupported CLI transport '{transport}', defaulting to SSH")
+            return 'ssh'
+        return normalized
+
+    def default_port_for_transport(self, transport: Optional[str]) -> int:
+        """Return the standard port for a given CLI transport."""
+        return 23 if self.normalize_cli_transport(transport) == 'telnet' else 22
+
+    def normalize_cli_connection_settings(
+        self,
+        transport: Optional[str],
+        port: Optional[int],
+        *,
+        port_was_explicit: bool
+    ) -> tuple[str, int]:
+        """Normalize transport and choose a default port when the caller did not provide one."""
+        normalized_transport = self.normalize_cli_transport(transport)
+        if port_was_explicit and port:
+            return normalized_transport, port
+        return normalized_transport, self.default_port_for_transport(normalized_transport)
+
+    def _base_device_type(self, device_type: Optional[str]) -> str:
+        """Strip transport-specific suffixes from a Netmiko device type."""
+        normalized = (device_type or 'cisco_ios').strip()
+        for suffix in ('_telnet', '_ssh', '_serial'):
+            if normalized.endswith(suffix):
+                return normalized[:-len(suffix)]
+        return normalized
+
+    def _resolve_transport_device_type(self, device_type: Optional[str], transport: Optional[str]) -> str:
+        """Resolve the Netmiko driver that matches the requested CLI transport."""
+        normalized_transport = self.normalize_cli_transport(transport)
+        requested_device_type = (device_type or 'cisco_ios').strip()
+
+        if normalized_transport == 'ssh':
+            return requested_device_type
+
+        if requested_device_type.endswith('_telnet') and requested_device_type in CLASS_MAPPER:
+            return requested_device_type
+
+        base_device_type = self._base_device_type(requested_device_type)
+        direct_telnet_driver = f"{base_device_type}_telnet"
+        if direct_telnet_driver in CLASS_MAPPER:
+            return direct_telnet_driver
+
+        alias_driver = self.TELNET_DEVICE_TYPE_ALIASES.get(base_device_type)
+        if alias_driver and alias_driver in CLASS_MAPPER:
+            logger.warning(
+                f"Using Telnet fallback driver '{alias_driver}' for device type '{base_device_type}'"
+            )
+            return alias_driver
+
+        logger.warning(
+            f"No vendor-specific Telnet driver for device type '{base_device_type}', using generic_telnet"
+        )
+        return 'generic_telnet'
 
     def _strip_ansi_codes(self, text: str) -> str:
         """
@@ -41,59 +125,130 @@ class CLIService:
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         return ansi_escape.sub('', text)
 
-    def _create_ssh_connection(
+    def _should_use_timing_commands(self, device_type: Optional[str], transport: Optional[str]) -> bool:
+        """Telnet sessions and some platforms are more stable with timing-based reads."""
+        return (
+            self.normalize_cli_transport(transport) == 'telnet' or
+            self._base_device_type(device_type) == 'dell_force10'
+        )
+
+    def _disable_paging(
+        self,
+        connection: ConnectHandler,
+        base_device_type: str,
+        host: str
+    ) -> None:
+        """Best-effort pagination disable so long outputs do not stall on '--More--'."""
+        commands = self.PAGING_DISABLE_COMMANDS.get(base_device_type, [])
+        if not commands:
+            return
+
+        for command in commands:
+            try:
+                connection.send_command_timing(command, delay_factor=2, max_loops=50)
+                logger.debug(f"Disabled paging on {host} using '{command}'")
+                return
+            except Exception as paging_error:
+                logger.debug(
+                    f"Paging disable command '{command}' failed on {host}: {str(paging_error)[:120]}"
+                )
+
+        logger.warning(f"Unable to disable paging on {host} for device type {base_device_type}")
+
+    def _execute_command(
+        self,
+        connection: ConnectHandler,
+        command: str,
+        *,
+        device_type: Optional[str],
+        transport: Optional[str],
+        read_timeout: int = 90,
+        delay_factor: float = 2,
+        max_loops: int = 150
+    ) -> str:
+        """Execute a CLI command with prompt-safe fallback handling."""
+        if self._should_use_timing_commands(device_type, transport):
+            return connection.send_command_timing(
+                command,
+                delay_factor=delay_factor,
+                max_loops=max_loops,
+            )
+
+        try:
+            return connection.send_command(command, read_timeout=read_timeout)
+        except Exception as cmd_error:
+            logger.debug(f"send_command failed, trying send_command_timing: {str(cmd_error)[:100]}")
+            return connection.send_command_timing(
+                command,
+                delay_factor=delay_factor,
+                max_loops=max_loops,
+            )
+
+    def _create_cli_connection(
         self,
         host: str,
         username: str,
         password: str,
         device_type: str = 'dell_os10',
-        port: int = 22,
+        port: Optional[int] = None,
         timeout: int = 30,
-        enable_secret: str = None
+        enable_secret: str = None,
+        transport: str = 'ssh'
     ) -> Optional[ConnectHandler]:
         """
-        Create SSH connection to network device
+        Create CLI connection to network device.
 
         Args:
             host: Device IP address
-            username: SSH username
-            password: SSH password
+            username: CLI username
+            password: CLI password
             device_type: Device type (dell_os10, cisco_ios, etc.)
-            port: SSH port (default 22)
+            port: CLI port
             timeout: Connection timeout in seconds
             enable_secret: Enable password (for Cisco/Dell Force10)
+            transport: CLI transport ('ssh' or 'telnet')
 
         Returns:
             ConnectHandler object or None if connection fails
         """
         try:
+            normalized_transport, resolved_port = self.normalize_cli_connection_settings(
+                transport,
+                port,
+                port_was_explicit=port is not None
+            )
+            base_device_type = self._base_device_type(device_type)
+            netmiko_device_type = self._resolve_transport_device_type(device_type, normalized_transport)
             device = {
-                'device_type': device_type,
+                'device_type': netmiko_device_type,
                 'host': host,
                 'username': username,
                 'password': password,
-                'port': port,
+                'port': resolved_port,
                 'timeout': timeout,
                 'session_timeout': timeout,
                 'conn_timeout': timeout,
             }
 
             # Add enable secret if provided (for Cisco and Dell Force10)
-            if enable_secret and device_type in ['cisco_ios', 'cisco_xe', 'dell_force10']:
+            if enable_secret and base_device_type in self.ENABLE_MODE_DEVICE_TYPES:
                 device['secret'] = enable_secret
-                logger.debug(f"Enable password provided for {device_type} on {host}")
-            elif device_type in ['cisco_ios', 'cisco_xe', 'dell_force10']:
-                logger.warning(f"No enable password provided for {device_type} on {host} - commands may fail")
+                logger.debug(f"Enable password provided for {base_device_type} on {host}")
+            elif base_device_type in self.ENABLE_MODE_DEVICE_TYPES:
+                logger.warning(f"No enable password provided for {base_device_type} on {host} - commands may fail")
 
-            logger.debug(f"Connecting to {host} via SSH as {username}")
+            logger.debug(
+                f"Connecting to {host} via {normalized_transport.upper()} as {username} "
+                f"using driver {netmiko_device_type}"
+            )
             connection = ConnectHandler(**device)
-            logger.info(f"✅ SSH connection established to {host}")
+            logger.info(f"✅ {normalized_transport.upper()} connection established to {host}")
 
             # Enable privileged mode for devices that require it
-            if device_type in ['cisco_ios', 'cisco_xe', 'dell_force10']:
+            if base_device_type in self.ENABLE_MODE_DEVICE_TYPES:
                 try:
                     # For Dell Force10, use send_command_timing throughout to avoid prompt issues
-                    if device_type == 'dell_force10':
+                    if base_device_type == 'dell_force10':
                         # Check current prompt
                         prompt_output = connection.send_command_timing('', delay_factor=1)
 
@@ -142,11 +297,44 @@ class CLIService:
                 except Exception as e:
                     logger.warning(f"Enable mode attempt on {host} had issues (continuing anyway): {str(e)[:100]}")
 
+            try:
+                self._disable_paging(connection, base_device_type, host)
+            except Exception as paging_error:
+                logger.warning(f"Pagination disable attempt on {host} had issues: {str(paging_error)[:100]}")
+
+            try:
+                connection.clear_buffer()
+            except Exception:
+                pass
+
             return connection
 
         except Exception as e:
-            logger.error(f"❌ SSH connection failed to {host}: {str(e)}")
+            normalized_transport = self.normalize_cli_transport(transport)
+            logger.error(f"❌ {normalized_transport.upper()} connection failed to {host}: {str(e)}")
             return None
+
+    def _create_ssh_connection(
+        self,
+        host: str,
+        username: str,
+        password: str,
+        device_type: str = 'dell_os10',
+        port: int = 22,
+        timeout: int = 30,
+        enable_secret: str = None
+    ) -> Optional[ConnectHandler]:
+        """Backward-compatible wrapper for legacy SSH-only call sites."""
+        return self._create_cli_connection(
+            host=host,
+            username=username,
+            password=password,
+            device_type=device_type,
+            port=port,
+            timeout=timeout,
+            enable_secret=enable_secret,
+            transport='ssh'
+        )
 
     async def _get_cached_command(
         self,
@@ -1469,19 +1657,22 @@ class CLIService:
                 logger.warning(f"No MAC parser found for type: {parser_type}")
                 return []
 
-            # Create SSH connection (with enable password if available)
-            connection = self._create_ssh_connection(
+            # Create CLI connection (with enable password if available)
+            transport = switch_config.get('cli_transport', 'ssh')
+            device_type = template.get('device_type')
+            connection = self._create_cli_connection(
                 host=switch_ip,
                 username=switch_config['username'],
                 password=password,
-                device_type=template['device_type'],
-                port=switch_config.get('ssh_port', 22),
+                device_type=device_type,
+                port=switch_config.get('ssh_port'),
                 timeout=switch_config.get('connection_timeout', 30),
-                enable_secret=enable_secret
+                enable_secret=enable_secret,
+                transport=transport
             )
 
             if not connection:
-                logger.error(f"Failed to establish SSH connection to {switch_ip}")
+                logger.error(f"Failed to establish CLI connection to {switch_ip}")
                 return []
 
             # Try main command first
@@ -1489,17 +1680,15 @@ class CLIService:
             logger.info(f"Executing MAC command on {switch_ip}: {command}")
 
             try:
-                # For Dell Force10, always use send_command_timing to avoid prompt issues
-                if template.get('device_type') == 'dell_force10':
-                    output = connection.send_command_timing(command, delay_factor=4, max_loops=200)
-                else:
-                    # Use send_command_timing for devices with problematic prompts
-                    try:
-                        output = connection.send_command(command, read_timeout=90)
-                    except Exception as cmd_error:
-                        # Fallback to send_command_timing if send_command fails
-                        logger.debug(f"send_command failed, trying send_command_timing: {str(cmd_error)[:100]}")
-                        output = connection.send_command_timing(command, delay_factor=2, max_loops=150)
+                output = self._execute_command(
+                    connection,
+                    command,
+                    device_type=device_type,
+                    transport=transport,
+                    read_timeout=90,
+                    delay_factor=4 if self._base_device_type(device_type) == 'dell_force10' else 3,
+                    max_loops=200,
+                )
 
                 # Debug: Log command output for troubleshooting
                 logger.debug(f"MAC command output from {switch_ip} ({len(output)} chars):\n{output[:500]}")
@@ -1532,8 +1721,15 @@ class CLIService:
                         logger.info(f"Trying fallback command on {switch_ip}: {fallback_cmd}")
 
                         try:
-                            # Remove expect_string to let Netmiko auto-detect the prompt
-                            output = connection.send_command(fallback_cmd, read_timeout=90)
+                            output = self._execute_command(
+                                connection,
+                                fallback_cmd,
+                                device_type=device_type,
+                                transport=transport,
+                                read_timeout=90,
+                                delay_factor=3,
+                                max_loops=200,
+                            )
 
                             # Try specified parser or use main parser
                             fallback_parser = self._get_parser(fallback_parser_type, 'mac') if fallback_parser_type else parser
@@ -1563,7 +1759,7 @@ class CLIService:
             if connection:
                 try:
                     connection.disconnect()
-                    logger.debug(f"SSH connection closed to {switch_ip}")
+                    logger.debug(f"CLI connection closed to {switch_ip}")
                 except:
                     pass
 
@@ -1644,25 +1840,51 @@ class CLIService:
         Returns:
             Matching template dict or None
         """
+        match_details = self.preview_template_match(vendor, model, name, templates)
+        if match_details:
+            return match_details['template']
+        return None
+
+    def preview_template_match(
+        self,
+        vendor: str,
+        model: str,
+        name: str = '',
+        templates: Optional[List[Dict]] = None
+    ) -> Optional[Dict]:
+        """
+        Explain which template would match a given switch identity.
+
+        Returns:
+            {
+                'source': 'database' | 'builtin',
+                'template': { ...template fields... }
+            }
+            or None if nothing matches.
+        """
         # Try database templates first if provided
         if templates:
             matched_template = self._match_from_template_list(vendor, model, name, templates)
             if matched_template:
                 logger.debug(f"Matched database template for {vendor} {model}")
-                return matched_template
-            # Database templates provided but no match found
+                return {
+                    'source': 'database',
+                    'template': dict(matched_template),
+                }
             logger.debug(f"No match in database templates for {vendor} {model}, trying builtin templates")
 
-        # Fallback to builtin templates
         builtin_templates = self._get_builtin_templates()
         matched_template = self._match_from_template_list(vendor, model, name, builtin_templates)
 
         if matched_template:
             logger.debug(f"Matched builtin template for {vendor} {model}: {matched_template.get('device_type')}")
-        else:
-            logger.warning(f"No template found (database or builtin) for {vendor} {model}")
+            return {
+                'source': 'builtin',
+                'template': dict(matched_template),
+            }
 
-        return matched_template
+        logger.warning(f"No template found (database or builtin) for {vendor} {model}")
+        return None
 
     def _get_builtin_templates(self) -> List[Dict]:
         """
@@ -1784,19 +2006,22 @@ class CLIService:
                 logger.warning(f"No ARP parser found for type: {parser_type}")
                 return []
 
-            # Create SSH connection (with enable password if available)
-            connection = self._create_ssh_connection(
+            # Create CLI connection (with enable password if available)
+            transport = switch_config.get('cli_transport', 'ssh')
+            device_type = template.get('device_type', '')
+            connection = self._create_cli_connection(
                 host=switch_ip,
                 username=switch_config['username'],
                 password=password,
-                device_type=template['device_type'],
-                port=switch_config.get('ssh_port', 22),
+                device_type=device_type,
+                port=switch_config.get('ssh_port'),
                 timeout=switch_config.get('connection_timeout', 30),
-                enable_secret=enable_secret
+                enable_secret=enable_secret,
+                transport=transport
             )
 
             if not connection:
-                logger.error(f"Failed to establish SSH connection to {switch_ip}")
+                logger.error(f"Failed to establish CLI connection to {switch_ip}")
                 return []
 
             # Try main command first
@@ -1814,18 +2039,15 @@ class CLIService:
                 # Dell Force10 (FTOS) devices have prompt-detection timing issues
                 # that cause send_command to drop the first character of the command.
                 # Use send_command_timing (delay-based) instead to avoid this.
-                device_type = template.get('device_type', '')
-                if device_type == 'dell_force10':
-                    output = connection.send_command_timing(
-                        command, delay_factor=3, max_loops=200
-                    )
-                else:
-                    try:
-                        output = connection.send_command(command, read_timeout=90)
-                    except Exception as cmd_error:
-                        # Fallback to send_command_timing if send_command fails
-                        logger.debug(f"send_command failed, trying send_command_timing: {str(cmd_error)[:100]}")
-                        output = connection.send_command_timing(command, delay_factor=2, max_loops=150)
+                output = self._execute_command(
+                    connection,
+                    command,
+                    device_type=device_type,
+                    transport=transport,
+                    read_timeout=90,
+                    delay_factor=3,
+                    max_loops=200,
+                )
 
                 arp_entries = parser(output)
 
@@ -1858,8 +2080,15 @@ class CLIService:
                         logger.info(f"Trying ARP fallback command on {switch_ip}: {fallback_cmd}")
 
                         try:
-                            # Remove expect_string to let Netmiko auto-detect the prompt
-                            output = connection.send_command(fallback_cmd, read_timeout=90)
+                            output = self._execute_command(
+                                connection,
+                                fallback_cmd,
+                                device_type=device_type,
+                                transport=transport,
+                                read_timeout=90,
+                                delay_factor=3,
+                                max_loops=200,
+                            )
 
                             # Try specified parser or use main parser
                             fallback_parser = self._get_parser(fallback_parser_type, 'arp') if fallback_parser_type else parser
@@ -1889,7 +2118,7 @@ class CLIService:
             if connection:
                 try:
                     connection.disconnect()
-                    logger.debug(f"SSH connection closed to {switch_ip}")
+                    logger.debug(f"CLI connection closed to {switch_ip}")
                 except:
                     pass
 
@@ -1949,26 +2178,39 @@ class CLIService:
 
             # Decrypt password
             password = decrypt_password(switch_config['password_encrypted'])
+            transport = switch_config.get('cli_transport', 'ssh')
 
-            # Establish SSH connection
+            # Establish CLI connection
             device_type = switch_config.get('device_type', 'nokia_sros')
-            connection = self._create_ssh_connection(
+            enable_secret = None
+            if switch_config.get('enable_password_encrypted'):
+                enable_secret = decrypt_password(switch_config['enable_password_encrypted'])
+            connection = self._create_cli_connection(
                 host=switch_ip,
                 username=switch_config['username'],
                 password=password,
                 device_type=device_type,
-                port=switch_config.get('ssh_port', 22),
-                timeout=switch_config.get('connection_timeout', 30)
+                port=switch_config.get('ssh_port'),
+                timeout=switch_config.get('connection_timeout', 30),
+                enable_secret=enable_secret,
+                transport=transport
             )
 
             if not connection:
-                logger.error(f"Failed to establish SSH connection to {switch_ip}")
+                logger.error(f"Failed to establish CLI connection to {switch_ip}")
                 return None
 
             # Execute command
             logger.info(f"Executing device info command on {switch_ip}: {command}")
-            # Remove expect_string to let Netmiko auto-detect the prompt
-            output = connection.send_command(command, read_timeout=60)
+            output = self._execute_command(
+                connection,
+                command,
+                device_type=device_type,
+                transport=transport,
+                read_timeout=60,
+                delay_factor=3 if self.normalize_cli_transport(transport) == 'telnet' else 2,
+                max_loops=200 if self.normalize_cli_transport(transport) == 'telnet' else 150,
+            )
 
             # Parse output
             device_info = parser(output)
@@ -1984,7 +2226,7 @@ class CLIService:
             if connection:
                 try:
                     connection.disconnect()
-                    logger.debug(f"SSH connection closed to {switch_ip}")
+                    logger.debug(f"CLI connection closed to {switch_ip}")
                 except:
                     pass
 
@@ -2083,7 +2325,7 @@ class CLIService:
         logger.info(f"Collecting optical modules from {switch_ip} via CLI (vendor: {vendor}, model: {model})")
         
         try:
-            # Create SSH connection
+            # Create CLI connection
             from core.security import decrypt_password
             device_type = self._resolve_device_type(
                 vendor,
@@ -2092,18 +2334,19 @@ class CLIService:
                 cli_config.get('device_type')
             )
 
-            connection = self._create_ssh_connection(
+            connection = self._create_cli_connection(
                 switch_ip,
                 cli_config['username'],
                 decrypt_password(cli_config['password_encrypted']),
                 device_type,
-                cli_config.get('ssh_port', 22),
+                cli_config.get('ssh_port'),
                 cli_config.get('connection_timeout', 30),
-                decrypt_password(cli_config.get('enable_password_encrypted')) if cli_config.get('enable_password_encrypted') else None
+                decrypt_password(cli_config.get('enable_password_encrypted')) if cli_config.get('enable_password_encrypted') else None,
+                cli_config.get('cli_transport', 'ssh')
             )
             
             if not connection:
-                logger.error(f"Failed to establish SSH connection to {switch_ip}")
+                logger.error(f"Failed to establish CLI connection to {switch_ip}")
                 return []
             
             modules = []

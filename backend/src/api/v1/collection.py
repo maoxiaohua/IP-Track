@@ -176,14 +176,14 @@ async def update_collection_method(
     updated = []
 
     if mac_method:
-        if mac_method not in ['snmp', 'cli', 'auto']:
+        if mac_method not in ['cli', 'auto']:
             raise HTTPException(status_code=400, detail="Invalid method")
         switch.mac_collection_method = mac_method
         switch.mac_method_override = (mac_method != 'auto')
         updated.append('mac')
 
     if arp_method:
-        if arp_method not in ['snmp', 'cli', 'auto']:
+        if arp_method not in ['cli', 'auto']:
             raise HTTPException(status_code=400, detail="Invalid method")
         switch.arp_collection_method = arp_method
         switch.arp_method_override = (arp_method != 'auto')

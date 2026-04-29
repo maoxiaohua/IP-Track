@@ -7,9 +7,9 @@ Workers pull jobs from PostgreSQL queue and execute them independently.
 
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
-from sqlalchemy import select, and_, update
+from sqlalchemy import select, and_, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -32,6 +32,13 @@ class CollectionWorker:
         self.jobs_processed = 0
         self.jobs_succeeded = 0
         self.jobs_failed = 0
+
+    @staticmethod
+    def _enum_value(value: Any) -> str:
+        """Normalize enum-like values persisted in string columns."""
+        if value is None:
+            return ""
+        return value.value if hasattr(value, "value") else str(value)
 
     async def run(self, db: AsyncSession):
         """Main worker loop - pull jobs and execute"""
@@ -97,6 +104,7 @@ class CollectionWorker:
     async def _execute_job(self, db: AsyncSession, job: CollectionJob):
         """Execute a collection job"""
         start_time = datetime.utcnow()
+        job_type_value = self._enum_value(job.job_type)
 
         try:
             # Get switch details
@@ -107,6 +115,9 @@ class CollectionWorker:
 
             if not switch:
                 raise Exception(f"Switch {job.switch_id} not found")
+
+            # Close the read transaction before any long-running network I/O begins.
+            await db.commit()
 
             # Execute collection based on job type
             if job.job_type == JobType.MAC:
@@ -123,7 +134,11 @@ class CollectionWorker:
 
             elif job.job_type == JobType.ALL:
                 mac_entries = await self.collector.collect_mac_single_switch(db, switch)
+                await db.commit()
+                mac_result_message = switch.last_collection_message
                 arp_entries = await self.collector.collect_arp_single_switch(db, switch)
+                await db.commit()
+                arp_result_message = switch.last_collection_message
                 optical_entries = await self.collector.collect_optical_single_switch(db, switch)
                 mac_count = len(mac_entries) if mac_entries else 0
                 arp_count = len(arp_entries) if arp_entries else 0
@@ -138,15 +153,27 @@ class CollectionWorker:
                 # produced any usable L2/L3 entries. Optical modules can legitimately be
                 # absent, and some devices are considered healthy even when only ARP or
                 # only MAC data is populated in a collection run.
-                if mac_count == 0 and arp_count == 0:
-                    switch.last_collection_status = 'failed'
-                else:
-                    switch.last_collection_status = 'success'
-
-                switch.last_collection_message = (
+                combined_result_message = (
                     f"MAC: {mac_count} entries, ARP: {arp_count} entries, "
                     f"Optical: {optical_count} entries"
                 )
+
+                if mac_count == 0 and arp_count == 0:
+                    failure_message = self.collector._build_collection_failure_message(
+                        switch,
+                        mac_result_message or "MAC: 0 entries after trying all available methods",
+                        arp_result_message or "ARP: 0 entries after trying all available methods"
+                    )
+                    await self.collector._mark_switch_collection_failed(
+                        db,
+                        switch,
+                        reason=failure_message,
+                        collected_at=start_time
+                    )
+                    raise RuntimeError(failure_message)
+
+                switch.last_collection_status = 'success'
+                switch.last_collection_message = combined_result_message
 
             # Mark job as successful
             job.status = 'success'
@@ -183,17 +210,23 @@ class CollectionWorker:
                 switch = switch_result.scalar_one_or_none()
                 
                 if switch:
+                    await self.collector._mark_switch_collection_failed(
+                        db,
+                        switch,
+                        reason="Collection timeout exceeded",
+                        collected_at=start_time
+                    )
                     await alarm_service.create_alarm(
                         db=db,
                         severity=AlarmSeverity.WARNING,
                         title=f"Collection timeout: {switch.name}",
-                        message=f"Collection timeout exceeded for {job.job_type.value} collection",
+                        message=f"Collection timeout exceeded for {job_type_value} collection",
                         source_type=AlarmSourceType.SWITCH,
                         source_id=switch.id,
                         source_name=switch.name,
                         details={
                             'error_type': 'timeout',
-                            'job_type': job.job_type.value,
+                            'job_type': job_type_value,
                             'job_id': job.id,
                             'switch_ip': str(switch.ip_address),
                             'vendor': switch.vendor
@@ -220,6 +253,12 @@ class CollectionWorker:
                 switch = switch_result.scalar_one_or_none()
                 
                 if switch:
+                    await self.collector._mark_switch_collection_failed(
+                        db,
+                        switch,
+                        reason=str(e),
+                        collected_at=start_time
+                    )
                     # Determine severity based on error message
                     severity = AlarmSeverity.ERROR
                     if 'auth' in str(e).lower() or 'password' in str(e).lower():
@@ -237,7 +276,7 @@ class CollectionWorker:
                         source_name=switch.name,
                         details={
                             'error_type': type(e).__name__,
-                            'job_type': job.job_type.value,
+                            'job_type': job_type_value,
                             'job_id': job.id,
                             'switch_ip': str(switch.ip_address),
                             'vendor': switch.vendor,
@@ -362,8 +401,8 @@ class CollectionWorkerPool:
 
             job = CollectionJob(
                 switch_id=switch.id,
-                job_type=job_type,
-                status=JobStatus.PENDING,
+                job_type=job_type.value,
+                status=JobStatus.PENDING.value,
                 batch_id=batch_id,
                 priority=priority
             )
@@ -373,6 +412,54 @@ class CollectionWorkerPool:
         await db.commit()
         logger.info(f"Created {jobs_created} {job_type.value} jobs (batch={batch_id})")
         return jobs_created
+
+    async def cleanup_old_jobs(
+        self,
+        db: AsyncSession,
+        days_to_keep: int = settings.COLLECTION_JOB_RETENTION_DAYS,
+        batch_size: int = settings.COLLECTION_JOB_CLEANUP_BATCH_SIZE
+    ) -> int:
+        """Delete completed collection jobs older than the retention window in batches."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
+        terminal_statuses = [
+            JobStatus.SUCCESS.value,
+            JobStatus.FAILED.value,
+            JobStatus.TIMEOUT.value,
+            JobStatus.CANCELLED.value,
+        ]
+        total_deleted = 0
+
+        while True:
+            stale_ids = (
+                select(CollectionJob.id)
+                .where(
+                    CollectionJob.status.in_(terminal_statuses),
+                    CollectionJob.completed_at.is_not(None),
+                    CollectionJob.completed_at < cutoff
+                )
+                .order_by(CollectionJob.id.asc())
+                .limit(batch_size)
+            )
+
+            result = await db.execute(
+                delete(CollectionJob)
+                .where(CollectionJob.id.in_(stale_ids))
+                .execution_options(synchronize_session=False)
+            )
+            batch_deleted = result.rowcount or 0
+
+            if batch_deleted == 0:
+                break
+
+            total_deleted += batch_deleted
+            await db.commit()
+
+        if total_deleted:
+            logger.info(
+                f"Cleaned up {total_deleted} collection jobs older than {days_to_keep} days"
+            )
+
+        return total_deleted
 
     async def get_pool_status(self, db: AsyncSession) -> Dict[str, Any]:
         """Get current status of worker pool"""

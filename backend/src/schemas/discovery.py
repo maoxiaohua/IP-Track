@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 
 class CredentialSet(BaseModel):
@@ -7,6 +7,7 @@ class CredentialSet(BaseModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
     enable_password: Optional[str] = None
+    transport: Literal['ssh', 'telnet'] = 'ssh'
     port: int = Field(default=22, ge=1, le=65535)
 
 
@@ -27,7 +28,7 @@ class SNMPDiscoveryConfig(BaseModel):
 class SwitchDiscoveryRequest(BaseModel):
     """Request schema for switch discovery"""
     ip_range: str = Field(..., description="IP range: 10.0.0.1-10.0.0.254 or 10.0.0.0/24")
-    credentials: List[CredentialSet] = Field(..., min_length=1, description="SSH credentials to try")
+    credentials: List[CredentialSet] = Field(..., min_length=1, description="CLI credentials to try")
     snmp_config: Optional[SNMPDiscoveryConfig] = None  # SNMP for hostname/vendor/model identity
 
 
@@ -37,6 +38,7 @@ class DiscoveredSwitch(BaseModel):
     name: str
     vendor: str
     model: str
+    cli_transport: Literal['ssh', 'telnet'] = 'ssh'
     ssh_port: int
     username: str
     # Note: password is not included in response for security

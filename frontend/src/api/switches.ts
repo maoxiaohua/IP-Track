@@ -6,10 +6,13 @@ export interface Switch {
   ip_address: string
   vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper'
   model?: string
+  role?: string
+  priority?: number
   enabled: boolean
 
   // CLI fields
   cli_enabled: boolean
+  cli_transport: 'ssh' | 'telnet'
   ssh_port?: number
   username?: string
   connection_timeout?: number
@@ -24,8 +27,13 @@ export interface Switch {
   auto_collect_mac: boolean
   last_arp_collection_at?: string | null
   last_mac_collection_at?: string | null
+  last_optical_collection_at?: string | null
+  last_optical_success_at?: string | null
   last_collection_status?: string | null
   last_collection_message?: string | null
+  last_optical_collection_status?: string | null
+  last_optical_collection_message?: string | null
+  last_optical_modules_count?: number | null
   trunk_review_completed: boolean
   trunk_review_completed_at?: string | null
   trunk_review_note?: string | null
@@ -52,6 +60,7 @@ export interface SwitchCreate {
 
   // CLI fields
   cli_enabled?: boolean
+  cli_transport?: 'ssh' | 'telnet'
   ssh_port?: number
   username?: string
   password?: string
@@ -66,11 +75,11 @@ export interface SwitchCreate {
   snmp_enabled?: boolean
   snmp_version?: string
   snmp_port?: number
-  snmp_username: string
+  snmp_username?: string
   snmp_auth_protocol?: string
-  snmp_auth_password: string
+  snmp_auth_password?: string
   snmp_priv_protocol?: string
-  snmp_priv_password: string
+  snmp_priv_password?: string
   snmp_community?: string
 }
 
@@ -80,6 +89,7 @@ export interface SwitchUpdate {
   vendor?: 'cisco' | 'dell' | 'alcatel' | 'juniper'
   model?: string
   cli_enabled?: boolean
+  cli_transport?: 'ssh' | 'telnet'
   ssh_port?: number
   username?: string
   password?: string
@@ -146,6 +156,16 @@ export interface PortAnalysisResponse {
     name: string
     ip_address: string
   }
+  freshness: {
+    status: 'fresh' | 'stale'
+    reason: string
+    warning?: string | null
+    last_analyzed_at?: string | null
+    last_collection_attempt_at?: string | null
+    last_collection_status?: string | null
+    last_collection_message?: string | null
+    is_reachable?: boolean | null
+  }
   ports: PortAnalysisEntry[]
   summary: {
     total_ports: number
@@ -156,6 +176,46 @@ export interface PortAnalysisResponse {
     lookup_included_ports: number
     lookup_excluded_ports: number
   }
+}
+
+export interface OpticalModuleEntry {
+  id: number
+  port_name: string
+  module_type?: string | null
+  model?: string | null
+  serial_number?: string | null
+  vendor?: string | null
+  speed_gbps?: number | null
+  collected_at?: string | null
+  first_seen?: string | null
+  last_seen?: string | null
+  presence_status: 'present' | 'historical'
+  is_present: boolean
+  freshness_status: 'fresh' | 'stale'
+  freshness_warning?: string | null
+}
+
+export interface OpticalInventoryFreshness {
+  status: 'fresh' | 'stale'
+  reason: string
+  warning?: string | null
+  last_optical_collection_at?: string | null
+  last_optical_success_at?: string | null
+  last_optical_collection_status?: string | null
+  last_optical_collection_message?: string | null
+  last_optical_modules_count?: number | null
+  is_reachable?: boolean | null
+}
+
+export interface OpticalModuleResponse {
+  switch_id: number
+  switch_name: string
+  switch_ip: string
+  total_modules: number
+  present_modules: number
+  historical_modules: number
+  freshness: OpticalInventoryFreshness
+  entries: OpticalModuleEntry[]
 }
 
 export const switchesApi = {
@@ -232,7 +292,7 @@ export const switchesApi = {
   },
 
   // Get optical modules
-  getOpticalModules: async (id: number): Promise<any> => {
+  getOpticalModules: async (id: number): Promise<OpticalModuleResponse> => {
     const response = await apiClient.get(`/api/v1/switches/${id}/optical-modules`)
     return response.data
   },

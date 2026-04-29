@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { settingsApi, type IPLookupSettings } from '@/api/settings'
+import { settingsApi } from '@/api/settings'
 
 export const useSettingsStore = defineStore('settings', () => {
   const loading = ref(false)

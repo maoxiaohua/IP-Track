@@ -17,6 +17,7 @@ class Switch(Base):
 
     # SSH/CLI fields
     cli_enabled = Column(Boolean, default=False, nullable=False)  # Enable CLI/SSH authentication
+    cli_transport = Column(String(10), default='ssh', nullable=False)
     ssh_port = Column(Integer, default=22, nullable=True)
     username = Column(String(100), nullable=True)
     password_encrypted = Column(Text, nullable=True)
@@ -46,12 +47,18 @@ class Switch(Base):
     auto_collect_mac = Column(Boolean, default=True, nullable=False)  # Auto collect MAC table
     last_arp_collection_at = Column(DateTime(timezone=True), nullable=True)  # Last ARP collection time
     last_mac_collection_at = Column(DateTime(timezone=True), nullable=True)  # Last MAC collection time
+    last_optical_collection_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    last_optical_success_at = Column(DateTime(timezone=True), nullable=True, index=True)
     last_collection_status = Column(String(50), nullable=True)  # success, failed, partial
     last_collection_message = Column(Text, nullable=True)  # Collection result message
+    last_optical_collection_status = Column(String(50), nullable=True)
+    last_optical_collection_message = Column(Text, nullable=True)
+    last_optical_modules_count = Column(Integer, nullable=True)
 
-    # Collection method preferences (learned from successful collections)
-    mac_collection_method = Column(String(10), default='auto')  # 'snmp', 'cli', 'auto', 'manual'
-    arp_collection_method = Column(String(10), default='auto')  # 'snmp', 'cli', 'auto', 'manual'
+    # Collection method preferences (ARP/MAC are normalized to global CLI-only;
+    # optical modules can still learn per-device SNMP/CLI preference)
+    mac_collection_method = Column(String(10), default='auto')
+    arp_collection_method = Column(String(10), default='auto')
     optical_collection_method = Column(String(10), default='auto')  # 'snmp', 'cli', 'auto', 'manual'
 
     # Manual override flags (set by admin via UI)

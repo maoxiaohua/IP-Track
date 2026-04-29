@@ -57,9 +57,25 @@ class Settings(BaseSettings):
     OPTICAL_MODULE_INTERVAL_MINUTES: int = 720
     ALARM_CLEANUP_HOUR: int = 3
     ALARM_RETENTION_DAYS: int = 30
+    COLLECTION_JOB_RETENTION_DAYS: int = 30
+    COLLECTION_JOB_CLEANUP_BATCH_SIZE: int = 10000
 
     # IPAM Settings
     IPAM_OFFLINE_THRESHOLD_HOURS: int = 6  # Hours without response before marking as offline
+    IP_SCAN_HISTORY_RETENTION_DAYS: int = 30
+    IP_SCAN_HISTORY_CLEANUP_BATCH_SIZE: int = 50000
+    IPAM_STARTUP_CATCHUP_DELAY_SECONDS: int = Field(
+        default=300,
+        ge=0,
+        le=86400,
+        description="Delay before the IPAM service runs its startup catch-up scan"
+    )
+    IPAM_STARTUP_CATCHUP_MAX_SUBNETS: int = Field(
+        default=5,
+        ge=0,
+        le=500,
+        description="Maximum overdue subnets to scan during startup catch-up; 0 disables startup catch-up"
+    )
 
     # IP Lookup Settings
     IP_LOOKUP_CACHE_HOURS: int = Field(

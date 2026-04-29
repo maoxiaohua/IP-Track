@@ -17,6 +17,13 @@ from models.alarm import Alarm, AlarmSeverity, AlarmStatus, AlarmSourceType
 class AlarmService:
     """Service for managing alarms"""
 
+    @staticmethod
+    def _enum_value(value) -> str:
+        """Return a stable string value for SQLAlchemy enum fields."""
+        if value is None:
+            return ""
+        return value.value if hasattr(value, "value") else str(value)
+
     def _generate_fingerprint(
         self,
         source_type: AlarmSourceType,
@@ -30,7 +37,9 @@ class AlarmService:
         Fingerprint is based on: source_type + source_id + title + severity
         This ensures that the same issue from the same source creates only one alarm.
         """
-        fingerprint_str = f"{source_type.value}_{source_id}_{title}_{severity.value}"
+        fingerprint_str = (
+            f"{self._enum_value(source_type)}_{source_id}_{title}_{self._enum_value(severity)}"
+        )
         return hashlib.md5(fingerprint_str.encode()).hexdigest()
 
     async def create_alarm(
@@ -117,7 +126,7 @@ class AlarmService:
             existing_resolved_alarm.acknowledged_by = None
 
             logger.info(
-                f"Alarm reactivated: [{severity.value.upper()}] {title} "
+                f"Alarm reactivated: [{self._enum_value(severity).upper()}] {title} "
                 f"(was resolved at {existing_resolved_alarm.resolved_at})"
             )
 
@@ -144,8 +153,8 @@ class AlarmService:
         await db.refresh(alarm)
 
         logger.info(
-            f"Alarm created: [{severity.value.upper()}] {title} "
-            f"(source: {source_type.value}:{source_id})"
+            f"Alarm created: [{self._enum_value(severity).upper()}] {title} "
+            f"(source: {self._enum_value(source_type)}:{source_id})"
         )
 
         return alarm
@@ -178,7 +187,7 @@ class AlarmService:
         if alarm.status != AlarmStatus.ACTIVE:
             logger.warning(
                 f"Attempted to acknowledge alarm {alarm_id} "
-                f"with status {alarm.status.value}"
+                f"with status {self._enum_value(alarm.status)}"
             )
             return alarm
 
@@ -221,7 +230,7 @@ class AlarmService:
         if alarm.status in [AlarmStatus.RESOLVED, AlarmStatus.AUTO_RESOLVED]:
             logger.warning(
                 f"Attempted to resolve alarm {alarm_id} "
-                f"with status {alarm.status.value}"
+                f"with status {self._enum_value(alarm.status)}"
             )
             return alarm
 
@@ -259,14 +268,14 @@ class AlarmService:
             Number of alarms auto-resolved
         """
         conditions = [
-            cast(Alarm.source_type, String) == source_type.value,
+            cast(Alarm.source_type, String) == self._enum_value(source_type),
             Alarm.source_id == source_id,
             cast(Alarm.status, String).in_([AlarmStatus.ACTIVE.value, AlarmStatus.ACKNOWLEDGED.value])
         ]
 
         # Add severity filter if specified
         if severity:
-            conditions.append(cast(Alarm.severity, String) == severity.value)
+            conditions.append(cast(Alarm.severity, String) == self._enum_value(severity))
 
         result = await db.execute(
             select(Alarm).where(and_(*conditions))
@@ -282,10 +291,10 @@ class AlarmService:
 
         if count > 0:
             await db.commit()
-            severity_msg = f" (severity={severity.value})" if severity else ""
+            severity_msg = f" (severity={self._enum_value(severity)})" if severity else ""
             logger.info(
                 f"Auto-resolved {count} alarms for "
-                f"{source_type.value}:{source_id}{severity_msg}"
+                f"{self._enum_value(source_type)}:{source_id}{severity_msg}"
             )
 
         return count
@@ -358,14 +367,17 @@ class AlarmService:
         filters = []
 
         if severity:
-            logger.debug(f"Filtering by severity: {severity} (value={severity.value})")
-            filters.append(cast(Alarm.severity, String) == severity.value)
+            severity_value = self._enum_value(severity)
+            logger.debug(f"Filtering by severity: {severity} (value={severity_value})")
+            filters.append(cast(Alarm.severity, String) == severity_value)
         if status:
-            logger.debug(f"Filtering by status: {status} (value={status.value})")
-            filters.append(cast(Alarm.status, String) == status.value)
+            status_value = self._enum_value(status)
+            logger.debug(f"Filtering by status: {status} (value={status_value})")
+            filters.append(cast(Alarm.status, String) == status_value)
         if source_type:
-            logger.debug(f"Filtering by source_type: {source_type} (value={source_type.value})")
-            filters.append(cast(Alarm.source_type, String) == source_type.value)
+            source_type_value = self._enum_value(source_type)
+            logger.debug(f"Filtering by source_type: {source_type} (value={source_type_value})")
+            filters.append(cast(Alarm.source_type, String) == source_type_value)
 
         if filters:
             query = query.where(and_(*filters))
@@ -399,7 +411,7 @@ class AlarmService:
                 func.count(Alarm.id)
             ).group_by(Alarm.status)
         )
-        status_counts = {row[0].value: row[1] for row in status_result.all()}
+        status_counts = {self._enum_value(row[0]): row[1] for row in status_result.all()}
 
         # Count by severity (active/acknowledged only)
         severity_result = await db.execute(
@@ -410,7 +422,7 @@ class AlarmService:
                 cast(Alarm.status, String).in_([AlarmStatus.ACTIVE.value, AlarmStatus.ACKNOWLEDGED.value])
             ).group_by(Alarm.severity)
         )
-        severity_counts = {row[0]: row[1] for row in severity_result.all()}
+        severity_counts = {self._enum_value(row[0]): row[1] for row in severity_result.all()}
 
         # Count by source type (active/acknowledged only)
         source_result = await db.execute(
@@ -421,7 +433,7 @@ class AlarmService:
                 cast(Alarm.status, String).in_([AlarmStatus.ACTIVE.value, AlarmStatus.ACKNOWLEDGED.value])
             ).group_by(Alarm.source_type)
         )
-        source_counts = {row[0]: row[1] for row in source_result.all()}
+        source_counts = {self._enum_value(row[0]): row[1] for row in source_result.all()}
 
         # Top failing switches
         top_switches_result = await db.execute(

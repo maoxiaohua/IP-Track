@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from api.v1 import switches, lookup, history, alarms, snmp_profiles, command_templates, settings as settings_module
+from api.routes import snmp_config
 from services.status_checker import switch_status_checker
 from core.config import settings
 
@@ -54,6 +55,7 @@ app.include_router(lookup.router, prefix=settings.API_V1_PREFIX)
 app.include_router(history.router, prefix=settings.API_V1_PREFIX)
 app.include_router(alarms.router, prefix=settings.API_V1_PREFIX)
 app.include_router(snmp_profiles.router, prefix=settings.API_V1_PREFIX)
+app.include_router(snmp_config.router, prefix=settings.API_V1_PREFIX)
 app.include_router(command_templates.router, prefix=settings.API_V1_PREFIX)
 app.include_router(settings_module.router, prefix=settings.API_V1_PREFIX)
 

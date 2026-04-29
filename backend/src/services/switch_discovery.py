@@ -1,6 +1,7 @@
 from typing import List, Dict, Optional, Tuple, Callable
 from models.switch import Switch
 from services.switch_manager import switch_manager
+from services.cli_service import cli_service
 from core.security import credential_encryption
 from core.config import settings
 from utils.logger import logger
@@ -326,7 +327,8 @@ class SwitchDiscoveryService:
         return model[:100] if len(model) > 100 else model
 
     def _try_connect_with_retry(self, ip: str, username: str, password: str,
-                                  enable_password: Optional[str], port: int,
+                                  enable_password: Optional[str], port: Optional[int],
+                                  transport: str = 'ssh',
                                   session_id: str = None,
                                   max_retries: int = 2,
                                   progress_queue = None,
@@ -356,7 +358,7 @@ class SwitchDiscoveryService:
                     except Exception as e:
                         logger.warning(f"Failed to send attempt event for {ip}: {e}")
                 
-                result = self._try_connect(ip, username, password, enable_password, port)
+                result = self._try_connect(ip, username, password, enable_password, port, transport)
                 
                 if result and result.get('success'):
                     if progress_queue and loop:
@@ -463,10 +465,10 @@ class SwitchDiscoveryService:
             return None
 
     def _try_connect(self, ip: str, username: str, password: str,
-                     enable_password: Optional[str], port: int) -> Optional[Dict]:
-        """Try to connect to a switch and gather information via SSH."""
+                     enable_password: Optional[str], port: Optional[int],
+                     transport: str = 'ssh') -> Optional[Dict]:
+        """Try to connect to a switch and gather information via CLI."""
         try:
-            from netmiko import ConnectHandler
             from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
 
             # Try device types in order.
@@ -474,7 +476,7 @@ class SwitchDiscoveryService:
             # since Nokia SROS/SRLinux CLI can look similar to IOS.
             device_types = [
                 ('nokia_sros',    'alcatel'),  # Nokia SROS (7250, 7750, etc.)
-                ('nokia_srlinux', 'alcatel'),  # Nokia SR Linux (7220, etc.)
+                ('nokia_srl',     'alcatel'),  # Nokia SR Linux (7220, etc.)
                 ('dell_os10',     'dell'),      # Dell EMC OS10
                 ('juniper_junos', 'juniper'),   # Juniper JunOS
                 ('cisco_ios',     'cisco'),     # Cisco IOS / IOS-XE
@@ -482,30 +484,22 @@ class SwitchDiscoveryService:
             ]
 
             for device_type, default_vendor in device_types:
+                conn = None
                 try:
-                    device_params = {
-                        'device_type': device_type,
-                        'host': ip,
-                        'username': username,
-                        'password': password,
-                        'port': port,
-                        'timeout': 10,
-                        'conn_timeout': 10,
-                        'global_delay_factor': 1.5,
-                        'allow_agent': False,
-                        'use_keys': False,
-                        'ssh_strict': False,
-                        'allow_auto_change': False,
-                    }
+                    conn = cli_service._create_cli_connection(
+                        host=ip,
+                        username=username,
+                        password=password,
+                        device_type=device_type,
+                        port=port,
+                        timeout=10,
+                        enable_secret=enable_password,
+                        transport=transport
+                    )
 
-                    if enable_password and device_type == 'cisco_ios':
-                        device_params['secret'] = enable_password
-
-                    with ConnectHandler(**device_params) as conn:
+                    if conn:
                         # Step 1: Get show version output (vendor-independent command)
                         try:
-                            if device_type == 'cisco_ios' and enable_password:
-                                conn.enable()
                             output = conn.send_command('show version', read_timeout=15)
                         except Exception:
                             output = ''
@@ -523,7 +517,7 @@ class SwitchDiscoveryService:
 
                         # Step 4: Get hostname
                         try:
-                            if device_type in ('nokia_sros', 'nokia_srlinux'):
+                            if device_type in ('nokia_sros', 'nokia_srl'):
                                 hostname_output = conn.send_command(
                                     'show system information | match Name', read_timeout=15)
                             elif device_type == 'dell_os10':
@@ -555,7 +549,8 @@ class SwitchDiscoveryService:
                             'name': hostname,
                             'vendor': vendor,
                             'model': model,
-                            'ssh_port': port,
+                            'cli_transport': cli_service.normalize_cli_transport(transport),
+                            'ssh_port': port or cli_service.default_port_for_transport(transport),
                             'username': username,
                             'password': password,
                             'enable_password': enable_password,
@@ -567,6 +562,12 @@ class SwitchDiscoveryService:
                 except Exception as e:
                     logger.debug(f"Device type {device_type} failed for {ip}: {str(e)}")
                     continue  # Try next device type
+                finally:
+                    if conn:
+                        try:
+                            conn.disconnect()
+                        except Exception:
+                            pass
 
             return None
 
@@ -606,7 +607,7 @@ class SwitchDiscoveryService:
                 auth_protocol = snmp_config.get('snmp_auth_protocol', 'SHA').upper()
                 priv_protocol = snmp_config.get('snmp_priv_protocol', 'AES128').upper()
 
-                if not username or not auth_password or not priv_password:
+                if not username or not auth_password:
                     logger.debug(f"{ip}: SNMP v3 config incomplete, skipping SNMP discovery")
                     return None
 
@@ -622,13 +623,20 @@ class SwitchDiscoveryService:
                     'AES192': usmAesCfb192Protocol,
                     'AES256': usmAesCfb256Protocol,
                 }
-                auth_data = UsmUserData(
-                    username,
-                    authKey=auth_password,
-                    privKey=priv_password,
-                    authProtocol=auth_map.get(auth_protocol, usmHMACSHAAuthProtocol),
-                    privProtocol=priv_map.get(priv_protocol, usmAesCfb128Protocol)
-                )
+                if priv_password:
+                    auth_data = UsmUserData(
+                        username,
+                        authKey=auth_password,
+                        privKey=priv_password,
+                        authProtocol=auth_map.get(auth_protocol, usmHMACSHAAuthProtocol),
+                        privProtocol=priv_map.get(priv_protocol, usmAesCfb128Protocol)
+                    )
+                else:
+                    auth_data = UsmUserData(
+                        username,
+                        authKey=auth_password,
+                        authProtocol=auth_map.get(auth_protocol, usmHMACSHAAuthProtocol)
+                    )
             else:
                 community = snmp_config.get('snmp_community', 'public')
                 auth_data = CommunityData(community)
@@ -710,7 +718,8 @@ class SwitchDiscoveryService:
 
         Args:
             ip_range: IP range in format "10.0.0.1-10.0.0.254" or "10.0.0.0/24"
-            credentials: List of dicts with keys: username, password, enable_password (optional), port (optional)
+            credentials: List of dicts with keys: username, password, enable_password (optional),
+                port (optional), transport (optional)
             session_id: Optional session ID for progress tracking
             progress_queue: Optional asyncio.Queue for progress updates
 
@@ -752,7 +761,8 @@ class SwitchDiscoveryService:
                     username = cred.get('username')
                     password = cred.get('password')
                     enable_password = cred.get('enable_password')
-                    port = cred.get('port', 22)
+                    port = cred.get('port')
+                    transport = cred.get('transport', 'ssh')
 
                     if not username or not password:
                         continue
@@ -760,7 +770,7 @@ class SwitchDiscoveryService:
                     task = loop.run_in_executor(
                         self.executor,
                         self._try_connect_with_retry,
-                        ip, username, password, enable_password, port, session_id, 2,
+                        ip, username, password, enable_password, port, transport, session_id, 2,
                         progress_queue, loop
                     )
                     tasks.append(task)

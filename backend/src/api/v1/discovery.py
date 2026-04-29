@@ -11,6 +11,7 @@ from schemas.discovery import (
 from schemas.switch import SwitchCreate, SwitchResponse
 from services.switch_discovery import switch_discovery_service
 from services.switch_manager import switch_manager
+from services.cli_service import cli_service
 from core.security import credential_encryption
 from models.switch import Switch
 from utils.logger import logger
@@ -30,36 +31,33 @@ _progress_queues = {}  # session_id -> asyncio.Queue
 
 def _get_alcatel_model_via_cli(switch) -> str:
     """
-    Connect to an Alcatel/Nokia switch via SSH, run 'show version',
+    Connect to an Alcatel/Nokia switch via CLI, run 'show version',
     and extract the hardware model from 'Chassis Type' or 'System Type' field.
     Returns the model string or 'Unknown' on failure.
     Called synchronously in a thread pool executor.
     """
     try:
-        from netmiko import ConnectHandler
-        from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
         from core.security import credential_encryption
 
         password = credential_encryption.decrypt(switch.password_encrypted)
 
         # Try Nokia SROS first, then Alcatel AOS
-        device_types = ['nokia_sros', 'alcatel_aos', 'nokia_srlinux']
+        device_types = ['nokia_sros', 'alcatel_aos', 'nokia_srl']
 
         for device_type in device_types:
+            conn = None
             try:
-                conn_params = {
-                    'device_type': device_type,
-                    'host': str(switch.ip_address),
-                    'username': switch.username,
-                    'password': password,
-                    'port': switch.ssh_port or 22,
-                    'timeout': 15,
-                    'conn_timeout': 15,
-                    'allow_agent': False,
-                    'use_keys': False,
-                    'ssh_strict': False,
-                }
-                with ConnectHandler(**conn_params) as conn:
+                conn = cli_service._create_cli_connection(
+                    host=str(switch.ip_address),
+                    username=switch.username,
+                    password=password,
+                    device_type=device_type,
+                    port=switch.ssh_port,
+                    timeout=15,
+                    enable_secret=credential_encryption.decrypt(switch.enable_password_encrypted) if switch.enable_password_encrypted else None,
+                    transport=getattr(switch, 'cli_transport', 'ssh')
+                )
+                if conn:
                     output = conn.send_command('show version', read_timeout=15)
                     for line in output.splitlines():
                         ll = line.lower()
@@ -71,10 +69,14 @@ def _get_alcatel_model_via_cli(switch) -> str:
                             parts = line.split(':', 1)
                             if len(parts) == 2 and parts[1].strip():
                                 return parts[1].strip()
-            except (NetmikoTimeoutException, NetmikoAuthenticationException):
-                continue
             except Exception:
                 continue
+            finally:
+                if conn:
+                    try:
+                        conn.disconnect()
+                    except Exception:
+                        pass
 
         return 'Unknown'
 
@@ -130,6 +132,7 @@ async def discover_switches(
                 'username': cred.username,
                 'password': cred.password,
                 'enable_password': cred.enable_password,
+                'transport': cred.transport,
                 'port': cred.port
             }
             for cred in request.credentials
@@ -160,6 +163,7 @@ async def discover_switches(
                 name=sw['name'],
                 vendor=sw['vendor'],
                 model=sw['model'],
+                cli_transport=sw.get('cli_transport', 'ssh'),
                 ssh_port=sw['ssh_port'],
                 username=sw['username']
             )
@@ -223,6 +227,7 @@ async def discover_switches_stream(
                 'username': cred.username,
                 'password': cred.password,
                 'enable_password': cred.enable_password,
+                'transport': cred.transport,
                 'port': cred.port
             }
             for cred in request.credentials
@@ -276,7 +281,8 @@ async def discover_switches_stream(
                         'name': sw.get('name', sw['ip_address']),
                         'vendor': sw.get('vendor', 'unknown'),
                         'model': sw.get('model', 'Unknown'),
-                        'ssh_port': sw.get('ssh_port', 22),
+                        'cli_transport': sw.get('cli_transport', 'ssh'),
+                        'ssh_port': sw.get('ssh_port', 23 if sw.get('cli_transport') == 'telnet' else 22),
                         'username': sw.get('username', ''),
                     }
                     for sw in discovered
@@ -372,6 +378,7 @@ async def get_scan_result(session_id: str):
             name=sw['name'],
             vendor=sw['vendor'],
             model=sw['model'],
+            cli_transport=sw.get('cli_transport', 'ssh'),
             ssh_port=sw['ssh_port'],
             username=sw['username']
         )
@@ -809,13 +816,20 @@ async def batch_add_switches(
                 if switch_data.snmp_priv_password:
                     snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
 
+                cli_transport, ssh_port = cli_service.normalize_cli_connection_settings(
+                    switch_data.cli_transport,
+                    switch_data.ssh_port,
+                    port_was_explicit='ssh_port' in switch_data.model_fields_set
+                )
+
                 # Create switch - IP will be stored as INET type
                 switch = Switch(
                     name=switch_data.name,
                     ip_address=str(switch_data.ip_address),  # SQLAlchemy will convert to INET
                     vendor=switch_data.vendor,
                     model=switch_data.model,
-                    ssh_port=switch_data.ssh_port,
+                    cli_transport=cli_transport,
+                    ssh_port=ssh_port,
                     username=switch_data.username,
                     password_encrypted=password_encrypted,
                     enable_password_encrypted=enable_password_encrypted,
@@ -830,7 +844,7 @@ async def batch_add_switches(
                     snmp_username=switch_data.snmp_username,
                     snmp_auth_protocol=switch_data.snmp_auth_protocol,
                     snmp_auth_password_encrypted=snmp_auth_password_encrypted,
-                    snmp_priv_protocol=switch_data.snmp_priv_protocol,
+                    snmp_priv_protocol=switch_data.snmp_priv_protocol if switch_data.snmp_priv_password else None,
                     snmp_priv_password_encrypted=snmp_priv_password_encrypted,
                     snmp_community=switch_data.snmp_community,
                 )

@@ -32,13 +32,13 @@
             </div>
           </el-form-item>
 
-          <el-divider content-position="left">SSH 认证配置</el-divider>
+          <el-divider content-position="left">CLI 认证配置</el-divider>
 
           <div v-for="(cred, index) in scanForm.credentials" :key="index" class="credential-group">
             <el-card shadow="hover">
               <template #header>
                 <div class="credential-header">
-                  <span>SSH 认证组 {{ index + 1 }}</span>
+                  <span>CLI 认证组 {{ index + 1 }}</span>
                   <el-button
                     v-if="scanForm.credentials.length > 1"
                     type="danger"
@@ -52,18 +52,34 @@
 
               <el-row :gutter="20">
                 <el-col :span="12">
-                  <el-form-item label="SSH用户名" :prop="`credentials.${index}.username`">
-                    <el-input v-model="cred.username" placeholder="SSH 用户名" />
+                  <el-form-item label="用户名" :prop="`credentials.${index}.username`">
+                    <el-input v-model="cred.username" placeholder="CLI 用户名" />
                   </el-form-item>
                 </el-col>
                 <el-col :span="12">
-                  <el-form-item label="SSH密码" :prop="`credentials.${index}.password`">
+                  <el-form-item label="密码" :prop="`credentials.${index}.password`">
                     <el-input
                       v-model="cred.password"
                       type="password"
-                      placeholder="SSH 密码"
+                      placeholder="CLI 密码"
                       show-password
                     />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+
+              <el-row :gutter="20">
+                <el-col :span="12">
+                  <el-form-item label="CLI 协议">
+                    <el-select v-model="cred.transport" style="width: 100%" @change="handleCredentialTransportChange(cred)">
+                      <el-option label="SSH" value="ssh" />
+                      <el-option label="Telnet" value="telnet" />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12">
+                  <el-form-item label="CLI 端口">
+                    <el-input-number v-model="cred.port" :min="1" :max="65535" />
                   </el-form-item>
                 </el-col>
               </el-row>
@@ -77,11 +93,6 @@
                       placeholder="Enable 密码（可选）"
                       show-password
                     />
-                  </el-form-item>
-                </el-col>
-                <el-col :span="12">
-                  <el-form-item label="SSH 端口">
-                    <el-input-number v-model="cred.port" :min="1" :max="65535" />
                   </el-form-item>
                 </el-col>
               </el-row>
@@ -100,7 +111,7 @@
 
           <el-divider content-position="left">SNMP 认证配置（用于设备识别）</el-divider>
           <div class="form-tip" style="margin-bottom: 12px">
-            SNMP 用于获取设备的主机名、厂商和型号信息，SSH 用于网络连接验证
+            SNMP 用于获取设备的主机名、厂商和型号信息，CLI 用于网络连接验证
           </div>
 
           <el-card shadow="hover" style="margin-bottom: 15px">
@@ -161,11 +172,11 @@
               </el-row>
               <el-row :gutter="20">
                 <el-col :span="12">
-                  <el-form-item label="加密密码">
+                  <el-form-item label="加密密码（可选）">
                     <el-input
                       v-model="snmpConfig.snmp_priv_password"
                       type="password"
-                      placeholder="至少8个字符"
+                      placeholder="留空则不启用加密"
                       show-password
                     />
                   </el-form-item>
@@ -275,7 +286,12 @@
             </template>
           </el-table-column>
           <el-table-column prop="model" label="型号" width="200" />
-          <el-table-column prop="ssh_port" label="SSH端口" width="100" />
+          <el-table-column prop="cli_transport" label="CLI协议" width="100">
+            <template #default="{ row }">
+              <el-tag size="small">{{ (row.cli_transport || 'ssh').toUpperCase() }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="ssh_port" label="CLI端口" width="100" />
           <el-table-column prop="username" label="用户名" width="120" />
         </el-table>
 
@@ -309,7 +325,12 @@
             <el-table-column prop="ip_address" label="IP 地址" />
             <el-table-column prop="vendor" label="厂商" />
             <el-table-column prop="model" label="型号" />
-            <el-table-column prop="username" label="SSH用户名" />
+            <el-table-column prop="cli_transport" label="CLI协议" width="100">
+              <template #default="{ row }">
+                <el-tag size="small">{{ (row.cli_transport || 'ssh').toUpperCase() }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="username" label="CLI用户名" />
           </el-table>
         </el-card>
 
@@ -346,6 +367,7 @@ interface Credential {
   username: string
   password: string
   enable_password: string
+  transport: 'ssh' | 'telnet'
   port: number
 }
 
@@ -354,6 +376,7 @@ interface DiscoveredSwitch {
   ip_address: string
   vendor: string
   model: string
+  cli_transport: 'ssh' | 'telnet'
   ssh_port: number
   username: string
 }
@@ -372,6 +395,7 @@ const scanForm = reactive({
       username: '',
       password: '',
       enable_password: '',
+      transport: 'ssh',
       port: 22
     }
   ] as Credential[]
@@ -414,17 +438,26 @@ let scanCompleted = false  // true once 'complete'/'done' received; prevents one
 const discoveredIPs = new Set<string>()
 const failedIPs = new Set<string>()
 
+const defaultCliPort = (transport: Credential['transport']) => transport === 'telnet' ? 23 : 22
+
 const addCredential = () => {
   scanForm.credentials.push({
     username: '',
     password: '',
     enable_password: '',
+    transport: 'ssh',
     port: 22
   })
 }
 
 const removeCredential = (index: number) => {
   scanForm.credentials.splice(index, 1)
+}
+
+const handleCredentialTransportChange = (cred: Credential) => {
+  if (cred.port === 22 || cred.port === 23) {
+    cred.port = defaultCliPort(cred.transport)
+  }
 }
 
 const formatTime = () => {
@@ -704,12 +737,15 @@ const batchAddSwitches = async () => {
 
   // Validate SNMP configuration
   if (snmpConfig.snmp_version === '3') {
-    if (!snmpConfig.snmp_username || !snmpConfig.snmp_auth_password || !snmpConfig.snmp_priv_password) {
-      ElMessage.error('请填写完整的 SNMPv3 配置（用户名、认证密码、加密密码）')
+    if (!snmpConfig.snmp_username || !snmpConfig.snmp_auth_password) {
+      ElMessage.error('请填写完整的 SNMPv3 配置（用户名、认证密码）')
       return
     }
-    if (snmpConfig.snmp_auth_password.length < 8 || snmpConfig.snmp_priv_password.length < 8) {
-      ElMessage.error('SNMP 认证密码和加密密码至少需要 8 个字符')
+    if (
+      snmpConfig.snmp_auth_password.length < 8 ||
+      (snmpConfig.snmp_priv_password && snmpConfig.snmp_priv_password.length < 8)
+    ) {
+      ElMessage.error('SNMP 认证密码至少需要 8 个字符；如填写加密密码，也必须至少 8 个字符')
       return
     }
   } else if (snmpConfig.snmp_version === '2c') {
@@ -727,13 +763,14 @@ const batchAddSwitches = async () => {
       ip_address: sw.ip_address,
       vendor: sw.vendor,
       model: sw.model || '',
+      cli_transport: sw.cli_transport || 'ssh',
       ssh_port: sw.ssh_port,
       username: sw.username,
       password: (sw as any).password,
       enable_password: (sw as any).enable_password || '',
       connection_timeout: 30,
       enabled: true,
-      cli_enabled: true,  // Enable CLI since we have SSH credentials
+      cli_enabled: true,
       auto_collect_arp: true,
       auto_collect_mac: true,
       // SNMP configuration

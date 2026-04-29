@@ -37,7 +37,7 @@ ALTER TABLE ip_subnets
 
 -- Step 3: Add new columns to ip_addresses
 ALTER TABLE ip_addresses
-    ADD COLUMN IF NOT EXISTS hostname_source VARCHAR(20) CHECK (hostname_source IN ('DNS', 'SNMP', 'MANUAL', 'ARP')) DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS hostname_source VARCHAR(20) CHECK (hostname_source IN ('DNS', 'SNMP', 'NETBIOS', 'MANUAL', 'ARP', 'SWITCH')) DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS dns_name VARCHAR(255),
     ADD COLUMN IF NOT EXISTS system_name VARCHAR(255),
     ADD COLUMN IF NOT EXISTS contact VARCHAR(255),
@@ -58,7 +58,7 @@ CREATE TRIGGER update_snmp_profiles_updated_at BEFORE UPDATE ON snmp_profiles
 
 -- Step 6: Add comments for documentation
 COMMENT ON TABLE snmp_profiles IS 'SNMP profiles for device identification and monitoring';
-COMMENT ON COLUMN ip_addresses.hostname_source IS 'Source of hostname: DNS (reverse lookup), SNMP (sysName), MANUAL (user input), ARP (from switch)';
+COMMENT ON COLUMN ip_addresses.hostname_source IS 'Source of hostname: DNS (reverse lookup), SNMP (sysName), NETBIOS (Windows node status), ARP (from switch), SWITCH (switch inventory), MANUAL (user input)';
 COMMENT ON COLUMN ip_addresses.dns_name IS 'DNS reverse lookup result (PTR record)';
 COMMENT ON COLUMN ip_addresses.system_name IS 'SNMP sysName (OID 1.3.6.1.2.1.1.5.0)';
 COMMENT ON COLUMN ip_addresses.last_seen_at IS 'Last successful ping/response timestamp (used for "Last Response" calculation)';

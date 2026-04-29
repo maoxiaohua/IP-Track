@@ -182,19 +182,31 @@ EOF
 cd /opt/IP-TRACK/backend
 source venv/bin/activate
 export PYTHONPATH=/opt/IP-TRACK/backend/src
-uvicorn main:app --host 0.0.0.0 --port 8100
+
+# Core API（交换机、查询、历史、告警、SNMP）
+uvicorn main_core:app --host 127.0.0.1 --port 8101
+
+# 另开终端测试 IPAM 服务
+uvicorn main_ipam:app --host 127.0.0.1 --port 8102
+
+# 另开终端测试采集服务
+uvicorn main_collector:app --host 127.0.0.1 --port 8103
 ```
 
-访问 http://YOUR_SERVER_IP:8100/health 验证。
+验证方式：
+
+- `http://127.0.0.1:8101/health`
+- `http://127.0.0.1:8102/health`
+- `http://127.0.0.1:8103/health`
 
 按 Ctrl+C 停止测试。
 
 ### 4.5 创建后端 systemd 服务
 
 ```bash
-sudo tee /etc/systemd/system/iptrack-backend.service > /dev/null << 'EOF'
+sudo tee /etc/systemd/system/iptrack-backend-core.service > /dev/null << 'EOF'
 [Unit]
-Description=IP Track Backend API
+Description=IP Track Backend Core API
 After=network.target postgresql-16.service redis.service
 
 [Service]
@@ -202,7 +214,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/IP-TRACK/backend
 Environment="PYTHONPATH=/opt/IP-TRACK/backend/src"
-ExecStart=/opt/IP-TRACK/backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8100
+ExecStart=/opt/IP-TRACK/backend/venv/bin/uvicorn main_core:app --host 127.0.0.1 --port 8101
 Restart=always
 RestartSec=10
 
@@ -210,13 +222,51 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-# 启动服务
+sudo tee /etc/systemd/system/iptrack-backend-ipam.service > /dev/null << 'EOF'
+[Unit]
+Description=IP Track Backend IPAM API
+After=network.target postgresql-16.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/IP-TRACK/backend
+Environment="PYTHONPATH=/opt/IP-TRACK/backend/src"
+ExecStart=/opt/IP-TRACK/backend/venv/bin/uvicorn main_ipam:app --host 127.0.0.1 --port 8102
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo tee /etc/systemd/system/iptrack-backend-collector.service > /dev/null << 'EOF'
+[Unit]
+Description=IP Track Backend Collector API
+After=network.target postgresql-16.service redis.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/IP-TRACK/backend
+Environment="PYTHONPATH=/opt/IP-TRACK/backend/src"
+ExecStart=/opt/IP-TRACK/backend/venv/bin/uvicorn main_collector:app --host 127.0.0.1 --port 8103
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 启动三个服务
 sudo systemctl daemon-reload
-sudo systemctl enable iptrack-backend
-sudo systemctl start iptrack-backend
+sudo systemctl enable iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
+sudo systemctl start iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
 
 # 检查状态
-sudo systemctl status iptrack-backend
+sudo systemctl status iptrack-backend-core
+sudo systemctl status iptrack-backend-ipam
+sudo systemctl status iptrack-backend-collector
 ```
 
 ## 五、部署前端
@@ -232,11 +282,11 @@ npm install
 
 ```bash
 cat > .env.production << EOF
-VITE_API_BASE_URL=http://YOUR_SERVER_IP:8100
+VITE_API_BASE_URL=
 EOF
 ```
 
-**重要**: 替换 `YOUR_SERVER_IP` 为你的服务器 IP 地址。
+说明：生产环境推荐让前端与 `/api/*` 走同源 Nginx 反向代理，因此这里保持为空即可。
 
 ### 5.3 构建前端
 
@@ -277,9 +327,53 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
-    # API 反向代理（可选）
+    # API 反向代理
+    location /api/v1/ipam/ {
+        proxy_pass http://127.0.0.1:8102;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /api/v1/network/ {
+        proxy_pass http://127.0.0.1:8103;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /api/v1/discovery/ {
+        proxy_pass http://127.0.0.1:8103;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    location /api/v1/command-templates/ {
+        proxy_pass http://127.0.0.1:8103;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
     location /api/ {
-        proxy_pass http://localhost:8100;
+        proxy_pass http://127.0.0.1:8101;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -304,14 +398,14 @@ sudo systemctl status nginx
 ```bash
 # CentOS/RHEL (firewalld)
 sudo firewall-cmd --permanent --add-port=8001/tcp
-sudo firewall-cmd --permanent --add-port=8100/tcp
 sudo firewall-cmd --reload
 
 # Ubuntu/Debian (ufw)
 sudo ufw allow 8001/tcp
-sudo ufw allow 8100/tcp
 sudo ufw reload
 ```
+
+如需从外部直接访问后端服务，再按需开放 `8101/tcp`、`8102/tcp`、`8103/tcp`。
 
 ## 七、验证部署
 
@@ -319,7 +413,9 @@ sudo ufw reload
 
 ```bash
 # 检查后端
-sudo systemctl status iptrack-backend
+sudo systemctl status iptrack-backend-core
+sudo systemctl status iptrack-backend-ipam
+sudo systemctl status iptrack-backend-collector
 
 # 检查 Nginx
 sudo systemctl status nginx
@@ -334,8 +430,10 @@ sudo systemctl status redis
 ### 7.2 访问系统
 
 - **前端**: http://YOUR_SERVER_IP:8001
-- **后端 API**: http://YOUR_SERVER_IP:8100
-- **API 文档**: http://YOUR_SERVER_IP:8100/api/docs
+- **API 文档**: http://YOUR_SERVER_IP:8001/api/docs
+- **Core 健康检查**: http://127.0.0.1:8101/health
+- **IPAM 健康检查**: http://127.0.0.1:8102/health
+- **Collector 健康检查**: http://127.0.0.1:8103/health
 
 ## 八、日常维护
 
@@ -343,7 +441,9 @@ sudo systemctl status redis
 
 ```bash
 # 后端日志
-sudo journalctl -u iptrack-backend -f
+sudo journalctl -u iptrack-backend-core -f
+sudo journalctl -u iptrack-backend-ipam -f
+sudo journalctl -u iptrack-backend-collector -f
 
 # Nginx 日志
 sudo tail -f /var/log/nginx/access.log
@@ -354,7 +454,9 @@ sudo tail -f /var/log/nginx/error.log
 
 ```bash
 # 重启后端
-sudo systemctl restart iptrack-backend
+sudo systemctl restart iptrack-backend-core
+sudo systemctl restart iptrack-backend-ipam
+sudo systemctl restart iptrack-backend-collector
 
 # 重启前端
 sudo systemctl restart nginx
@@ -371,7 +473,9 @@ git pull
 cd backend
 source venv/bin/activate
 pip install -r requirements.txt
-sudo systemctl restart iptrack-backend
+sudo systemctl restart iptrack-backend-core
+sudo systemctl restart iptrack-backend-ipam
+sudo systemctl restart iptrack-backend-collector
 
 # 3. 更新前端
 cd ../frontend
@@ -386,7 +490,9 @@ sudo systemctl restart nginx
 
 ```bash
 # 检查日志
-sudo journalctl -u iptrack-backend -n 50
+sudo journalctl -u iptrack-backend-core -n 50
+sudo journalctl -u iptrack-backend-ipam -n 50
+sudo journalctl -u iptrack-backend-collector -n 50
 
 # 检查数据库连接
 psql -U iptrack -d iptrack -h localhost
@@ -418,7 +524,9 @@ BACKEND_CORS_ORIGINS=["http://localhost:8001","http://YOUR_SERVER_IP:8001"]
 
 重启后端：
 ```bash
-sudo systemctl restart iptrack-backend
+sudo systemctl restart iptrack-backend-core
+sudo systemctl restart iptrack-backend-ipam
+sudo systemctl restart iptrack-backend-collector
 ```
 
 ## 十、安全建议
@@ -447,4 +555,4 @@ psql -U iptrack iptrack < /backup/iptrack_20260131.sql
 
 如有问题，请查看：
 - GitHub Issues: https://github.com/YOUR_USERNAME/IP-TRACK/issues
-- API 文档: http://YOUR_SERVER_IP:8100/api/docs
+- API 文档: http://YOUR_SERVER_IP:8001/api/docs

@@ -160,27 +160,34 @@
           <el-input v-model="switchForm.model" placeholder="e.g., Catalyst 3850" />
         </el-form-item>
 
-        <el-divider content-position="left">CLI/SSH 配置</el-divider>
+        <el-divider content-position="left">CLI 配置</el-divider>
 
         <el-form-item label="启用 CLI 认证" prop="cli_enabled">
           <el-switch v-model="switchForm.cli_enabled" />
-          <span style="margin-left: 8px; color: #909399;">启用后可通过SSH执行命令</span>
+          <span style="margin-left: 8px; color: #909399;">启用后可通过 SSH 或 Telnet 执行命令</span>
         </el-form-item>
 
         <template v-if="switchForm.cli_enabled">
-          <el-form-item label="SSH 端口" prop="ssh_port">
+          <el-form-item label="CLI 协议" prop="cli_transport">
+            <el-select v-model="switchForm.cli_transport" style="width: 180px">
+              <el-option label="SSH" value="ssh" />
+              <el-option label="Telnet" value="telnet" />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="CLI 端口" prop="ssh_port">
             <el-input-number v-model="switchForm.ssh_port" :min="1" :max="65535" />
           </el-form-item>
 
           <el-form-item label="用户名" prop="username">
-            <el-input v-model="switchForm.username" placeholder="SSH username" />
+            <el-input v-model="switchForm.username" placeholder="CLI username" />
           </el-form-item>
 
           <el-form-item label="密码" prop="password">
             <el-input
               v-model="switchForm.password"
               type="password"
-              placeholder="SSH password"
+              placeholder="CLI password"
               show-password
             />
             <div v-if="editingSwitch && switchForm.password === ''" style="color: #909399; font-size: 12px; margin-top: 4px;">
@@ -258,15 +265,15 @@
             </el-select>
           </el-form-item>
 
-          <el-form-item label="加密密码" prop="snmp_priv_password">
+          <el-form-item label="加密密码（可选）" prop="snmp_priv_password">
             <el-input
               v-model="switchForm.snmp_priv_password"
               type="password"
-              placeholder="至少8位字符"
+              placeholder="留空则不启用加密"
               show-password
             />
             <div v-if="editingSwitch && switchForm.snmp_priv_password === ''" style="color: #909399; font-size: 12px; margin-top: 4px;">
-              当前已配置密码（留空则不修改）
+              新建时留空则不启用加密；编辑现有设备时留空则保持现有配置
             </div>
           </el-form-item>
         </template>
@@ -341,11 +348,11 @@
           </el-select>
         </el-form-item>
 
-        <el-form-item label="加密密码" prop="snmp_priv_password">
+        <el-form-item label="加密密码（可选）" prop="snmp_priv_password">
           <el-input
             v-model="batchSnmpForm.snmp_priv_password"
             type="password"
-            placeholder="至少8位字符"
+            placeholder="留空则按仅认证模式配置"
             show-password
           />
         </el-form-item>
@@ -362,7 +369,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, h, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus, Refresh, Check, Close, Setting, Delete, Monitor, Search } from '@element-plus/icons-vue'
 import { switchesApi, type Switch, type SwitchCreate } from '@/api/switches'
@@ -435,12 +442,15 @@ const showBatchSnmpDialog = ref(false)
 const batchConfiguring = ref(false)
 const batchSnmpFormRef = ref<FormInstance>()
 
+const defaultCliPort = (transport?: 'ssh' | 'telnet') => transport === 'telnet' ? 23 : 22
+
 const switchForm = reactive<SwitchCreate>({
   name: '',
   ip_address: '',
   vendor: 'cisco',
   model: '',
   cli_enabled: false,
+  cli_transport: 'ssh',
   ssh_port: 22,
   username: '',
   password: '',
@@ -458,6 +468,20 @@ const switchForm = reactive<SwitchCreate>({
   snmp_priv_protocol: 'AES128',
   snmp_priv_password: ''
 })
+
+watch(
+  () => switchForm.cli_transport,
+  (newTransport, oldTransport) => {
+    const previousDefaultPort = defaultCliPort(oldTransport)
+    if (
+      switchForm.ssh_port === undefined ||
+      switchForm.ssh_port === null ||
+      switchForm.ssh_port === previousDefaultPort
+    ) {
+      switchForm.ssh_port = defaultCliPort(newTransport)
+    }
+  }
+)
 
 const switchRules: FormRules = {
   name: [{ required: true, message: 'Name is required', trigger: 'blur' }],
@@ -483,8 +507,16 @@ const batchSnmpRules: FormRules = {
     { min: 8, message: '密码至少8位字符', trigger: 'blur' }
   ],
   snmp_priv_password: [
-    { required: true, message: '加密密码必填', trigger: 'blur' },
-    { min: 8, message: '密码至少8位字符', trigger: 'blur' }
+    {
+      validator: (_rule: any, value: string, callback: (error?: Error) => void) => {
+        if (value && value.length < 8) {
+          callback(new Error('密码至少8位字符'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
   ]
 }
 
@@ -564,6 +596,7 @@ const resetForm = () => {
     vendor: 'cisco',
     model: '',
     cli_enabled: false,
+    cli_transport: 'ssh',
     ssh_port: 22,
     username: '',
     password: '',
@@ -593,7 +626,8 @@ const handleEdit = (switchItem: Switch) => {
     vendor: switchItem.vendor,
     model: switchItem.model || '',
     cli_enabled: switchItem.cli_enabled || false,
-    ssh_port: switchItem.ssh_port,
+    cli_transport: switchItem.cli_transport || 'ssh',
+    ssh_port: switchItem.ssh_port ?? defaultCliPort(switchItem.cli_transport || 'ssh'),
     username: switchItem.username,
     password: '',
     enable_password: '',
@@ -975,6 +1009,10 @@ const handleSelectionChange = (selection: Switch[]) => {
   console.log('Selection changed:', selection.length, 'switches selected')
 }
 
+const isBatchErrorResult = (result: unknown): result is { error: true } => {
+  return Boolean(result && typeof result === 'object' && 'error' in result)
+}
+
 const handleBatchEnable = async () => {
   const switchesToEnable = [...selectedSwitches.value]
   const totalCount = switchesToEnable.length
@@ -1004,7 +1042,7 @@ const handleBatchEnable = async () => {
         })
       )
       const results = await Promise.all(promises)
-      successCount += results.filter(r => !r.error).length
+      successCount += results.filter(result => !isBatchErrorResult(result)).length
 
       if (i + batchSize < switchesToEnable.length) {
         await new Promise(resolve => setTimeout(resolve, 200))
@@ -1049,7 +1087,7 @@ const handleBatchDisable = async () => {
         })
       )
       const results = await Promise.all(promises)
-      successCount += results.filter(r => !r.error).length
+      successCount += results.filter(result => !isBatchErrorResult(result)).length
 
       if (i + batchSize < switchesToDisable.length) {
         await new Promise(resolve => setTimeout(resolve, 200))
@@ -1094,7 +1132,7 @@ const handleBatchDelete = async () => {
         })
       )
       const results = await Promise.all(promises)
-      successCount += results.filter(r => !r.error).length
+      successCount += results.filter(result => !isBatchErrorResult(result)).length
 
       if (i + batchSize < switchesToDelete.length) {
         await new Promise(resolve => setTimeout(resolve, 200))
@@ -1173,7 +1211,7 @@ const handleBatchSnmpConfig = async () => {
 
           // 统计成功和失败数量
           results.forEach(result => {
-            if (result && result.error) {
+            if (isBatchErrorResult(result)) {
               failCount++
             } else {
               successCount++

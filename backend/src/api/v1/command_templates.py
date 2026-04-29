@@ -5,7 +5,7 @@ API endpoints for Switch Command Templates
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
-from typing import List
+from typing import List, Literal
 from api.deps import get_db
 from models.switch_command_template import SwitchCommandTemplate
 from schemas.switch_command_template import (
@@ -163,8 +163,11 @@ class TestConnectionRequest(BaseModel):
     switch_ip: str
     switch_username: str
     switch_password: str
+    switch_enable_password: str | None = None
+    switch_port: int | None = None
+    cli_transport: Literal['ssh', 'telnet'] = 'ssh'
     template_id: int
-    test_type: str  # 'arp' or 'mac'
+    test_type: Literal['arp', 'mac']
 
 
 class TestConnectionResponse(BaseModel):
@@ -174,6 +177,32 @@ class TestConnectionResponse(BaseModel):
     entries_count: int = 0
     sample_output: str = ""
     error: str = ""
+
+
+class TemplateMatchPreviewRequest(BaseModel):
+    """Preview which command template would match a switch identity."""
+    vendor: str
+    model: str
+    name: str = ""
+
+
+class TemplateMatchPreviewResponse(BaseModel):
+    """Template match preview response."""
+    matched: bool
+    source: str | None = None
+    template_id: int | None = None
+    vendor: str | None = None
+    model_pattern: str | None = None
+    name_pattern: str | None = None
+    device_type: str | None = None
+    priority: int | None = None
+    description: str | None = None
+    arp_command: str | None = None
+    arp_parser_type: str | None = None
+    mac_command: str | None = None
+    mac_parser_type: str | None = None
+    is_builtin: bool | None = None
+    message: str
 
 
 @router.get("", response_model=List[SwitchCommandTemplateResponse])
@@ -254,6 +283,82 @@ async def create_command_template(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create command template: {str(e)}"
         )
+
+
+@router.post("/match-preview", response_model=TemplateMatchPreviewResponse)
+async def preview_command_template_match(
+    match_request: TemplateMatchPreviewRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Preview which template would match a vendor/model/name combination."""
+    from services.cli_service import cli_service
+
+    query = select(SwitchCommandTemplate).where(
+        SwitchCommandTemplate.enabled == True
+    ).order_by(
+        SwitchCommandTemplate.priority.desc(),
+        SwitchCommandTemplate.vendor,
+        SwitchCommandTemplate.model_pattern
+    )
+    result = await db.execute(query)
+    templates = result.scalars().all()
+
+    template_dicts = [
+        {
+            'id': t.id,
+            'vendor': t.vendor,
+            'model_pattern': t.model_pattern,
+            'name_pattern': t.name_pattern,
+            'device_type': t.device_type,
+            'arp_command': t.arp_command,
+            'arp_parser_type': t.arp_parser_type,
+            'arp_enabled': t.arp_enabled,
+            'mac_command': t.mac_command,
+            'mac_parser_type': t.mac_parser_type,
+            'mac_enabled': t.mac_enabled,
+            'priority': t.priority,
+            'enabled': t.enabled,
+            'description': t.description,
+            'is_builtin': t.is_builtin,
+        }
+        for t in templates
+    ]
+
+    match_details = cli_service.preview_template_match(
+        vendor=match_request.vendor,
+        model=match_request.model,
+        name=match_request.name,
+        templates=template_dicts,
+    )
+
+    if not match_details:
+        return TemplateMatchPreviewResponse(
+            matched=False,
+            message="未找到匹配的命令模板"
+        )
+
+    matched_template = match_details['template']
+    source = match_details['source']
+    return TemplateMatchPreviewResponse(
+        matched=True,
+        source=source,
+        template_id=matched_template.get('id'),
+        vendor=matched_template.get('vendor'),
+        model_pattern=matched_template.get('model_pattern'),
+        name_pattern=matched_template.get('name_pattern'),
+        device_type=matched_template.get('device_type'),
+        priority=matched_template.get('priority'),
+        description=matched_template.get('description'),
+        arp_command=matched_template.get('arp_command'),
+        arp_parser_type=matched_template.get('arp_parser_type'),
+        mac_command=matched_template.get('mac_command'),
+        mac_parser_type=matched_template.get('mac_parser_type'),
+        is_builtin=bool(matched_template.get('is_builtin', source == 'builtin')),
+        message=(
+            f"已匹配{'数据库' if source == 'database' else '内置'}模板: "
+            f"{matched_template.get('vendor')} / {matched_template.get('model_pattern')}"
+        )
+    )
 
 
 @router.put("/{template_id}", response_model=SwitchCommandTemplateResponse)
@@ -359,10 +464,12 @@ async def test_command_template(
     switch_config = {
         'username': test_request.switch_username,
         'password_encrypted': encrypted_password,
+        'enable_password_encrypted': encrypt_password(test_request.switch_enable_password) if test_request.switch_enable_password else None,
         'vendor': template.vendor,
         'model': template.model_pattern,
         'name': '',
-        'ssh_port': 22,
+        'cli_transport': test_request.cli_transport,
+        'ssh_port': test_request.switch_port,
         'connection_timeout': 30
     }
 

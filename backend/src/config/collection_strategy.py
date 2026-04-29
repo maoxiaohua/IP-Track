@@ -21,12 +21,15 @@ class CollectionStrategy:
     """
     收集策略映射
 
-    按厂商和型号定义最佳收集方式：
-    - Alcatel/Nokia: CLI Only (SNMP不可靠)
-    - Cisco: SNMP优先 (SNMP稳定，CLI需要enable密码)
-    - Dell: SNMP优先 (SNMP稳定，CLI需要enable密码)
-    - Juniper: 自动选择
+    按厂商和型号定义最佳收集方式。
+
+    注意：
+    - ARP/MAC（L2 表项）已切换为全局 CLI-only 策略，避免不同厂商的
+      SNMP FDB/ARP 实现差异、超时和隐私级别兼容问题。
+    - 这里的 vendor/model 策略主要仍服务于设备信息、光模块等其它采集项。
     """
+
+    GLOBAL_L2_TABLE_METHOD: CollectionMethod = CollectionMethod.CLI_ONLY
 
     # 厂商级别的默认策略
     VENDOR_DEFAULTS: Dict[str, CollectionMethod] = {
@@ -185,6 +188,20 @@ class CollectionStrategy:
             CollectionMethod.CLI_PRIMARY,
             CollectionMethod.AUTO
         ]
+
+    @classmethod
+    def get_l2_table_method(cls) -> CollectionMethod:
+        """Global ARP/MAC collection method shared by all switches."""
+        return cls.GLOBAL_L2_TABLE_METHOD
+
+    @classmethod
+    def get_l2_table_primary_method(cls) -> str:
+        """Human-friendly description for the global ARP/MAC policy."""
+        if cls.GLOBAL_L2_TABLE_METHOD == CollectionMethod.CLI_ONLY:
+            return "CLI only (global)"
+        if cls.GLOBAL_L2_TABLE_METHOD == CollectionMethod.SNMP_ONLY:
+            return "SNMP only (global)"
+        return cls.GLOBAL_L2_TABLE_METHOD.value
 
 
 # 优化的CLI命令模板

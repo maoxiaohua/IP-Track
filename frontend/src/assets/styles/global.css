@@ -12,9 +12,23 @@
   --card-bg: #ffffff;
   --border-color: #dcdfe6;
 
-  --text-primary: #303133;
-  --text-regular: #606266;
-  --text-secondary: #909399;
+  --text-primary: #1f2937;
+  --text-regular: #374151;
+  --text-secondary: #6b7280;
+  --text-placeholder: #8b97a8;
+
+  --font-family-ui: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Segoe UI', 'Helvetica Neue', 'Arial', sans-serif;
+  --font-weight-regular: 500;
+  --font-weight-medium: 600;
+  --font-weight-strong: 700;
+
+  --el-font-family: var(--font-family-ui);
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--text-regular);
+  --el-text-color-secondary: var(--text-secondary);
+  --el-text-color-placeholder: var(--text-placeholder);
+  --el-text-color-disabled: #98a2b3;
 
   --shadow-light: 0 2px 12px 0 rgba(37, 99, 235, 0.1);
   --shadow-base: 0 2px 12px 0 rgba(37, 99, 235, 0.15);
@@ -31,13 +45,73 @@
 body {
   margin: 0;
   padding: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: var(--font-family-ui);
+  color: var(--text-regular);
+  font-weight: var(--font-weight-regular);
+  line-height: 1.5;
+  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background: linear-gradient(135deg, #3B82F6 0%, #60A5FA 100%);
   min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+#app,
+.el-config-provider {
+  color: var(--text-regular);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+strong,
+b {
+  color: var(--text-primary);
+}
+
+.el-form-item__label,
+.el-descriptions__label,
+.el-tabs__item,
+.el-radio__label,
+.el-checkbox__label,
+.el-dropdown-menu__item,
+.el-pagination,
+.el-step__title,
+.el-page-header__title {
+  color: var(--text-regular);
+  font-weight: var(--font-weight-medium);
+}
+
+.el-input__inner,
+.el-textarea__inner,
+.el-select__selected-item,
+.el-select__placeholder,
+.el-input-number__decrease,
+.el-input-number__increase,
+.el-button,
+.el-tag,
+.el-text {
+  font-weight: var(--font-weight-regular);
+}
+
+.el-table .cell,
+.el-descriptions__content,
+.el-collapse-item__header,
+.el-collapse-item__content,
+.el-drawer__header,
+.el-dialog__body {
+  color: var(--text-regular);
+  font-weight: var(--font-weight-regular);
 }
 
 /* Card Enhancements */
@@ -62,7 +136,7 @@ body {
 
 .el-card__header h2 {
   color: white !important;
-  font-weight: 600;
+  font-weight: var(--font-weight-medium);
   margin: 0;
 }
 
@@ -73,7 +147,7 @@ body {
 /* Button Enhancements */
 .el-button {
   border-radius: 6px;
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   transition: var(--transition);
 }
 
@@ -102,7 +176,7 @@ body {
 .el-table th {
   background: linear-gradient(135deg, #3B82F6 0%, #60A5FA 100%);
   color: white !important;
-  font-weight: 600;
+  font-weight: var(--font-weight-strong);
 }
 
 .el-table th .cell {
@@ -116,7 +190,7 @@ body {
 /* Tag Enhancements */
 .el-tag {
   border-radius: 4px;
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   padding: 4px 12px;
 }
 
@@ -152,18 +226,19 @@ body {
 .el-statistic__head {
   color: var(--text-secondary);
   font-size: 14px;
+  font-weight: var(--font-weight-medium);
   margin-bottom: 8px;
 }
 
 .el-statistic__content {
   font-size: 32px;
-  font-weight: 700;
-  color: #303133 !important;
+  font-weight: var(--font-weight-strong);
+  color: var(--text-primary) !important;
 }
 
 /* Progress Bar */
 .el-progress__text {
-  font-weight: 600;
+  font-weight: var(--font-weight-medium);
 }
 
 /* Dialog */
@@ -180,7 +255,7 @@ body {
 
 .el-dialog__title {
   color: white !important;
-  font-weight: 600;
+  font-weight: var(--font-weight-medium);
 }
 
 .el-dialog__headerbtn .el-dialog__close {

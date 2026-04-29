@@ -15,10 +15,16 @@ export const useLookupStore = defineStore('lookup', () => {
     try {
       const response = await lookupApi.lookupIP(ipAddress)
 
-      if (response.success && response.result) {
+      if (response.result) {
         currentResult.value = response.result
-      } else {
+      }
+
+      if (response.success && response.result) {
+        error.value = null
+      } else if (!response.result) {
         error.value = response.error || 'Lookup failed'
+      } else {
+        error.value = null
       }
     } catch (err: any) {
       error.value = err.message || 'An error occurred during lookup'

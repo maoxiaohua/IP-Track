@@ -62,7 +62,7 @@ class SNMPConfigRequest(BaseModel):
     @validator('snmp_priv_password')
     def validate_priv_password(cls, v, values):
         if values.get('snmp_version') == '3' and values.get('snmp_enabled'):
-            if not v or len(v) < 8:
+            if v and len(v) < 8:
                 raise ValueError('snmp_priv_password must be at least 8 characters for SNMPv3')
         return v
 
@@ -136,7 +136,7 @@ async def get_snmp_config(
         snmp_auth_protocol=switch.snmp_auth_protocol,
         snmp_priv_protocol=switch.snmp_priv_protocol,
         snmp_port=switch.snmp_port or 161,
-        has_credentials=bool(switch.snmp_auth_password_encrypted and switch.snmp_priv_password_encrypted)
+        has_credentials=bool(switch.snmp_auth_password_encrypted)
     )
 
 
@@ -169,16 +169,25 @@ async def update_snmp_config(
         # SNMPv3 configuration
         switch.snmp_username = config.snmp_username
         switch.snmp_auth_protocol = config.snmp_auth_protocol
-        switch.snmp_priv_protocol = config.snmp_priv_protocol
 
         # Encrypt passwords
         if config.snmp_auth_password:
             switch.snmp_auth_password_encrypted = encrypt_password(config.snmp_auth_password)
         if config.snmp_priv_password:
+            switch.snmp_priv_protocol = config.snmp_priv_protocol or "AES128"
             switch.snmp_priv_password_encrypted = encrypt_password(config.snmp_priv_password)
+        else:
+            switch.snmp_priv_protocol = None
+            switch.snmp_priv_password_encrypted = None
+
+        switch.snmp_community = None
 
     elif config.snmp_version == "2c":
         # SNMPv2c configuration
+        switch.snmp_username = None
+        switch.snmp_auth_protocol = None
+        switch.snmp_priv_protocol = None
+        switch.snmp_priv_password_encrypted = None
         if config.snmp_community:
             # Store community string in auth_password field (encrypted)
             switch.snmp_auth_password_encrypted = encrypt_password(config.snmp_community)
@@ -229,14 +238,23 @@ async def batch_update_snmp_config(
         if config.snmp_version == "3":
             switch.snmp_username = config.snmp_username
             switch.snmp_auth_protocol = config.snmp_auth_protocol
-            switch.snmp_priv_protocol = config.snmp_priv_protocol
 
             if config.snmp_auth_password:
                 switch.snmp_auth_password_encrypted = encrypt_password(config.snmp_auth_password)
             if config.snmp_priv_password:
+                switch.snmp_priv_protocol = config.snmp_priv_protocol or "AES128"
                 switch.snmp_priv_password_encrypted = encrypt_password(config.snmp_priv_password)
+            else:
+                switch.snmp_priv_protocol = None
+                switch.snmp_priv_password_encrypted = None
+
+            switch.snmp_community = None
 
         elif config.snmp_version == "2c":
+            switch.snmp_username = None
+            switch.snmp_auth_protocol = None
+            switch.snmp_priv_protocol = None
+            switch.snmp_priv_password_encrypted = None
             if config.snmp_community:
                 switch.snmp_auth_password_encrypted = encrypt_password(config.snmp_community)
 
@@ -267,10 +285,10 @@ async def test_snmp_connection(
     try:
         if test_config.snmp_version == "3":
             # Test SNMPv3
-            if not test_config.snmp_username or not test_config.snmp_auth_password or not test_config.snmp_priv_password:
+            if not test_config.snmp_username or not test_config.snmp_auth_password:
                 raise HTTPException(
                     status_code=400,
-                    detail="SNMPv3 requires username, auth_password, and priv_password"
+                    detail="SNMPv3 requires username and auth_password"
                 )
 
             # Create auth data
@@ -288,15 +306,21 @@ async def test_snmp_connection(
             }
 
             auth_proto = auth_map.get(test_config.snmp_auth_protocol, usmHMACSHAAuthProtocol)
-            priv_proto = priv_map.get(test_config.snmp_priv_protocol, usmAesCfb128Protocol)
-
-            auth_data = UsmUserData(
-                test_config.snmp_username,
-                authKey=test_config.snmp_auth_password,
-                privKey=test_config.snmp_priv_password,
-                authProtocol=auth_proto,
-                privProtocol=priv_proto
-            )
+            if test_config.snmp_priv_password:
+                priv_proto = priv_map.get(test_config.snmp_priv_protocol, usmAesCfb128Protocol)
+                auth_data = UsmUserData(
+                    test_config.snmp_username,
+                    authKey=test_config.snmp_auth_password,
+                    privKey=test_config.snmp_priv_password,
+                    authProtocol=auth_proto,
+                    privProtocol=priv_proto
+                )
+            else:
+                auth_data = UsmUserData(
+                    test_config.snmp_username,
+                    authKey=test_config.snmp_auth_password,
+                    authProtocol=auth_proto
+                )
 
             # Create transport target (pysnmp 7.x requires .create())
             transport = await UdpTransportTarget.create(
@@ -398,7 +422,7 @@ async def list_snmp_configured_switches(
     List all switches with SNMP configuration status
     """
     result = await db.execute(
-        select(Switch).order_by(Switch.priority.asc(), Switch.name.asc())
+        select(Switch).order_by(Switch.name.asc(), Switch.id.asc())
     )
     switches = result.scalars().all()
 
@@ -410,11 +434,13 @@ async def list_snmp_configured_switches(
                 "name": s.name,
                 "ip_address": str(s.ip_address),
                 "vendor": s.vendor,
-                "role": s.role,
+                "role": "",
                 "snmp_enabled": s.snmp_enabled or False,
                 "snmp_version": s.snmp_version or "3",
                 "snmp_username": s.snmp_username,
-                "has_credentials": bool(s.snmp_auth_password_encrypted and s.snmp_priv_password_encrypted),
+                "has_credentials": bool(
+                    s.snmp_auth_password_encrypted or s.snmp_community
+                ),
                 "enabled": s.enabled
             }
             for s in switches

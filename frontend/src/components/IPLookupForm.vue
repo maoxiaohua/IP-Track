@@ -19,41 +19,60 @@
         <el-button
           type="primary"
           size="large"
-          :loading="lookupStore.loading"
+          :loading="loading"
           @click="handleSubmit"
           style="width: 100%"
         >
-          <el-icon v-if="!lookupStore.loading"><Search /></el-icon>
-          {{ lookupStore.loading ? 'Searching...' : 'Lookup IP Address' }}
+          <el-icon v-if="!loading"><Search /></el-icon>
+          {{ loading ? 'Searching...' : 'Lookup IP Address' }}
         </el-button>
       </el-form-item>
     </el-form>
 
     <el-alert
-      v-if="lookupStore.error"
+      v-if="error"
       type="error"
-      :title="lookupStore.error"
+      :title="error"
       :closable="true"
-      @close="lookupStore.clearResult"
       show-icon
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, watch } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { useLookupStore } from '@/stores/lookup'
 
-const lookupStore = useLookupStore()
 const formRef = ref<FormInstance>()
+const props = withDefaults(defineProps<{
+  initialIp?: string
+  loading?: boolean
+  error?: string | null
+}>(), {
+  initialIp: '',
+  loading: false,
+  error: null
+})
+
+const emit = defineEmits<{
+  submit: [ipAddress: string]
+}>()
 
 const form = reactive({
   ipAddress: ''
 })
 
+watch(
+  () => props.initialIp,
+  (value) => {
+    form.ipAddress = value || ''
+  },
+  { immediate: true }
+)
+
 // IP address validation
 const validateIP = (rule: any, value: string, callback: any) => {
+  void rule
   if (!value) {
     callback(new Error('Please enter an IP address'))
     return
@@ -91,11 +110,8 @@ const handleSubmit = async () => {
 
   await formRef.value.validate(async (valid) => {
     if (valid) {
-      await lookupStore.lookupIP(form.ipAddress)
-
-      if (lookupStore.currentResult?.found) {
-        ElMessage.success('Device found successfully!')
-      }
+      emit('submit', form.ipAddress.trim())
+      ElMessage.info('正在查询，请稍候...')
     }
   })
 }

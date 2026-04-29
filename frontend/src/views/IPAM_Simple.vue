@@ -36,6 +36,48 @@
         </el-col>
       </el-row>
 
+      <div v-if="shouldShowScanStatus" class="scan-status-panel">
+        <div class="scan-status-header">
+          <div>
+            <div class="scan-status-title">
+              {{ scanSourceLabel }} | {{ scanTypeLabel }} | {{ scanStatus?.phase_label || '状态未知' }}
+            </div>
+            <div class="scan-status-subtitle">
+              {{ scanStatus?.message || '等待扫描状态更新' }}
+            </div>
+          </div>
+          <el-tag :type="scanStatus?.running ? 'warning' : scanStatus?.current_phase === 'error' ? 'danger' : 'success'">
+            {{ scanStatus?.running ? '进行中' : scanStatus?.current_phase === 'error' ? '失败' : '完成' }}
+          </el-tag>
+        </div>
+
+        <div class="scan-status-grid">
+          <div class="scan-status-item">
+            <span class="label">当前子网</span>
+            <span class="value">{{ currentSubnetLabel }}</span>
+          </div>
+          <div class="scan-status-item">
+            <span class="label">子网进度</span>
+            <span class="value">{{ subnetProgressText }}</span>
+          </div>
+          <div class="scan-status-item">
+            <span class="label">主机探测</span>
+            <span class="value">{{ quickProgressText }}</span>
+          </div>
+          <div class="scan-status-item">
+            <span class="label">识别进度</span>
+            <span class="value">{{ enrichmentProgressText }}</span>
+          </div>
+        </div>
+
+        <el-progress
+          v-if="scanStatus?.running"
+          :percentage="scanProgressPercent"
+          :stroke-width="14"
+          status="success"
+        />
+      </div>
+
       <!-- Subnet Table (SolarWinds Style) -->
       <el-table
         :data="paginatedSubnets"
@@ -111,7 +153,7 @@
             <el-button
               size="small"
               type="success"
-              :loading="scanning[row.subnet_id]"
+              :loading="isSubnetScanning(row.subnet_id)"
               @click.stop="scanSubnet(row)"
             >
               扫描
@@ -138,6 +180,13 @@
         style="margin-top: 20px; justify-content: center"
       />
     </el-card>
+
+    <div v-if="scanStatus?.running" class="scan-status-footer">
+      <div class="footer-title">{{ scanSourceLabel }} | {{ scanStatus.phase_label }}</div>
+      <div class="footer-message">
+        {{ currentSubnetLabel }} · {{ scanStatus.message || '扫描进行中' }}
+      </div>
+    </div>
 
     <!-- Add/Edit Subnet Dialog -->
     <el-dialog
@@ -296,11 +345,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Upload, Download, Search } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
+import { ipamApi, type IPAMScanStatus } from '@/api/ipam'
+import { useIPAMScanMonitor } from '@/composables/useIPAMScanMonitor'
 
 interface Subnet {
   subnet_id: number
@@ -337,6 +388,7 @@ const pagination = ref({
   currentPage: 1,
   pageSize: 200  // Default to 200 rows per page
 })
+let lastStatusNotificationKey = ''
 
 const subnetForm = ref({
   name: '',
@@ -349,6 +401,171 @@ const subnetForm = ref({
   auto_scan: true,
   scan_interval: 3600
 })
+
+const updateSubnetLastScan = (subnetId?: number, lastScanAt?: string) => {
+  if (!subnetId || !lastScanAt) {
+    return
+  }
+
+  const subnet = subnets.value.find(item => item.subnet_id === subnetId)
+  if (subnet) {
+    subnet.last_scan_at = lastScanAt
+  }
+}
+
+const setActiveScanningSubnet = (subnetId?: number) => {
+  if (!subnetId) {
+    scanning.value = {}
+    return
+  }
+  scanning.value = { [subnetId]: true }
+}
+
+const handleScanStatusChange = (status: IPAMScanStatus, previous: IPAMScanStatus | null) => {
+  if (status.subnet_id && status.current_subnet_last_scan_at) {
+    updateSubnetLastScan(status.subnet_id, status.current_subnet_last_scan_at)
+  }
+
+  if (status.running) {
+    if (status.subnet_id) {
+      setActiveScanningSubnet(status.subnet_id)
+    }
+  } else {
+    scanning.value = {}
+  }
+
+  const notificationKey = `${status.type || status.current_phase}:${status.session_id || 'none'}:${status.updated_at || ''}`
+  if (notificationKey === lastStatusNotificationKey) {
+    return
+  }
+
+  if (status.type === 'complete') {
+    lastStatusNotificationKey = notificationKey
+    if (status.source === 'manual') {
+      const summary = status.summary as any
+      ElMessage.success(
+        status.message ||
+        `扫描完成：${summary?.reachable ?? 0} 个在线，${summary?.unreachable ?? 0} 个离线`
+      )
+    }
+    void loadSubnets()
+    return
+  }
+
+  if (status.type === 'error') {
+    lastStatusNotificationKey = notificationKey
+    ElMessage.error(status.message || status.error || 'IPAM 扫描失败')
+    void loadSubnets()
+    return
+  }
+
+  if (
+    previous?.current_subnet_last_scan_at !== status.current_subnet_last_scan_at &&
+    status.subnet_id &&
+    status.current_subnet_last_scan_at
+  ) {
+    void loadSubnets()
+  }
+}
+
+const {
+  scanStatus,
+  monitorSupported,
+  connect: connectScanMonitor,
+  loadInitialStatus
+} = useIPAMScanMonitor({
+  onStatus: handleScanStatusChange
+})
+
+const isFreshScanStatus = (status: IPAMScanStatus | null) => {
+  if (!status) {
+    return false
+  }
+  const reference = status.updated_at || status.last_completed_at
+  if (!reference) {
+    return false
+  }
+  return Date.now() - new Date(reference).getTime() < 10 * 60 * 1000
+}
+
+const shouldShowScanStatus = computed(() => {
+  return Boolean(
+    scanStatus.value &&
+    (
+      scanStatus.value.running ||
+      (
+        (scanStatus.value.current_phase === 'completed' || scanStatus.value.current_phase === 'error') &&
+        isFreshScanStatus(scanStatus.value)
+      )
+    )
+  )
+})
+
+const scanSourceLabel = computed(() => {
+  return scanStatus.value?.source === 'auto' ? '自动扫描' : '手动扫描'
+})
+
+const scanTypeLabel = computed(() => {
+  return scanStatus.value?.scan_type === 'quick' ? '快速模式' : '全量模式'
+})
+
+const currentSubnetLabel = computed(() => {
+  return scanStatus.value?.subnet_network || scanStatus.value?.subnet_name || '等待扫描任务'
+})
+
+const subnetProgressText = computed(() => {
+  const status = scanStatus.value
+  if (!status) {
+    return '-'
+  }
+  return `${status.completed_subnets}/${status.total_subnets || 0}`
+})
+
+const quickProgressText = computed(() => {
+  const status = scanStatus.value
+  if (!status) {
+    return '-'
+  }
+  return `${status.current_subnet_completed_ips}/${status.current_subnet_total_ips}，待回复 ${status.current_subnet_pending_ips}`
+})
+
+const enrichmentProgressText = computed(() => {
+  const status = scanStatus.value
+  if (!status) {
+    return '-'
+  }
+  if (status.scan_type === 'quick') {
+    return '本次为快速扫描，未执行识别'
+  }
+  if (!status.current_subnet_enrichment_total) {
+    return '等待在线主机识别'
+  }
+  return `${status.current_subnet_enrichment_completed}/${status.current_subnet_enrichment_total}`
+})
+
+const scanProgressPercent = computed(() => {
+  const status = scanStatus.value
+  if (!status) {
+    return 0
+  }
+
+  const totalSubnets = status.total_subnets || 1
+  const completedSubnets = Math.min(status.completed_subnets || 0, totalSubnets)
+  let currentSubnetProgress = 0
+
+  if (status.current_phase === 'enrichment' && status.current_subnet_enrichment_total > 0) {
+    currentSubnetProgress = status.current_subnet_enrichment_completed / status.current_subnet_enrichment_total
+  } else if (status.current_subnet_total_ips > 0) {
+    currentSubnetProgress = status.current_subnet_completed_ips / status.current_subnet_total_ips
+  }
+
+  const overall = ((completedSubnets + currentSubnetProgress) / totalSubnets) * 100
+  return Math.max(0, Math.min(100, Math.round(overall)))
+})
+
+const isSubnetScanning = (subnetId: number) => {
+  return Boolean(scanning.value[subnetId])
+}
 
 // Filtered subnets based on search text
 const filteredSubnets = computed(() => {
@@ -369,6 +586,10 @@ const paginatedSubnets = computed(() => {
   const start = (pagination.value.currentPage - 1) * pagination.value.pageSize
   const end = start + pagination.value.pageSize
   return filteredSubnets.value.slice(start, end)
+})
+
+watch(searchText, () => {
+  pagination.value.currentPage = 1
 })
 
 // Load subnets
@@ -482,18 +703,31 @@ const resetForm = () => {
 
 // Scan subnet
 const scanSubnet = async (subnet: Subnet) => {
-  scanning.value[subnet.subnet_id] = true
+  setActiveScanningSubnet(subnet.subnet_id)
   try {
-    await apiClient.post('/api/v1/ipam/scan', {
-      subnet_id: subnet.subnet_id,
-      scan_type: 'full'
-    })
-    ElMessage.success(`子网 ${subnet.network} 扫描已启动`)
-    setTimeout(() => loadSubnets(), 5000)
+    const response = await ipamApi.startSubnetScan(subnet.subnet_id, 'full')
+    if (response.mode === 'sync') {
+      if (response.summary?.subnet_last_scan_at) {
+        subnet.last_scan_at = response.summary.subnet_last_scan_at
+      }
+      ElMessage.success(
+        response.message ||
+        `子网 ${subnet.network} 同步扫描完成：${response.summary?.reachable ?? 0} 个在线，${response.summary?.unreachable ?? 0} 个离线`
+      )
+      await loadSubnets()
+      scanning.value = {}
+      return
+    }
+
+    ElMessage.success(response.message || `已启动子网 ${subnet.network} 的后台扫描`)
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.detail || '扫描失败')
-  } finally {
-    scanning.value[subnet.subnet_id] = false
+    if (error.response?.status === 409) {
+      ElMessage.warning(error.response?.data?.detail || '当前已有扫描任务正在运行，请稍后重试')
+      await loadSubnets()
+    } else {
+      ElMessage.error(error.response?.data?.detail || '扫描失败')
+    }
+    scanning.value = {}
   }
 }
 
@@ -795,12 +1029,99 @@ const exportToExcel = () => {
 
 onMounted(() => {
   loadSubnets()
+  void loadInitialStatus().then((supported) => {
+    if (supported && monitorSupported.value) {
+      connectScanMonitor()
+    }
+  })
 })
 </script>
 
 <style scoped>
 .ipam-simple-view {
   padding: 20px;
+  padding-bottom: 84px;
+}
+
+.scan-status-panel {
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border: 1px solid #d9ecff;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f4f9ff 0%, #ffffff 100%);
+}
+
+.scan-status-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.scan-status-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f2a44;
+}
+
+.scan-status-subtitle {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #5c6b82;
+}
+
+.scan-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.scan-status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.scan-status-item .label {
+  font-size: 12px;
+  color: #7c8aa5;
+}
+
+.scan-status-item .value {
+  font-size: 14px;
+  font-weight: 600;
+  color: #22324d;
+}
+
+.scan-status-footer {
+  position: fixed;
+  right: 24px;
+  bottom: 20px;
+  left: 24px;
+  z-index: 30;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: rgba(17, 24, 39, 0.92);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.22);
+  color: #f8fafc;
+  backdrop-filter: blur(8px);
+}
+
+.footer-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.footer-message {
+  margin-top: 4px;
+  font-size: 13px;
+  color: rgba(248, 250, 252, 0.86);
 }
 
 :deep(.el-table__row) {
@@ -809,5 +1130,18 @@ onMounted(() => {
 
 :deep(.el-table__row:hover) {
   background-color: #f5f7fa;
+}
+
+@media (max-width: 768px) {
+  .ipam-simple-view {
+    padding: 12px;
+    padding-bottom: 110px;
+  }
+
+  .scan-status-footer {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+  }
 }
 </style>

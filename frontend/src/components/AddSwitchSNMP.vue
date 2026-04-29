@@ -77,11 +77,11 @@
         </el-select>
       </el-form-item>
       
-      <el-form-item label="加密密码" prop="snmp_priv_password">
+      <el-form-item label="加密密码（可选）" prop="snmp_priv_password">
         <el-input
           v-model="form.snmp_priv_password"
           type="password"
-          placeholder="至少8个字符"
+          placeholder="留空则不启用加密"
           show-password
         />
       </el-form-item>
@@ -110,6 +110,7 @@ import { ref, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { testSNMPConnection } from '@/api/snmp'
+import apiClient from '@/api'
 
 const dialogVisible = ref(false)
 const formRef = ref<FormInstance>()
@@ -125,7 +126,7 @@ const form = reactive({
   priority: 50,
   enabled: true,
   snmp_enabled: true,
-  snmp_version: '3',
+  snmp_version: '3' as const,
   snmp_port: 161,
   snmp_username: '',
   snmp_auth_protocol: 'SHA',
@@ -153,8 +154,16 @@ const rules = reactive<FormRules>({
     { min: 8, message: '密码至少8个字符', trigger: 'blur' }
   ],
   snmp_priv_password: [
-    { required: true, message: '请输入加密密码', trigger: 'blur' },
-    { min: 8, message: '密码至少8个字符', trigger: 'blur' }
+    {
+      validator: (_rule: any, value: string, callback: (error?: Error) => void) => {
+        if (value && value.length < 8) {
+          callback(new Error('密码至少8个字符'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
   ]
 })
 
@@ -206,19 +215,8 @@ const handleSubmit = async () => {
   try {
     await formRef.value.validate()
     submitting.value = true
-    
-    const response = await fetch('http://localhost:8100/api/v1/switches', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(form)
-    })
-    
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.detail || '添加失败')
-    }
+
+    await apiClient.post('/api/v1/switches', form)
     
     ElMessage.success('交换机添加成功！')
     emit('success')

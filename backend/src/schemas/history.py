@@ -17,6 +17,11 @@ class QueryHistoryResponse(BaseModel):
     error_message: Optional[str] = None
     query_time_ms: Optional[int] = None
     queried_at: datetime
+    current_switch_is_reachable: Optional[bool] = None
+    current_switch_collection_status: Optional[str] = None
+    current_switch_collection_message: Optional[str] = None
+    current_freshness_status: Optional[str] = None
+    current_freshness_warning: Optional[str] = None
 
     @field_validator('target_ip', mode='before')
     @classmethod

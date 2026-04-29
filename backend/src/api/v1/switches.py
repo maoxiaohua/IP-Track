@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func, or_, and_, cast, String, case
+from sqlalchemy import select, desc, func, or_, and_, cast, String, case, delete
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 import asyncio
@@ -14,14 +14,54 @@ from schemas.switch import SwitchCreate, SwitchUpdate, SwitchResponse, SwitchTes
 from core.security import credential_encryption, decrypt_password
 from services.switch_manager import switch_manager
 from services.cli_service import cli_service
-# Temporarily disabled: from services.snmp_service import snmp_service
+from services.snmp_service import snmp_service
 from services.port_analysis_service import port_analysis_service
 from services.port_lookup_policy_service import build_lookup_eligible_clause
+from services.data_freshness_service import (
+    build_optical_inventory_freshness,
+    build_optical_module_freshness,
+)
+from services.network_data_collector import network_data_collector
 from services.status_checker import switch_status_checker
 from utils.logger import logger
 from utils.network import ping_host, ping_multiple_hosts
 
 router = APIRouter(prefix="/switches", tags=["switches"])
+
+
+def _is_usable_arp_interface(interface_name: str | None) -> bool:
+    if not interface_name:
+        return False
+
+    cleaned = str(interface_name).strip()
+    if not cleaned:
+        return False
+
+    lowered = cleaned.lower()
+    if lowered in {'dyn', 'dyn[i]', 'oth', 'oth[i]', 'other', 'other[i]', 'irb-interface'}:
+        return False
+
+    if lowered.startswith(('irb', 'vlan', 'vlan.', 'loopback', 'lo', 'system', 'null', 'bridge', 'bvi', 'mgmt')):
+        return False
+
+    if '[' in cleaned and ']' in cleaned:
+        return False
+
+    return True
+
+
+def _normalize_cli_transport_and_port(
+    transport: str | None,
+    port: int | None,
+    *,
+    port_was_explicit: bool
+) -> tuple[str, int]:
+    """Keep CLI transport and port defaults consistent across API entry points."""
+    return cli_service.normalize_cli_connection_settings(
+        transport,
+        port,
+        port_was_explicit=port_was_explicit
+    )
 
 
 @router.get("/status-checker", response_model=Dict[str, Any])
@@ -43,6 +83,12 @@ async def create_switch(
 ):
     """Create a new switch with SNMP authentication"""
     try:
+        cli_transport, ssh_port = _normalize_cli_transport_and_port(
+            switch_data.cli_transport,
+            switch_data.ssh_port,
+            port_was_explicit='ssh_port' in switch_data.model_fields_set
+        )
+
         # Check if switch with same IP already exists
         result = await db.execute(
             select(Switch).where(Switch.ip_address == switch_data.ip_address)
@@ -69,7 +115,8 @@ async def create_switch(
         if switch_data.snmp_version == '3':
             # SNMPv3 - encrypt auth and priv passwords
             snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_auth_password)
-            snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
+            if switch_data.snmp_priv_password:
+                snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
         elif switch_data.snmp_version == '2c' and switch_data.snmp_community:
             # SNMPv2c - encrypt community string (store in auth_password field)
             snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_community)
@@ -83,7 +130,9 @@ async def create_switch(
             enabled=switch_data.enabled,
             
             # SSH fields (optional)
-            ssh_port=switch_data.ssh_port,
+            cli_enabled=switch_data.cli_enabled,
+            cli_transport=cli_transport,
+            ssh_port=ssh_port,
             username=switch_data.username,
             password_encrypted=password_encrypted,
             enable_password_encrypted=enable_password_encrypted,
@@ -96,8 +145,9 @@ async def create_switch(
             snmp_username=switch_data.snmp_username,
             snmp_auth_protocol=switch_data.snmp_auth_protocol,
             snmp_auth_password_encrypted=snmp_auth_password_encrypted,
-            snmp_priv_protocol=switch_data.snmp_priv_protocol,
-            snmp_priv_password_encrypted=snmp_priv_password_encrypted
+            snmp_priv_protocol=switch_data.snmp_priv_protocol if switch_data.snmp_priv_password else None,
+            snmp_priv_password_encrypted=snmp_priv_password_encrypted,
+            snmp_community=switch_data.snmp_community
         )
 
         db.add(switch)
@@ -154,9 +204,14 @@ async def list_switches(
         total = len(count_result.all())
 
         collection_time_expr = func.coalesce(
-            func.greatest(Switch.last_arp_collection_at, Switch.last_mac_collection_at),
+            func.greatest(
+                Switch.last_arp_collection_at,
+                Switch.last_mac_collection_at,
+                Switch.last_optical_collection_at
+            ),
             Switch.last_arp_collection_at,
-            Switch.last_mac_collection_at
+            Switch.last_mac_collection_at,
+            Switch.last_optical_collection_at
         )
         connection_status_expr = case(
             (Switch.is_reachable == False, 0),
@@ -262,6 +317,8 @@ async def update_switch(
             update_data['snmp_priv_password_encrypted'] = credential_encryption.encrypt(update_data.pop('snmp_priv_password'))
         elif 'snmp_priv_password' in update_data:
             update_data.pop('snmp_priv_password')
+            update_data['snmp_priv_password_encrypted'] = None
+            update_data['snmp_priv_protocol'] = None
 
         if 'snmp_community' in update_data and update_data['snmp_community']:
             # Store community in auth_password field for v2c
@@ -269,10 +326,34 @@ async def update_switch(
         elif 'snmp_community' in update_data:
             update_data.pop('snmp_community')
 
+        if update_data.get('snmp_version') == '2c':
+            update_data['snmp_username'] = None
+            update_data['snmp_auth_protocol'] = None
+            update_data['snmp_priv_protocol'] = None
+            update_data['snmp_priv_password_encrypted'] = None
+        elif update_data.get('snmp_version') == '3':
+            if (
+                'snmp_priv_protocol' in update_data and
+                'snmp_priv_password_encrypted' not in update_data and
+                not switch.snmp_priv_password_encrypted
+            ):
+                update_data['snmp_priv_protocol'] = None
+
         if 'trunk_review_completed' in update_data:
             update_data['trunk_review_completed_at'] = (
                 datetime.now(timezone.utc) if update_data['trunk_review_completed'] else None
             )
+
+        transport_updated = 'cli_transport' in switch_data.model_fields_set
+        port_updated = 'ssh_port' in switch_data.model_fields_set
+        if transport_updated or port_updated:
+            cli_transport, ssh_port = _normalize_cli_transport_and_port(
+                update_data.get('cli_transport', switch.cli_transport),
+                update_data.get('ssh_port'),
+                port_was_explicit=port_updated
+            )
+            update_data['cli_transport'] = cli_transport
+            update_data['ssh_port'] = ssh_port
 
         # Update switch
         for field, value in update_data.items():
@@ -353,16 +434,6 @@ async def test_switch_connection(
             from core.security import decrypt_password
             
             try:
-                # Prepare SNMP config
-                snmp_config = {
-                    'snmp_username': switch.snmp_username,
-                    'snmp_auth_protocol': switch.snmp_auth_protocol,
-                    'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-                    'snmp_priv_protocol': switch.snmp_priv_protocol,
-                    'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                    'snmp_port': switch.snmp_port or 161
-                }
-                
                 # Try to get system description via SNMP
                 auth_password = decrypt_password(switch.snmp_auth_password_encrypted)
                 priv_password = decrypt_password(switch.snmp_priv_password_encrypted) if switch.snmp_priv_password_encrypted else None
@@ -390,16 +461,21 @@ async def test_switch_connection(
 
                 # Get protocols from switch config or use defaults
                 auth_proto = auth_map.get(switch.snmp_auth_protocol, usmHMACSHAAuthProtocol)
-                priv_proto = priv_map.get(switch.snmp_priv_protocol, usmAesCfb128Protocol)
-
-                # Create SNMP authentication
-                auth_data = UsmUserData(
-                    switch.snmp_username,
-                    authKey=auth_password,
-                    privKey=priv_password if priv_password else auth_password,
-                    authProtocol=auth_proto,
-                    privProtocol=priv_proto
-                )
+                if priv_password:
+                    priv_proto = priv_map.get(switch.snmp_priv_protocol, usmAesCfb128Protocol)
+                    auth_data = UsmUserData(
+                        switch.snmp_username,
+                        authKey=auth_password,
+                        privKey=priv_password,
+                        authProtocol=auth_proto,
+                        privProtocol=priv_proto
+                    )
+                else:
+                    auth_data = UsmUserData(
+                        switch.snmp_username,
+                        authKey=auth_password,
+                        authProtocol=auth_proto
+                    )
 
                 # Create transport target (pysnmp 7.x requires .create())
                 transport = await UdpTransportTarget.create(
@@ -488,6 +564,12 @@ async def bulk_create_switches(
 
     for idx, switch_data in enumerate(switches_data):
         try:
+            cli_transport, ssh_port = _normalize_cli_transport_and_port(
+                switch_data.cli_transport,
+                switch_data.ssh_port,
+                port_was_explicit='ssh_port' in switch_data.model_fields_set
+            )
+
             # Check if switch with same IP already exists
             result = await db.execute(
                 select(Switch).where(Switch.ip_address == switch_data.ip_address)
@@ -511,7 +593,8 @@ async def bulk_create_switches(
             
             if switch_data.snmp_version == '3':
                 snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_auth_password)
-                snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
+                if switch_data.snmp_priv_password:
+                    snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
             elif switch_data.snmp_version == '2c' and switch_data.snmp_community:
                 snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_community)
 
@@ -521,7 +604,9 @@ async def bulk_create_switches(
                 ip_address=str(switch_data.ip_address),
                 vendor=switch_data.vendor,
                 model=switch_data.model,
-                ssh_port=switch_data.ssh_port,
+                cli_enabled=switch_data.cli_enabled,
+                cli_transport=cli_transport,
+                ssh_port=ssh_port,
                 username=switch_data.username,
                 password_encrypted=password_encrypted,
                 enable_password_encrypted=enable_password_encrypted,
@@ -533,8 +618,9 @@ async def bulk_create_switches(
                 snmp_username=switch_data.snmp_username,
                 snmp_auth_protocol=switch_data.snmp_auth_protocol,
                 snmp_auth_password_encrypted=snmp_auth_password_encrypted,
-                snmp_priv_protocol=switch_data.snmp_priv_protocol,
-                snmp_priv_password_encrypted=snmp_priv_password_encrypted
+                snmp_priv_protocol=switch_data.snmp_priv_protocol if switch_data.snmp_priv_password else None,
+                snmp_priv_password_encrypted=snmp_priv_password_encrypted,
+                snmp_community=switch_data.snmp_community
             )
 
             db.add(switch)
@@ -588,15 +674,38 @@ async def get_switch_arp_table(
         )
         arp_entries = result.scalars().all()
 
+        mac_result = await db.execute(
+            select(MACTable)
+            .where(MACTable.switch_id == switch_id)
+            .order_by(desc(MACTable.last_seen))
+        )
+        latest_mac_by_address = {}
+        for mac_entry in mac_result.scalars():
+            mac_key = str(mac_entry.mac_address).lower()
+            if mac_key not in latest_mac_by_address:
+                latest_mac_by_address[mac_key] = mac_entry
+
         # Format response
         entries = []
         for entry in arp_entries:
+            resolved_mac_entry = latest_mac_by_address.get(str(entry.mac_address).lower())
+            display_interface = None
+            interface_source = 'unknown'
+            if resolved_mac_entry:
+                display_interface = resolved_mac_entry.port_name
+                interface_source = 'mac_table'
+            elif _is_usable_arp_interface(entry.interface):
+                display_interface = entry.interface
+                interface_source = 'arp_table'
+
             entries.append({
                 'id': entry.id,
                 'ip_address': str(entry.ip_address),
                 'mac_address': str(entry.mac_address),
                 'vlan_id': entry.vlan_id,
-                'interface': entry.interface,
+                'interface': display_interface,
+                'raw_interface': entry.interface,
+                'interface_source': interface_source,
                 'age_seconds': entry.age_seconds,
                 'collected_at': entry.collected_at.isoformat() if entry.collected_at else None,
                 'first_seen': entry.first_seen.isoformat() if entry.first_seen else None,
@@ -698,7 +807,7 @@ async def collect_switch_arp_table(
     switch_id: int,
     db: AsyncSession = Depends(get_db)
 ):
-    """Manually collect ARP table from switch via CLI/SNMP"""
+    """Manually collect ARP table from switch via the global CLI-only policy."""
     try:
         # Verify switch exists
         result = await db.execute(
@@ -723,76 +832,20 @@ async def collect_switch_arp_table(
             'vendor': switch.vendor,
             'model': switch.model,
             'name': switch.name,
+            'cli_transport': switch.cli_transport,
             'ssh_port': switch.ssh_port,
             'connection_timeout': switch.connection_timeout
         }
 
-        # Determine collection strategy based on vendor/model
         arp_entries = []
         collection_method = None
 
-        # Determine if SNMP should be tried first
-        try:
-            from config.collection_strategy import CollectionStrategy, CollectionMethod
-            collection_strategy = CollectionStrategy.get_strategy(switch.vendor or '', switch.model or '')
-            use_snmp_first = (collection_strategy == CollectionMethod.SNMP_PRIMARY)
-        except ImportError:
-            # Fallback: SNMP first for Cisco/Dell, CLI first for Alcatel
-            vendor_lower = switch.vendor.lower() if switch.vendor else ''
-            use_snmp_first = vendor_lower in ['cisco', 'dell']
+        from config.collection_strategy import CollectionStrategy
 
-        # SNMP-first strategy (Cisco, Dell)
-        if use_snmp_first:
-            # Try SNMP first
-            if switch.snmp_enabled:
-                logger.info(f"Collecting ARP via SNMP (primary) for {switch.name}")
-                try:
-                    snmp_config = {
-                        'snmp_username': switch.snmp_username,
-                        'snmp_auth_protocol': switch.snmp_auth_protocol,
-                        'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-                        'snmp_priv_protocol': switch.snmp_priv_protocol,
-                        'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                        'snmp_port': switch.snmp_port
-                    }
-                    # Add timeout to prevent hanging indefinitely
-                    arp_entries_snmp = await asyncio.wait_for(
-                        snmp_service.collect_arp_table(
-                            str(switch.ip_address),
-                            snmp_config
-                        ),
-                        timeout=30.0  # 30 second timeout
-                    )
-                    if arp_entries_snmp:
-                        arp_entries = arp_entries_snmp
-                        collection_method = 'SNMP'
-                        logger.info(f"✅ Collected {len(arp_entries)} ARP entries via SNMP from {switch.name}")
-                except asyncio.TimeoutError:
-                    logger.warning(f"SNMP ARP collection timeout for {switch.name} (30s exceeded)")
-                except Exception as e:
-                    logger.warning(f"SNMP ARP collection failed for {switch.name}: {str(e)}")
-
-            # CLI fallback
-            if not arp_entries:
-                logger.info(f"Falling back to CLI for ARP on {switch.name}")
-                try:
-                    arp_entries_cli = await asyncio.to_thread(
-                        cli_service.collect_arp_table_cli,
-                        str(switch.ip_address),
-                        cli_config,
-                        None  # templates
-                    )
-                    if arp_entries_cli:
-                        arp_entries = arp_entries_cli
-                        collection_method = 'CLI (fallback)'
-                        logger.info(f"Collected {len(arp_entries)} ARP entries via CLI fallback from {switch.name}")
-                except Exception as e:
-                    logger.warning(f"CLI ARP fallback failed for {switch.name}: {str(e)}")
-
-        # CLI-first strategy (Alcatel)
-        else:
-            # Try CLI
-            logger.info(f"Collecting ARP via CLI (primary) for {switch.name}")
+        logger.info(
+            f"Collecting ARP via {CollectionStrategy.get_l2_table_primary_method()} for {switch.name}"
+        )
+        if switch.cli_enabled and switch.password_encrypted:
             try:
                 arp_entries_cli = await asyncio.to_thread(
                     cli_service.collect_arp_table_cli,
@@ -806,8 +859,8 @@ async def collect_switch_arp_table(
                     logger.info(f"Collected {len(arp_entries)} ARP entries via CLI from {switch.name}")
             except Exception as e:
                 logger.warning(f"CLI ARP collection failed for {switch.name}: {str(e)}")
-
-            # Alcatel: CLI only, no SNMP fallback
+        else:
+            logger.warning(f"CLI ARP collection skipped for {switch.name}: CLI credentials are not configured")
 
         if not arp_entries:
             return {
@@ -816,7 +869,7 @@ async def collect_switch_arp_table(
                 'switch_ip': str(switch.ip_address),
                 'total_entries': 0,
                 'collection_method': None,
-                'message': f'Failed to collect ARP table via CLI{" and SNMP" if switch.vendor and switch.vendor.lower() in ["cisco", "dell"] else ""}',
+                'message': 'Failed to collect ARP table via CLI (global policy)',
                 'entries': []
             }
 
@@ -872,7 +925,7 @@ async def collect_switch_mac_table(
     switch_id: int,
     db: AsyncSession = Depends(get_db)
 ):
-    """Manually collect MAC address table from switch via CLI/SNMP"""
+    """Manually collect MAC table from switch via the global CLI-only policy."""
     try:
         # Verify switch exists
         result = await db.execute(
@@ -897,76 +950,20 @@ async def collect_switch_mac_table(
             'vendor': switch.vendor,
             'model': switch.model,
             'name': switch.name,
+            'cli_transport': switch.cli_transport,
             'ssh_port': switch.ssh_port,
             'connection_timeout': switch.connection_timeout
         }
 
-        # Determine collection strategy based on vendor/model
         mac_entries = []
         collection_method = None
 
-        # Determine if SNMP should be tried first
-        try:
-            from config.collection_strategy import CollectionStrategy, CollectionMethod
-            collection_strategy = CollectionStrategy.get_strategy(switch.vendor or '', switch.model or '')
-            use_snmp_first = (collection_strategy == CollectionMethod.SNMP_PRIMARY)
-        except ImportError:
-            # Fallback: SNMP first for Cisco/Dell, CLI first for Alcatel
-            vendor_lower = switch.vendor.lower() if switch.vendor else ''
-            use_snmp_first = vendor_lower in ['cisco', 'dell']
+        from config.collection_strategy import CollectionStrategy
 
-        # SNMP-first strategy (Cisco, Dell)
-        if use_snmp_first:
-            # Try SNMP first
-            if switch.snmp_enabled:
-                logger.info(f"Collecting MAC via SNMP (primary) for {switch.name}")
-                try:
-                    snmp_config = {
-                        'snmp_username': switch.snmp_username,
-                        'snmp_auth_protocol': switch.snmp_auth_protocol,
-                        'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-                        'snmp_priv_protocol': switch.snmp_priv_protocol,
-                        'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                        'snmp_port': switch.snmp_port
-                    }
-                    # Add timeout to prevent hanging indefinitely
-                    mac_entries_snmp = await asyncio.wait_for(
-                        snmp_service.collect_mac_table(
-                            str(switch.ip_address),
-                            snmp_config
-                        ),
-                        timeout=30.0  # 30 second timeout
-                    )
-                    if mac_entries_snmp:
-                        mac_entries = mac_entries_snmp
-                        collection_method = 'SNMP'
-                        logger.info(f"✅ Collected {len(mac_entries)} MAC entries via SNMP from {switch.name}")
-                except asyncio.TimeoutError:
-                    logger.warning(f"SNMP MAC collection timeout for {switch.name} (30s exceeded)")
-                except Exception as e:
-                    logger.warning(f"SNMP MAC collection failed for {switch.name}: {str(e)}")
-
-            # CLI fallback
-            if not mac_entries:
-                logger.info(f"Falling back to CLI for MAC on {switch.name}")
-                try:
-                    mac_entries_cli = await asyncio.to_thread(
-                        cli_service.collect_mac_table_cli,
-                        str(switch.ip_address),
-                        cli_config,
-                        None  # templates
-                    )
-                    if mac_entries_cli:
-                        mac_entries = mac_entries_cli
-                        collection_method = 'CLI (fallback)'
-                        logger.info(f"Collected {len(mac_entries)} MAC entries via CLI fallback from {switch.name}")
-                except Exception as e:
-                    logger.warning(f"CLI MAC fallback failed for {switch.name}: {str(e)}")
-
-        # CLI-first strategy (Alcatel)
-        else:
-            # Try CLI
-            logger.info(f"Collecting MAC via CLI (primary) for {switch.name}")
+        logger.info(
+            f"Collecting MAC via {CollectionStrategy.get_l2_table_primary_method()} for {switch.name}"
+        )
+        if switch.cli_enabled and switch.password_encrypted:
             try:
                 mac_entries_cli = await asyncio.to_thread(
                     cli_service.collect_mac_table_cli,
@@ -980,8 +977,8 @@ async def collect_switch_mac_table(
                     logger.info(f"Collected {len(mac_entries)} MAC entries via CLI from {switch.name}")
             except Exception as e:
                 logger.warning(f"CLI MAC collection failed for {switch.name}: {str(e)}")
-
-            # Alcatel: CLI only, no SNMP fallback
+        else:
+            logger.warning(f"CLI MAC collection skipped for {switch.name}: CLI credentials are not configured")
 
         if not mac_entries:
             return {
@@ -990,7 +987,7 @@ async def collect_switch_mac_table(
                 'switch_ip': str(switch.ip_address),
                 'total_entries': 0,
                 'collection_method': None,
-                'message': f'Failed to collect MAC table via CLI{" and SNMP" if switch.vendor and switch.vendor.lower() in ["cisco", "dell"] else ""}',
+                'message': 'Failed to collect MAC table via CLI (global policy)',
                 'entries': []
             }
 
@@ -1065,12 +1062,19 @@ async def collect_switch_device_info(
         cli_config = {
             'username': switch.username,
             'password_encrypted': switch.password_encrypted,
-            'device_type': 'nokia_sros',
+            'enable_password_encrypted': switch.enable_password_encrypted,
             'vendor': switch.vendor,
             'model': switch.model,
+            'name': switch.name,
+            'cli_transport': switch.cli_transport,
             'ssh_port': switch.ssh_port,
             'connection_timeout': switch.connection_timeout
         }
+        cli_config['device_type'] = cli_service._resolve_device_type(
+            switch.vendor or '',
+            switch.model or '',
+            switch.name or ''
+        )
 
         # Collect device info
         device_info = await asyncio.to_thread(
@@ -1150,7 +1154,7 @@ async def trigger_port_analysis(
     Manually trigger port analysis for a specific switch.
 
     This endpoint:
-    1. Collects MAC table from the switch via CLI/SNMP
+    1. Collects MAC table from the switch via the global CLI-only policy
     2. Analyzes ports based on MAC count, VLAN distribution, and port naming
     3. Stores port_analysis records in the database
 
@@ -1171,164 +1175,45 @@ async def trigger_port_analysis(
 
         logger.info(f"Manual port analysis triggered for switch {switch.name} ({switch.ip_address})")
 
-        # Step 1: Collect MAC table
-        mac_entries = []
-
-        # Try CLI first if enabled
-        if switch.cli_enabled and switch.password_encrypted:
-            logger.info(f"  Collecting MAC table via CLI for {switch.name}")
-            try:
-                cli_config = {
-                    'username': switch.username,
-                    'password_encrypted': switch.password_encrypted,
-                    'device_type': 'nokia_sros',  # Will be determined by CLI service
-                    'vendor': switch.vendor,
-                    'model': switch.model,
-                    'ssh_port': switch.ssh_port,
-                    'connection_timeout': switch.connection_timeout
-                }
-
-                mac_entries = await asyncio.to_thread(
-                    cli_service.collect_mac_table_cli,
-                    str(switch.ip_address),
-                    cli_config
-                )
-
-                if mac_entries:
-                    logger.info(f"  ✅ CLI MAC collection successful: {len(mac_entries)} entries")
-            except Exception as e:
-                logger.warning(f"  CLI MAC collection failed for {switch.name}: {str(e)}")
-
-        # SNMP fallback - ENABLED for Cisco and Dell only (Alcatel uses CLI)
-        # Cisco和Dell使用SNMP收集，Alcatel使用CLI收集
-        if not mac_entries and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
-            vendor_lower = switch.vendor.lower() if switch.vendor else ''
-            if vendor_lower in ['cisco', 'dell']:
-                logger.info(f"  Falling back to SNMP for MAC collection on {switch.name} [vendor: {switch.vendor}]")
-                try:
-                    from core.config import get_snmp_config
-                    mac_entries = await snmp_service.collect_mac_table_async(
-                        str(switch.ip_address),
-                        get_snmp_config()
-                    )
-                    if mac_entries:
-                        logger.info(f"  ✅ SNMP MAC fallback successful: {len(mac_entries)} entries")
-                except Exception as e:
-                    logger.warning(f"  SNMP MAC fallback also failed for {switch.name}: {str(e)}")
-            else:
-                logger.debug(f"  Skipping SNMP fallback for {switch.name} (vendor: {switch.vendor}, uses CLI only)")
-
+        # Reuse the same MAC collection path as the scheduled worker pool so the
+        # manual "analyze ports" action behaves the same way as automatic runs.
+        mac_entries = await network_data_collector.collect_mac_single_switch(db, switch)
         if not mac_entries:
             return {
                 'switch_id': switch_id,
                 'switch_ip': str(switch.ip_address),
                 'switch_name': switch.name,
                 'success': False,
-                'message': 'No MAC entries collected. CLI failed or returned zero entries.',
+                'message': switch.last_collection_message or 'No MAC entries collected.',
                 'ports_analyzed': 0,
-                'collection_methods_tried': [
-                    'CLI' if switch.cli_enabled else None,
-                    'SNMP' if switch.snmp_enabled else None
-                ]
+                'collection_methods_tried': ['CLI'] if switch.cli_enabled else []
             }
-
-        # Step 2: Analyze ports
-        logger.info(f"  Analyzing ports for {switch.name} based on {len(mac_entries)} MAC entries")
-
-        # Convert MAC entries to dict format expected by port_analysis_service
-        mac_dicts = [
-            {
-                'port_name': entry.get('port_name'),
-                'vlan_id': entry.get('vlan_id'),
-                'mac_address': entry.get('mac_address')
-            }
-            for entry in mac_entries
-            if entry.get('port_name') and entry.get('mac_address')
-        ]
-
-        port_results = port_analysis_service.analyze_port_statistics(mac_dicts)
-
-        if not port_results:
-            return {
-                'switch_id': switch_id,
-                'switch_ip': str(switch.ip_address),
-                'switch_name': switch.name,
-                'success': False,
-                'message': f'Collected {len(mac_entries)} MAC entries but port analysis returned no results.',
-                'ports_analyzed': 0,
-                'mac_entries_collected': len(mac_entries)
-            }
-
-        # Step 3: Store port_analysis records (upsert)
-        analyzed_at = datetime.now(timezone.utc)
-        ports_updated = 0
-        ports_created = 0
-
-        for port_name, analysis in port_results.items():
-            # Check if port_analysis record already exists
-            result = await db.execute(
-                select(PortAnalysis).where(
-                    and_(
-                        PortAnalysis.switch_id == switch_id,
-                        PortAnalysis.port_name == port_name
-                    )
-                )
-            )
-            existing = result.scalar_one_or_none()
-
-            if existing:
-                # Update existing record
-                existing.mac_count = analysis['mac_count']
-                existing.unique_vlans = analysis['unique_vlans']
-                existing.port_type = analysis['port_type']
-                existing.confidence_score = analysis['confidence_score']
-                existing.is_trunk_by_name = 1 if analysis.get('is_trunk_by_name') else 0
-                existing.is_access_by_name = 1 if analysis.get('is_access_by_name') else 0
-                existing.analyzed_at = analyzed_at
-                ports_updated += 1
-            else:
-                # Create new record
-                port_analysis_record = PortAnalysis(
-                    switch_id=switch_id,
-                    port_name=port_name,
-                    mac_count=analysis['mac_count'],
-                    unique_vlans=analysis['unique_vlans'],
-                    port_type=analysis['port_type'],
-                    confidence_score=analysis['confidence_score'],
-                    is_trunk_by_name=1 if analysis.get('is_trunk_by_name') else 0,
-                    is_access_by_name=1 if analysis.get('is_access_by_name') else 0,
-                    analyzed_at=analyzed_at
-                )
-                db.add(port_analysis_record)
-                ports_created += 1
 
         await db.commit()
 
-        logger.info(
-            f"✅ Port analysis complete for {switch.name}: "
-            f"{ports_created} created, {ports_updated} updated"
+        refreshed_result = await db.execute(
+            select(PortAnalysis.port_type, func.count(PortAnalysis.id))
+            .where(PortAnalysis.switch_id == switch_id)
+            .group_by(PortAnalysis.port_type)
         )
+        port_types_summary = {row[0]: row[1] for row in refreshed_result.all()}
+        total_ports = sum(port_types_summary.values())
 
-        # Summarize results by port type
-        port_types_summary = {}
-        for port_name, analysis in port_results.items():
-            port_type = analysis['port_type']
-            if port_type not in port_types_summary:
-                port_types_summary[port_type] = 0
-            port_types_summary[port_type] += 1
+        logger.info(
+            f"✅ Port analysis refreshed for {switch.name}: "
+            f"{total_ports} ports available after MAC snapshot update"
+        )
 
         return {
             'switch_id': switch_id,
             'switch_ip': str(switch.ip_address),
             'switch_name': switch.name,
             'success': True,
-            'message': f'Successfully analyzed {len(port_results)} ports',
-            'ports_analyzed': len(port_results),
-            'ports_created': ports_created,
-            'ports_updated': ports_updated,
+            'message': f"Successfully refreshed port analysis from latest MAC snapshot ({total_ports} ports)",
+            'ports_analyzed': total_ports,
             'mac_entries_collected': len(mac_entries),
             'port_types_summary': port_types_summary,
-            'analyzed_at': analyzed_at.isoformat()
+            'analyzed_at': datetime.now(timezone.utc).isoformat()
         }
 
     except HTTPException:
@@ -1367,9 +1252,16 @@ async def get_switch_optical_modules(
         )
         modules = result.scalars().all()
 
+        freshness = build_optical_inventory_freshness(switch)
+
         # Format response
         entries = []
+        present_modules = 0
         for module in modules:
+            module_freshness = build_optical_module_freshness(switch, module.last_seen)
+            if module_freshness["is_present"]:
+                present_modules += 1
+
             entries.append({
                 'id': module.id,
                 'port_name': module.port_name,
@@ -1380,7 +1272,11 @@ async def get_switch_optical_modules(
                 'speed_gbps': module.speed_gbps,
                 'collected_at': module.collected_at.isoformat() if module.collected_at else None,
                 'first_seen': module.first_seen.isoformat() if module.first_seen else None,
-                'last_seen': module.last_seen.isoformat() if module.last_seen else None
+                'last_seen': module.last_seen.isoformat() if module.last_seen else None,
+                'presence_status': module_freshness["presence_status"],
+                'is_present': module_freshness["is_present"],
+                'freshness_status': module_freshness["status"],
+                'freshness_warning': module_freshness["warning"],
             })
 
         return {
@@ -1388,6 +1284,9 @@ async def get_switch_optical_modules(
             'switch_name': switch.name,
             'switch_ip': str(switch.ip_address),
             'total_modules': len(entries),
+            'present_modules': present_modules,
+            'historical_modules': len(entries) - present_modules,
+            'freshness': freshness,
             'entries': entries
         }
 
@@ -1422,139 +1321,20 @@ async def collect_switch_optical_modules(
 
         logger.info(f"Manual optical module collection triggered for switch {switch.name} ({switch.ip_address})")
 
-        collected_at = datetime.now(timezone.utc)
-        modules = []
-        collection_method = None
-        empty_collection_confirmed = False
-
-        # Try SNMP first if enabled
-        if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
-            logger.info(f"Trying SNMP optical module collection for {switch.name}")
-            try:
-                snmp_config = {
-                    'snmp_username': switch.snmp_username,
-                    'snmp_auth_protocol': switch.snmp_auth_protocol,
-                    'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-                    'snmp_priv_protocol': switch.snmp_priv_protocol,
-                    'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                    'snmp_port': switch.snmp_port
-                }
-
-                modules = await asyncio.wait_for(
-                    snmp_service.collect_optical_modules(
-                        str(switch.ip_address),
-                        snmp_config
-                    ),
-                    timeout=60.0
-                )
-
-                if modules:
-                    collection_method = 'SNMP'
-                    logger.info(f"✅ Collected {len(modules)} optical modules via SNMP from {switch.name}")
-                else:
-                    logger.info(f"SNMP returned 0 modules, falling back to CLI for {switch.name}")
-                    if not (switch.cli_enabled and switch.password_encrypted):
-                        empty_collection_confirmed = True
-
-            except asyncio.TimeoutError:
-                logger.warning(f"SNMP optical module collection timeout for {switch.name}, trying CLI")
-            except Exception as e:
-                logger.warning(f"SNMP optical module collection failed for {switch.name}: {str(e)}, trying CLI")
-
-        # CLI fallback if SNMP didn't work or not enabled
-        if not modules and switch.cli_enabled and switch.password_encrypted:
-            logger.info(f"Trying CLI optical module collection for {switch.name}")
-            try:
-                cli_config = {
-                    'username': switch.username,
-                    'password_encrypted': switch.password_encrypted,
-                    'enable_password_encrypted': switch.enable_password_encrypted,
-                    'vendor': switch.vendor,
-                    'model': switch.model,
-                    'name': switch.name,
-                    'ssh_port': switch.ssh_port,
-                    'connection_timeout': switch.connection_timeout
-                }
-
-                # Set longer timeout for Alcatel/Nokia (needs to query each port individually)
-                # Alcatel: 300s for 52 ports, Others: 90s
-                timeout_seconds = 300.0 if switch.vendor and switch.vendor.lower() in ['alcatel', 'nokia'] else 90.0
-
-                modules = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        cli_service.collect_optical_modules_cli,
-                        str(switch.ip_address),
-                        cli_config,
-                        switch.vendor or '',
-                        switch.model or ''
-                    ),
-                    timeout=timeout_seconds
-                )
-
-                if modules:
-                    collection_method = 'CLI'
-                    logger.info(f"✅ Collected {len(modules)} optical modules via CLI from {switch.name}")
-                else:
-                    empty_collection_confirmed = True
-
-            except asyncio.TimeoutError:
-                logger.error(f"CLI optical module collection timeout for {switch.name} after {timeout_seconds}s")
-            except Exception as e:
-                logger.error(f"CLI optical module collection failed for {switch.name}: {str(e)}")
-
-        if not modules:
-            if empty_collection_confirmed:
-                await db.execute(
-                    OpticalModule.__table__.delete().where(OpticalModule.switch_id == switch_id)
-                )
-                await db.commit()
-
-            return {
-                'switch_id': switch_id,
-                'switch_name': switch.name,
-                'switch_ip': str(switch.ip_address),
-                'total_modules': 0,
-                'message': 'No optical modules found or device does not support optical module query',
-                'collection_method': collection_method or 'None'
-            }
-
-        # Delete old entries for this switch
-        await db.execute(
-            OpticalModule.__table__.delete().where(OpticalModule.switch_id == switch_id)
-        )
-
-        # Insert new entries
-        new_count = 0
-        for module_data in modules:
-            module = OpticalModule(
-                switch_id=switch_id,
-                switch_name=switch.name,  # Add denormalized switch_name
-                switch_ip=str(switch.ip_address),  # Add denormalized switch_ip
-                port_name=module_data['port_name'],
-                module_type=module_data.get('module_type'),
-                model=module_data.get('model'),
-                part_number=module_data.get('part_number'),  # Add part_number
-                serial_number=module_data.get('serial_number'),
-                vendor=module_data.get('vendor'),
-                speed_gbps=module_data.get('speed_gbps'),
-                collected_at=collected_at,
-                first_seen=collected_at,
-                last_seen=collected_at
-            )
-            db.add(module)
-            new_count += 1
-
+        modules = await network_data_collector.collect_optical_single_switch(db, switch)
         await db.commit()
-        logger.info(f"Stored {new_count} optical modules for switch {switch.name}")
+        await db.refresh(switch)
 
         return {
             'switch_id': switch_id,
             'switch_name': switch.name,
             'switch_ip': str(switch.ip_address),
-            'total_modules': new_count,
-            'message': f'Successfully collected {new_count} optical modules',
-            'collection_method': collection_method,
-            'collected_at': collected_at.isoformat()
+            'total_modules': len(modules),
+            'message': switch.last_optical_collection_message or 'Optical collection completed',
+            'collection_method': switch.optical_collection_method,
+            'collection_status': switch.last_optical_collection_status,
+            'collected_at': switch.last_optical_collection_at.isoformat() if switch.last_optical_collection_at else None,
+            'historical_inventory_preserved': True
         }
 
     except HTTPException:

@@ -239,11 +239,26 @@
         </el-form-item>
 
         <el-form-item label="用户名">
-          <el-input v-model="testForm.switch_username" placeholder="SSH用户名" />
+          <el-input v-model="testForm.switch_username" placeholder="CLI用户名" />
         </el-form-item>
 
         <el-form-item label="密码">
-          <el-input v-model="testForm.switch_password" type="password" show-password placeholder="SSH密码" />
+          <el-input v-model="testForm.switch_password" type="password" show-password placeholder="CLI密码" />
+        </el-form-item>
+
+        <el-form-item label="Enable密码">
+          <el-input v-model="testForm.switch_enable_password" type="password" show-password placeholder="可选" />
+        </el-form-item>
+
+        <el-form-item label="CLI协议">
+          <el-select v-model="testForm.cli_transport" style="width: 180px">
+            <el-option label="SSH" value="ssh" />
+            <el-option label="Telnet" value="telnet" />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item label="CLI端口">
+          <el-input-number v-model="testForm.switch_port" :min="1" :max="65535" />
         </el-form-item>
 
         <el-form-item label="测试类型">
@@ -332,7 +347,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Refresh, Edit, Delete, View, Connection } from '@element-plus/icons-vue'
 import type {
@@ -363,6 +378,7 @@ const showTestDialogVisible = ref(false)
 const currentTemplate = ref<CommandTemplate | null>(null)
 const currentTestTemplate = ref<CommandTemplate | null>(null)
 const editingTemplate = ref<CommandTemplate | null>(null)
+const defaultCliPort = (transport?: 'ssh' | 'telnet') => transport === 'telnet' ? 23 : 22
 
 const formRef = ref()
 const templateForm = ref<CommandTemplate>({
@@ -385,9 +401,26 @@ const testForm = ref({
   switch_ip: '',
   switch_username: '',
   switch_password: '',
+  switch_enable_password: '',
+  switch_port: 22,
+  cli_transport: 'ssh' as 'ssh' | 'telnet',
   template_id: 0,
   test_type: 'arp' as 'arp' | 'mac'
 })
+
+watch(
+  () => testForm.value.cli_transport,
+  (newTransport, oldTransport) => {
+    const previousDefaultPort = defaultCliPort(oldTransport)
+    if (
+      testForm.value.switch_port === undefined ||
+      testForm.value.switch_port === null ||
+      testForm.value.switch_port === previousDefaultPort
+    ) {
+      testForm.value.switch_port = defaultCliPort(newTransport)
+    }
+  }
+)
 
 const testResult = ref<TestConnectionResponse | null>(null)
 
@@ -437,8 +470,16 @@ const showEditDialog = (template: CommandTemplate) => {
 
 const showTestDialog = (template: CommandTemplate) => {
   currentTestTemplate.value = template
-  testForm.value.template_id = template.id!
-  testForm.value.test_type = template.arp_enabled ? 'arp' : 'mac'
+  testForm.value = {
+    switch_ip: testForm.value.switch_ip,
+    switch_username: testForm.value.switch_username,
+    switch_password: '',
+    switch_enable_password: '',
+    switch_port: defaultCliPort(testForm.value.cli_transport),
+    cli_transport: testForm.value.cli_transport,
+    template_id: template.id!,
+    test_type: template.arp_enabled ? 'arp' : 'mac'
+  }
   testResult.value = null
   showTestDialogVisible.value = true
 }

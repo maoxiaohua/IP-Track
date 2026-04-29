@@ -123,8 +123,8 @@ const handleMoreNav = (path: string) => {
 }
 
 .el-menu-item {
-  color: #606266 !important;
-  font-weight: 500;
+  color: #374151 !important;
+  font-weight: 600;
   border-radius: 8px;
   margin: 0 4px;
   transition: all 0.3s ease;
@@ -149,8 +149,8 @@ const handleMoreNav = (path: string) => {
 
 /* Sub-menu styling */
 :deep(.el-sub-menu__title) {
-  color: #606266 !important;
-  font-weight: 500;
+  color: #374151 !important;
+  font-weight: 600;
   border-radius: 8px;
   margin: 0 4px;
   transition: all 0.3s ease;
@@ -174,7 +174,7 @@ const handleMoreNav = (path: string) => {
   height: 40px;
   border-radius: 8px;
   cursor: pointer;
-  color: #606266;
+  color: #374151;
   transition: all 0.3s ease;
   margin-left: 4px;
   flex-shrink: 0;

@@ -2,9 +2,7 @@
  * SNMP Configuration API Client
  */
 
-import axios from 'axios';
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
+import apiClient from './index';
 
 export interface SNMPConfig {
   snmp_enabled: boolean;
@@ -69,7 +67,7 @@ export interface SwitchSNMPStatus {
  * Get SNMP configuration for a switch
  */
 export async function getSNMPConfig(switchId: number): Promise<SNMPConfigResponse> {
-  const response = await axios.get(`${API_BASE_URL}/snmp/config/${switchId}`);
+  const response = await apiClient.get(`/api/v1/snmp/config/${switchId}`);
   return response.data;
 }
 
@@ -77,7 +75,7 @@ export async function getSNMPConfig(switchId: number): Promise<SNMPConfigRespons
  * Update SNMP configuration for a switch
  */
 export async function updateSNMPConfig(switchId: number, config: SNMPConfig): Promise<any> {
-  const response = await axios.put(`${API_BASE_URL}/snmp/config/${switchId}`, config);
+  const response = await apiClient.put(`/api/v1/snmp/config/${switchId}`, config);
   return response.data;
 }
 
@@ -85,7 +83,7 @@ export async function updateSNMPConfig(switchId: number, config: SNMPConfig): Pr
  * Batch update SNMP configuration for multiple switches
  */
 export async function batchUpdateSNMPConfig(switchIds: number[], config: SNMPConfig): Promise<any> {
-  const response = await axios.post(`${API_BASE_URL}/snmp/config/batch`, {
+  const response = await apiClient.post(`/api/v1/snmp/config/batch`, {
     switch_ids: switchIds,
     snmp_config: config
   });
@@ -96,7 +94,7 @@ export async function batchUpdateSNMPConfig(switchIds: number[], config: SNMPCon
  * Test SNMP connection
  */
 export async function testSNMPConnection(testConfig: SNMPTestRequest): Promise<SNMPTestResponse> {
-  const response = await axios.post(`${API_BASE_URL}/snmp/test`, testConfig);
+  const response = await apiClient.post(`/api/v1/snmp/test`, testConfig);
   return response.data;
 }
 
@@ -104,7 +102,7 @@ export async function testSNMPConnection(testConfig: SNMPTestRequest): Promise<S
  * List all switches with SNMP configuration status
  */
 export async function listSNMPConfiguredSwitches(): Promise<{ total: number; switches: SwitchSNMPStatus[] }> {
-  const response = await axios.get(`${API_BASE_URL}/snmp/switches/configured`);
+  const response = await apiClient.get(`/api/v1/snmp/switches/configured`);
   return response.data;
 }
 
@@ -112,6 +110,6 @@ export async function listSNMPConfiguredSwitches(): Promise<{ total: number; swi
  * Delete SNMP configuration from a switch
  */
 export async function deleteSNMPConfig(switchId: number): Promise<any> {
-  const response = await axios.delete(`${API_BASE_URL}/snmp/config/${switchId}`);
+  const response = await apiClient.delete(`/api/v1/snmp/config/${switchId}`);
   return response.data;
 }

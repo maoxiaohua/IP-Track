@@ -9,6 +9,7 @@ from models.port_analysis import PortAnalysis
 from models.query_history import QueryHistory
 from models.mac_cache import MACAddressCache
 from services.port_lookup_policy_service import build_lookup_eligible_clause
+from services.data_freshness_service import build_lookup_result_freshness
 from services.switch_manager import switch_manager, SwitchConnectionError
 from core.config import settings
 from utils.logger import logger
@@ -24,6 +25,27 @@ class IPLookupService:
     def __init__(self):
         # Thread pool for concurrent switch queries (configurable via environment)
         self.executor = ThreadPoolExecutor(max_workers=settings.IP_LOOKUP_WORKERS)
+
+    @staticmethod
+    def _is_usable_arp_interface(interface_name: Optional[str]) -> bool:
+        if not interface_name:
+            return False
+
+        cleaned = str(interface_name).strip()
+        if not cleaned:
+            return False
+
+        lowered = cleaned.lower()
+        if lowered in {'dyn', 'dyn[i]', 'oth', 'oth[i]', 'other', 'other[i]', 'irb-interface'}:
+            return False
+
+        if lowered.startswith(('irb', 'vlan', 'vlan.', 'loopback', 'lo', 'system', 'null', 'bridge', 'bvi', 'mgmt')):
+            return False
+
+        if '[' in cleaned and ']' in cleaned:
+            return False
+
+        return True
 
     def _query_arp_single(self, switch: Switch, target_ip: str) -> Tuple[Optional[Dict], Optional[Switch]]:
         """
@@ -212,27 +234,51 @@ class IPLookupService:
                 mac_age_seconds = int((datetime.now(timezone.utc) - mac_entry.last_seen).total_seconds())
                 data_age_seconds = max(data_age_seconds, mac_age_seconds)
                 logger.info(f"Found physical port {port_name} in MAC table on switch {switch.name} (ID: {switch.id})")
-            elif arp_interface:
-                # Fallback to ARP interface (may be L3 interface like irb99)
-                port_name = arp_interface
-                logger.info(f"Using ARP interface {port_name} (MAC table entry not found)")
             else:
-                # No port info at all
-                logger.info(f"No port information found for {mac_address}")
-                await self._log_query(
-                    db, target_ip, mac_address, None, None, None, None,
-                    "not_found", "MAC address found but port information not available",
-                    int((time.time() - start_time) * 1000)
+                same_switch_mac_result = await db.execute(
+                    select(MACTable)
+                    .where(
+                        and_(
+                            cast(MACTable.mac_address, MACADDR) == cast(mac_address, MACADDR),
+                            MACTable.switch_id == switch.id,
+                            MACTable.last_seen > datetime.now(timezone.utc) - timedelta(hours=cache_hours)
+                        )
+                    )
+                    .order_by(desc(MACTable.last_seen))
+                    .limit(1)
                 )
-                return {
-                    'found': False,
-                    'target_ip': target_ip,
-                    'mac_address': mac_address,
-                    'message': 'MAC address found but port information not available',
-                    'query_time_ms': int((time.time() - start_time) * 1000),
-                    'query_mode': 'cache',
-                    'data_age_seconds': data_age_seconds
-                }
+                same_switch_mac_entry = same_switch_mac_result.scalar_one_or_none()
+
+                if same_switch_mac_entry:
+                    port_name = same_switch_mac_entry.port_name
+                    vlan_id = same_switch_mac_entry.vlan_id or vlan_id
+                    mac_age_seconds = int((datetime.now(timezone.utc) - same_switch_mac_entry.last_seen).total_seconds())
+                    data_age_seconds = max(data_age_seconds, mac_age_seconds)
+                    logger.info(
+                        f"Found same-switch MAC port {port_name} for {target_ip} on "
+                        f"{switch.name} after lookup-policy filtering excluded other candidates"
+                    )
+                elif arp_interface and self._is_usable_arp_interface(arp_interface):
+                    # Fallback to ARP interface only when it looks like a real port.
+                    port_name = arp_interface
+                    logger.info(f"Using ARP interface {port_name} (MAC table entry not found)")
+                else:
+                    # No port info at all
+                    logger.info(f"No port information found for {mac_address}")
+                    await self._log_query(
+                        db, target_ip, mac_address, None, None, None, None,
+                        "not_found", "MAC address found but port information not available",
+                        int((time.time() - start_time) * 1000)
+                    )
+                    return {
+                        'found': False,
+                        'target_ip': target_ip,
+                        'mac_address': mac_address,
+                        'message': 'MAC address found but port information not available',
+                        'query_time_ms': int((time.time() - start_time) * 1000),
+                        'query_mode': 'cache',
+                        'data_age_seconds': data_age_seconds
+                    }
 
             # Step 3: Update MAC cache
             if port_name:
@@ -250,6 +296,11 @@ class IPLookupService:
             )
 
             logger.info(f"Successfully located IP {target_ip} on switch {switch.name} port {port_name} (from cache, {data_age_seconds}s old)")
+            freshness = build_lookup_result_freshness(
+                switch,
+                data_age_seconds=data_age_seconds,
+                last_seen_at=arp_entry.last_seen
+            )
 
             return {
                 'found': True,
@@ -264,7 +315,8 @@ class IPLookupService:
                 'query_mode': 'cache',
                 'data_age_seconds': data_age_seconds,
                 'last_seen': arp_entry.last_seen.isoformat(),
-                'message': f'Device located from cached data (data age: {data_age_seconds}s)'
+                'message': f'Device located from cached data (data age: {data_age_seconds}s)',
+                'freshness': freshness
             }
 
         except Exception as e:

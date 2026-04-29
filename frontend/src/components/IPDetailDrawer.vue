@@ -1,9 +1,11 @@
 <template>
   <el-drawer
     v-model="visible"
-    title="IP Address Details"
+    :title="drawerTitle"
     size="600px"
     direction="rtl"
+    append-to-body
+    destroy-on-close
     :before-close="handleClose"
   >
     <div v-loading="loading" class="ip-detail-drawer">
@@ -20,7 +22,7 @@
 
         <el-descriptions :column="1" border>
           <el-descriptions-item label="IP Address">
-            <span style="font-family: monospace; font-weight: 600; font-size: 16px">
+            <span class="ip-address-value">
               {{ ipDetail.ip_address }}
             </span>
           </el-descriptions-item>
@@ -39,13 +41,44 @@
             {{ ipDetail.mac_address || '-' }}
           </el-descriptions-item>
           <el-descriptions-item label="Hostname">
-            {{ ipDetail.hostname || ipDetail.dns_name || ipDetail.system_name || '-' }}
+            <div class="identity-block">
+              <div class="identity-main">
+                <span>{{ getDisplayHostname(ipDetail) || '-' }}</span>
+                <el-tag
+                  v-if="ipDetail.hostname_source"
+                  size="small"
+                  :type="getHostnameSourceTagType(ipDetail.hostname_source)"
+                >
+                  {{ getHostnameSourceLabel(ipDetail.hostname_source) }}
+                </el-tag>
+              </div>
+              <div v-if="getIdentityHint(ipDetail)" class="identity-hint">
+                {{ getIdentityHint(ipDetail) }}
+              </div>
+            </div>
           </el-descriptions-item>
           <el-descriptions-item label="Response Time">
-            {{ ipDetail.response_time ? `${ipDetail.response_time} ms` : '-' }}
+            {{ ipDetail.response_time != null ? `${ipDetail.response_time} ms` : '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="Last Verified">
+            <div class="identity-block">
+              <div class="identity-main">
+                <span>{{ ipDetail.last_scan_at ? formatDateTime(ipDetail.last_scan_at) : '-' }}</span>
+                <el-tag
+                  v-if="ipDetail.last_scan_at"
+                  size="small"
+                  :type="getFreshnessTagType(ipDetail.last_scan_at)"
+                >
+                  {{ getFreshnessText(ipDetail.last_scan_at) }}
+                </el-tag>
+              </div>
+            </div>
           </el-descriptions-item>
           <el-descriptions-item label="Last Seen">
             {{ ipDetail.last_seen_at ? formatDateTime(ipDetail.last_seen_at) : 'Never' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="Description">
+            {{ ipDetail.description || '-' }}
           </el-descriptions-item>
         </el-descriptions>
       </el-card>
@@ -79,6 +112,9 @@
             <el-descriptions-item label="VLAN">
               {{ ipDetail.vlan_id || '-' }}
             </el-descriptions-item>
+            <el-descriptions-item label="Location">
+              {{ ipDetail.location || '-' }}
+            </el-descriptions-item>
           </el-descriptions>
         </el-collapse-item>
 
@@ -94,11 +130,20 @@
             <el-descriptions-item label="System Name">
               {{ ipDetail.system_name || '-' }}
             </el-descriptions-item>
+            <el-descriptions-item label="DNS Name">
+              {{ ipDetail.dns_name || '-' }}
+            </el-descriptions-item>
             <el-descriptions-item label="Machine Type">
               {{ ipDetail.machine_type || '-' }}
             </el-descriptions-item>
             <el-descriptions-item label="Vendor">
               {{ ipDetail.vendor || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="Hostname Source">
+              {{ ipDetail.hostname_source || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="Contact">
+              {{ ipDetail.contact || '-' }}
             </el-descriptions-item>
             <el-descriptions-item label="OS Type">
               <el-tag v-if="ipDetail.os_type" :type="getOsTagType(ipDetail.os_type)">
@@ -147,7 +192,7 @@
                       <span style="margin-left: 4px">
                         {{ record.is_reachable ? 'Online' : 'Offline' }}
                       </span>
-                      <span v-if="record.response_time" style="margin-left: 8px; color: #909399">
+                      <span v-if="record.response_time != null" style="margin-left: 8px; color: #909399">
                         {{ record.response_time }}ms
                       </span>
                     </div>
@@ -195,13 +240,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
+import {
+  CircleCheckFilled,
+  CircleCloseFilled,
+  Clock,
+  Connection,
+  Monitor
+} from '@element-plus/icons-vue'
 import { ipamApi } from '@/api/ipam'
 import type { IPAddressDetail, IPScanHistory } from '@/api/ipam'
 
 interface Props {
   modelValue: boolean
   ipId: number | null
+  refreshKey?: number
 }
 
 const props = defineProps<Props>()
@@ -209,56 +262,182 @@ const emit = defineEmits<{
   'update:modelValue': [value: boolean]
 }>()
 
-const visible = ref(false)
+const visible = computed({
+  get: () => props.modelValue,
+  set: (value: boolean) => emit('update:modelValue', value)
+})
 const loading = ref(false)
 const historyLoading = ref(false)
 const ipDetail = ref<IPAddressDetail>({} as IPAddressDetail)
 const scanHistory = ref<IPScanHistory[]>([])
 const activeCollapse = ref<string[]>(['location'])
+let detailRequestSeq = 0
+let historyRequestSeq = 0
 
-watch(() => props.modelValue, (val) => {
-  visible.value = val
-  if (val && props.ipId) {
-    loadIPDetail()
-    loadScanHistory()
+const drawerTitle = computed(() => {
+  if (ipDetail.value?.ip_address) {
+    return `IP Address Details · ${ipDetail.value.ip_address}`
   }
+  return 'IP Address Details'
 })
 
-watch(visible, (val) => {
-  emit('update:modelValue', val)
+const resetDrawerState = () => {
+  ipDetail.value = {} as IPAddressDetail
+  scanHistory.value = []
+  activeCollapse.value = ['location']
+}
+
+watch(
+  [() => props.modelValue, () => props.ipId, () => props.refreshKey],
+  ([isOpen, ipId], previousValues) => {
+    const [prevOpen, prevIpId, prevRefreshKey] = previousValues ?? []
+
+    if (!isOpen) {
+      loading.value = false
+      historyLoading.value = false
+      detailRequestSeq += 1
+      historyRequestSeq += 1
+      resetDrawerState()
+      return
+    }
+
+    if (!ipId) {
+      resetDrawerState()
+      return
+    }
+
+    const shouldReload =
+      !prevOpen ||
+      ipId !== prevIpId ||
+      props.refreshKey !== prevRefreshKey
+
+    if (shouldReload) {
+      loadIPDetail()
+      loadScanHistory()
+    }
+  },
+  { immediate: true }
+)
+
+watch(() => props.modelValue, (val) => {
+  if (!val) {
+    resetDrawerState()
+  }
 })
 
 const loadIPDetail = async () => {
   if (!props.ipId) return
+  const requestSeq = ++detailRequestSeq
   loading.value = true
+  ipDetail.value = {} as IPAddressDetail
   try {
-    ipDetail.value = await ipamApi.getIPAddress(props.ipId)
+    const detail = await ipamApi.getIPAddress(props.ipId)
+    if (requestSeq !== detailRequestSeq) return
+    ipDetail.value = detail
   } catch (error) {
     console.error('Failed to load IP details:', error)
   } finally {
-    loading.value = false
+    if (requestSeq === detailRequestSeq) {
+      loading.value = false
+    }
   }
 }
 
 const loadScanHistory = async () => {
   if (!props.ipId) return
+  const requestSeq = ++historyRequestSeq
   historyLoading.value = true
+  scanHistory.value = []
   try {
-    scanHistory.value = await ipamApi.getIPScanHistory(props.ipId)
+    const history = await ipamApi.getIPScanHistory(props.ipId)
+    if (requestSeq !== historyRequestSeq) return
+    scanHistory.value = history
   } catch (error) {
     console.error('Failed to load scan history:', error)
   } finally {
-    historyLoading.value = false
+    if (requestSeq === historyRequestSeq) {
+      historyLoading.value = false
+    }
   }
 }
 
-const handleClose = () => {
-  visible.value = false
+const handleClose = (done?: () => void) => {
+  emit('update:modelValue', false)
+  done?.()
 }
 
 const formatDateTime = (dateString: string) => {
   const date = new Date(dateString)
-  return date.toLocaleString()
+  return date.toLocaleString('zh-CN')
+}
+
+const getDisplayHostname = (detail: Partial<IPAddressDetail>) => {
+  return detail.hostname || detail.dns_name || detail.system_name || ''
+}
+
+const getHostnameSourceLabel = (source?: string) => {
+  const labels: Record<string, string> = {
+    SNMP: 'SNMP',
+    DNS: 'DNS PTR',
+    NETBIOS: 'NetBIOS',
+    ARP: 'ARP',
+    SWITCH: 'Switch Cache',
+    MANUAL: 'Manual'
+  }
+  return labels[source || ''] || source || ''
+}
+
+const getHostnameSourceTagType = (source?: string) => {
+  const types: Record<string, any> = {
+    SNMP: 'warning',
+    DNS: 'success',
+    NETBIOS: 'primary',
+    ARP: 'info',
+    SWITCH: '',
+    MANUAL: 'danger'
+  }
+  return types[source || ''] || 'info'
+}
+
+const getIdentityHint = (detail: Partial<IPAddressDetail>) => {
+  if (detail.hostname_source === 'DNS' && detail.dns_name && detail.hostname && detail.dns_name !== detail.hostname) {
+    return `Full DNS: ${detail.dns_name}`
+  }
+
+  if (!getDisplayHostname(detail) && detail.is_reachable && detail.os_type === 'windows') {
+    return 'Latest scan reached this Windows host, but neither DNS PTR nor NetBIOS returned a hostname.'
+  }
+
+  if (!getDisplayHostname(detail) && detail.is_reachable) {
+    return 'Host is reachable, but the latest scan did not obtain a resolvable device name.'
+  }
+
+  if (!getDisplayHostname(detail) && detail.last_seen_at) {
+    return 'Historical reachability exists, but no hostname source has been confirmed yet.'
+  }
+
+  return ''
+}
+
+const getFreshnessText = (dateString: string) => {
+  const diffMs = Date.now() - new Date(dateString).getTime()
+  const diffMinutes = Math.floor(diffMs / 60000)
+  const diffHours = Math.floor(diffMs / 3600000)
+
+  if (diffMinutes < 10) return 'Fresh'
+  if (diffHours < 6) return 'Recent'
+  if (diffHours < 24) return 'Today'
+  return 'Stale'
+}
+
+const getFreshnessTagType = (dateString: string) => {
+  const diffMs = Date.now() - new Date(dateString).getTime()
+  const diffHours = Math.floor(diffMs / 3600000)
+
+  if (diffHours < 1) return 'success'
+  if (diffHours < 6) return 'primary'
+  if (diffHours < 24) return 'warning'
+  return 'danger'
 }
 
 const getStatusType = (status: string) => {
@@ -347,6 +526,35 @@ const hasChanges = (record: IPScanHistory) => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.identity-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.identity-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.identity-hint {
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ip-address-value {
+  font-family: 'SFMono-Regular', 'Cascadia Code', 'Consolas', 'Liberation Mono',
+    'Courier New', monospace;
+  font-size: 16px;
+  font-weight: 700;
+  color: #1e40af;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
 }
 
 :deep(.el-descriptions__label) {

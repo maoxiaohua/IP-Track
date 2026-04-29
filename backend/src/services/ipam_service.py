@@ -1,22 +1,52 @@
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any, Callable, Awaitable
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_, cast, Text, String, Integer
+from sqlalchemy import select, func, and_, or_, cast, Text, String, Integer, delete
 from models.ipam import IPSubnet, IPAddress, IPScanHistory, IPStatus
 from models.switch import Switch
+from models.arp_table import ARPTable
 from models.mac_table import MACTable
 from models.port_analysis import PortAnalysis
 from services.ip_scan import ip_scan_service
 from services.ip_lookup import ip_lookup_service
 from services.port_lookup_policy_service import build_lookup_eligible_clause
 from core.config import settings
+from core.database import AsyncSessionLocal
 from utils.logger import logger
 import ipaddress
 from datetime import datetime, timedelta, timezone
 import asyncio
+import ctypes
+import gc
 
 
 class IPAMService:
     """Service for IP Address Management"""
+
+    _libc = None
+
+    @classmethod
+    def _malloc_trim(cls) -> bool:
+        """Ask glibc to return free heap pages to the OS when available."""
+        try:
+            if cls._libc is None:
+                cls._libc = ctypes.CDLL("libc.so.6")
+            return bool(cls._libc.malloc_trim(0))
+        except Exception:
+            return False
+
+    def _release_scan_memory(self, context: str) -> None:
+        """
+        Reclaim short-lived scan allocations so long IPAM passes do not keep
+        pushing RSS upward just because the allocator holds onto free arenas.
+        """
+        collected = gc.collect()
+        trimmed = self._malloc_trim()
+
+        if collected or trimmed:
+            logger.debug(
+                f"Released scan memory after {context}: "
+                f"gc_collected={collected}, malloc_trim={trimmed}"
+            )
 
     def _ip_address_order_by(self):
         """Return numeric IPv4 ordering expressions for subnet detail listings."""
@@ -27,6 +57,210 @@ class IPAMService:
             cast(func.split_part(ip_text, '.', 3), Integer),
             cast(func.split_part(ip_text, '.', 4), Integer),
         ]
+
+    @staticmethod
+    def _normalize_mac(mac_address: Optional[str]) -> Optional[str]:
+        if not mac_address:
+            return None
+        return str(mac_address).lower()
+
+    @staticmethod
+    def _is_usable_arp_interface(interface_name: Optional[str]) -> bool:
+        """
+        ARP interfaces are sometimes logical placeholders rather than real ports.
+
+        Examples seen on some 7250 IXR-e2 devices:
+        - Dyn[I]
+        - Oth[I]
+        - Oth
+        """
+        if not interface_name:
+            return False
+
+        cleaned = str(interface_name).strip()
+        if not cleaned:
+            return False
+
+        lowered = cleaned.lower()
+        placeholder_values = {
+            'dyn',
+            'dyn[i]',
+            'oth',
+            'oth[i]',
+            'other',
+            'other[i]',
+            'irb-interface',
+        }
+        if lowered in placeholder_values:
+            return False
+
+        non_physical_prefixes = (
+            'irb',
+            'vlan',
+            'vlan.',
+            'loopback',
+            'lo',
+            'system',
+            'null',
+            'bridge',
+            'bvi',
+            'mgmt',
+        )
+        if lowered.startswith(non_physical_prefixes):
+            return False
+
+        if '[' in cleaned and ']' in cleaned:
+            return False
+
+        return True
+
+    async def get_live_location_overlays(
+        self,
+        db: AsyncSession,
+        ip_addresses: List[IPAddress]
+    ) -> Dict[int, Dict[str, Optional[str]]]:
+        """
+        Build best-effort switch/port overlays from the live ARP/MAC cache tables.
+
+        This is used as a read-time fallback when the denormalized IPAM fields have
+        not yet been refreshed by a subnet scan.
+        """
+        if not ip_addresses:
+            return {}
+
+        ip_by_string = {str(ip_addr.ip_address): ip_addr for ip_addr in ip_addresses}
+        ip_strings = list(ip_by_string.keys())
+
+        arp_rows = await db.execute(
+            select(
+                func.host(ARPTable.ip_address).label('ip_address'),
+                cast(ARPTable.mac_address, String).label('mac_address'),
+                ARPTable.switch_id.label('switch_id'),
+                Switch.name.label('switch_name'),
+                ARPTable.interface.label('switch_port'),
+                ARPTable.vlan_id.label('vlan_id')
+            )
+            .join(Switch, ARPTable.switch_id == Switch.id)
+            .where(func.host(ARPTable.ip_address).in_(ip_strings))
+            .order_by(func.host(ARPTable.ip_address), ARPTable.last_seen.desc())
+        )
+
+        latest_arp_by_ip: Dict[str, Dict[str, Optional[str]]] = {}
+        for row in arp_rows.mappings():
+            ip_string = row['ip_address']
+            if ip_string not in latest_arp_by_ip:
+                latest_arp_by_ip[ip_string] = dict(row)
+
+        macs = set()
+        for ip_addr in ip_addresses:
+            stored_mac = self._normalize_mac(str(ip_addr.mac_address)) if ip_addr.mac_address else None
+            arp_mac = self._normalize_mac(latest_arp_by_ip.get(str(ip_addr.ip_address), {}).get('mac_address'))
+            if stored_mac:
+                macs.add(stored_mac)
+            if arp_mac:
+                macs.add(arp_mac)
+
+        latest_mac_by_mac: Dict[str, Dict[str, Optional[str]]] = {}
+        if macs:
+            mac_rows = await db.execute(
+                select(
+                    cast(MACTable.mac_address, String).label('mac_address'),
+                    MACTable.switch_id.label('switch_id'),
+                    Switch.name.label('switch_name'),
+                    MACTable.port_name.label('switch_port'),
+                    MACTable.vlan_id.label('vlan_id')
+                )
+                .join(Switch, MACTable.switch_id == Switch.id)
+                .outerjoin(
+                    PortAnalysis,
+                    and_(
+                        PortAnalysis.switch_id == MACTable.switch_id,
+                        PortAnalysis.port_name == MACTable.port_name
+                    )
+                )
+                .where(func.lower(cast(MACTable.mac_address, String)).in_(list(macs)))
+                .where(build_lookup_eligible_clause(PortAnalysis))
+                .order_by(func.lower(cast(MACTable.mac_address, String)), MACTable.last_seen.desc())
+            )
+
+            for row in mac_rows.mappings():
+                mac_key = self._normalize_mac(row['mac_address'])
+                if mac_key and mac_key not in latest_mac_by_mac:
+                    latest_mac_by_mac[mac_key] = dict(row)
+
+        same_switch_mac_by_pair: Dict[tuple[int, str], Dict[str, Optional[str]]] = {}
+        preferred_switch_ids = {
+            int(arp_row['switch_id'])
+            for arp_row in latest_arp_by_ip.values()
+            if arp_row.get('switch_id') is not None
+        }
+        if macs and preferred_switch_ids:
+            same_switch_rows = await db.execute(
+                select(
+                    cast(MACTable.mac_address, String).label('mac_address'),
+                    MACTable.switch_id.label('switch_id'),
+                    Switch.name.label('switch_name'),
+                    MACTable.port_name.label('switch_port'),
+                    MACTable.vlan_id.label('vlan_id')
+                )
+                .join(Switch, MACTable.switch_id == Switch.id)
+                .where(MACTable.switch_id.in_(list(preferred_switch_ids)))
+                .where(func.lower(cast(MACTable.mac_address, String)).in_(list(macs)))
+                .order_by(MACTable.switch_id, func.lower(cast(MACTable.mac_address, String)), MACTable.last_seen.desc())
+            )
+
+            for row in same_switch_rows.mappings():
+                mac_key = self._normalize_mac(row['mac_address'])
+                switch_id = row['switch_id']
+                if mac_key is None or switch_id is None:
+                    continue
+                pair_key = (int(switch_id), mac_key)
+                if pair_key not in same_switch_mac_by_pair:
+                    same_switch_mac_by_pair[pair_key] = dict(row)
+
+        overlays: Dict[int, Dict[str, Optional[str]]] = {}
+        for ip_string, ip_addr in ip_by_string.items():
+            arp_overlay = latest_arp_by_ip.get(ip_string)
+            stored_mac = self._normalize_mac(str(ip_addr.mac_address)) if ip_addr.mac_address else None
+            arp_mac = self._normalize_mac(arp_overlay.get('mac_address')) if arp_overlay else None
+            effective_mac = stored_mac or arp_mac
+            mac_overlay = latest_mac_by_mac.get(effective_mac) if effective_mac else None
+            same_switch_mac_overlay = None
+            if arp_overlay and effective_mac and arp_overlay.get('switch_id') is not None:
+                same_switch_mac_overlay = same_switch_mac_by_pair.get((int(arp_overlay['switch_id']), effective_mac))
+            arp_port = arp_overlay.get('switch_port') if arp_overlay else None
+            usable_arp_port = arp_port if self._is_usable_arp_interface(arp_port) else None
+
+            if mac_overlay or arp_overlay or effective_mac:
+                overlays[ip_addr.id] = {
+                    'mac_address': effective_mac,
+                    'switch_id': (
+                        mac_overlay.get('switch_id') if mac_overlay
+                        else same_switch_mac_overlay.get('switch_id') if same_switch_mac_overlay
+                        else arp_overlay.get('switch_id') if arp_overlay
+                        else None
+                    ),
+                    'switch_name': (
+                        mac_overlay.get('switch_name') if mac_overlay
+                        else same_switch_mac_overlay.get('switch_name') if same_switch_mac_overlay
+                        else arp_overlay.get('switch_name') if arp_overlay
+                        else None
+                    ),
+                    'switch_port': (
+                        mac_overlay.get('switch_port') if mac_overlay
+                        else same_switch_mac_overlay.get('switch_port') if same_switch_mac_overlay
+                        else usable_arp_port
+                    ),
+                    'vlan_id': (
+                        mac_overlay.get('vlan_id') if mac_overlay else None
+                    ) or (
+                        same_switch_mac_overlay.get('vlan_id') if same_switch_mac_overlay else None
+                    ) or (
+                        arp_overlay.get('vlan_id') if arp_overlay else None
+                    )
+                }
+
+        return overlays
 
     async def create_subnet(
         self,
@@ -246,8 +480,13 @@ class IPAMService:
         if search:
             conditions.append(
                 or_(
-                    IPAddress.ip_address.cast(str).contains(search),
+                    cast(IPAddress.ip_address, String).contains(search),
                     IPAddress.hostname.ilike(f'%{search}%'),
+                    IPAddress.dns_name.ilike(f'%{search}%'),
+                    IPAddress.system_name.ilike(f'%{search}%'),
+                    IPAddress.machine_type.ilike(f'%{search}%'),
+                    IPAddress.vendor.ilike(f'%{search}%'),
+                    cast(IPAddress.mac_address, String).ilike(f'%{search}%'),
                     IPAddress.description.ilike(f'%{search}%')
                 )
             )
@@ -298,19 +537,56 @@ class IPAMService:
         await db.refresh(ip_addr)
         return ip_addr
 
+    @staticmethod
+    def _snapshot_ip_state(ip_addr: IPAddress) -> Dict[str, Any]:
+        return {
+            'is_reachable': ip_addr.is_reachable,
+            'hostname': ip_addr.hostname,
+            'os_name': ip_addr.os_name,
+            'mac_address': str(ip_addr.mac_address) if ip_addr.mac_address else None,
+            'switch_id': ip_addr.switch_id,
+            'switch_port': ip_addr.switch_port,
+            'last_seen_at': ip_addr.last_seen_at,
+        }
+
+    @staticmethod
+    def _merge_scan_results(base_result: Dict[str, Any], override_result: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(base_result)
+        for key, value in override_result.items():
+            if key in {'ip_address', 'is_reachable'}:
+                merged[key] = value
+            elif value is not None:
+                merged[key] = value
+
+        if merged.get('response_time') is None:
+            merged['response_time'] = base_result.get('response_time')
+
+        return merged
+
     async def scan_subnet(
         self,
         db: AsyncSession,
         subnet_id: int,
-        scan_type: str = "full"
+        scan_type: str = "full",
+        include_results: bool = True,
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None] | None]] = None,
+        subnet_index: int = 1,
+        total_subnets: int = 1
     ) -> Dict:
         """
-        Scan all IPs in a subnet with integrated Ping+DNS+SNMP workflow
+        Scan all IPs in a subnet using a fast reachability pass followed by
+        optional enrichment for the hosts that replied.
         """
         logger.info(f"Starting subnet scan: {subnet_id} (type: {scan_type})")
         start_time = datetime.now(timezone.utc)
 
         try:
+            async def emit_progress(event_type: str, payload: Dict[str, Any]) -> None:
+                if not progress_callback:
+                    return
+                maybe_awaitable = progress_callback(event_type, payload)
+                if asyncio.iscoroutine(maybe_awaitable):
+                    await maybe_awaitable
 
             # Get subnet
             subnet = await self.get_subnet(db, subnet_id)
@@ -343,6 +619,14 @@ class IPAMService:
                 select(IPAddress).where(IPAddress.subnet_id == subnet_id)
             )
             ip_addresses = result.scalars().all()
+            ip_records_by_str = {
+                str(ip.ip_address): ip
+                for ip in ip_addresses
+            }
+            previous_state = {
+                ip_addr.id: self._snapshot_ip_state(ip_addr)
+                for ip_addr in ip_addresses
+            }
 
             # Parse DNS servers from subnet configuration
             dns_servers = None
@@ -351,42 +635,152 @@ class IPAMService:
                 dns_servers = [s.strip() for s in subnet.dns_servers.split(',') if s.strip()]
                 logger.info(f"Using DNS servers for subnet {subnet_id}: {dns_servers}")
 
-            # Scan all IPs with SNMP profile (if configured) and DNS servers
+            # Close the read transaction before the long-running network scan begins.
+            await db.commit()
+
             ip_list = [str(ip.ip_address) for ip in ip_addresses]
-            scan_results = await ip_scan_service.scan_multiple_ips(
-                ip_list,
-                scan_type,
-                snmp_profile,  # Pass SNMP profile to scanning service
-                dns_servers    # Pass DNS servers for PTR lookups
+            await emit_progress(
+                'subnet_start',
+                {
+                    'subnet_id': subnet_id,
+                    'subnet_name': subnet.name,
+                    'subnet_network': str(subnet.network),
+                    'total_ips': len(ip_list),
+                    'subnet_index': subnet_index,
+                    'total_subnets': total_subnets,
+                }
             )
 
-            # Update database
-            new_devices = 0
-            changed_devices = 0
+            quick_reachable = 0
 
-            for scan_result in scan_results:
-                ip_str = scan_result['ip_address']
+            async def on_quick_progress(scan_result: Dict[str, Any], completed: int, total: int) -> None:
+                nonlocal quick_reachable
+                if scan_result.get('is_reachable'):
+                    quick_reachable += 1
 
-                # Find IP address record
-                ip_addr = next((ip for ip in ip_addresses if str(ip.ip_address) == ip_str), None)
+                await emit_progress(
+                    'quick_progress',
+                    {
+                        'subnet_id': subnet_id,
+                        'completed_ips': completed,
+                        'total_ips': total,
+                        'reachable_ips': quick_reachable,
+                    }
+                )
+
+            quick_results = await ip_scan_service.scan_multiple_ips(
+                ip_list,
+                "quick",
+                None,
+                None,
+                progress_callback=on_quick_progress
+            )
+            quick_results_by_ip = {
+                scan_result['ip_address']: scan_result
+                for scan_result in quick_results
+            }
+            final_results_by_ip = {
+                ip: dict(scan_result)
+                for ip, scan_result in quick_results_by_ip.items()
+            }
+            quick_finished_at = datetime.now(timezone.utc)
+
+            for ip_str, scan_result in quick_results_by_ip.items():
+                ip_addr = ip_records_by_str.get(ip_str)
                 if not ip_addr:
                     continue
 
-                # Detect changes
-                status_changed = ip_addr.is_reachable != scan_result['is_reachable']
-                hostname_changed = ip_addr.hostname != scan_result['hostname']
-                os_changed = ip_addr.os_name != scan_result['os_name']
+                ip_addr.is_reachable = scan_result['is_reachable']
+                ip_addr.response_time = scan_result['response_time']
+                ip_addr.last_scan_at = quick_finished_at
+                ip_addr.scan_count += 1
 
-                # Store old values for change detection
-                old_mac = str(ip_addr.mac_address) if ip_addr.mac_address else None
-                old_switch_id = ip_addr.switch_id
-                old_switch_port = ip_addr.switch_port
+                if scan_result['is_reachable']:
+                    ip_addr.last_seen_at = quick_finished_at
+                    if ip_addr.status in [IPStatus.AVAILABLE.value, IPStatus.OFFLINE.value]:
+                        ip_addr.status = IPStatus.USED.value
+                else:
+                    if ip_addr.last_seen_at:
+                        time_since_last_seen = quick_finished_at - ip_addr.last_seen_at
+                        offline_threshold_hours = settings.IPAM_OFFLINE_THRESHOLD_HOURS
 
-                if scan_result['is_reachable'] and not ip_addr.last_seen_at:
+                        if time_since_last_seen.total_seconds() > offline_threshold_hours * 3600:
+                            if ip_addr.status == IPStatus.USED.value:
+                                ip_addr.status = IPStatus.OFFLINE.value
+                                logger.info(
+                                    f"Marking {ip_str} as OFFLINE "
+                                    f"(not seen for {time_since_last_seen.total_seconds()/3600:.1f} hours)"
+                                )
+
+            subnet.last_scan_at = quick_finished_at
+            await db.commit()
+
+            reachable_ip_list = [
+                scan_result['ip_address']
+                for scan_result in quick_results
+                if scan_result.get('is_reachable')
+            ]
+
+            await emit_progress(
+                'quick_complete',
+                {
+                    'subnet_id': subnet_id,
+                    'subnet_last_scan_at': quick_finished_at.isoformat(),
+                    'total_ips_scanned': len(quick_results),
+                    'reachable_ips': len(reachable_ip_list),
+                    'unreachable_ips': len(quick_results) - len(reachable_ip_list),
+                }
+            )
+
+            if scan_type != "quick" and reachable_ip_list:
+                async def on_enrichment_progress(scan_result: Dict[str, Any], completed: int, total: int) -> None:
+                    await emit_progress(
+                        'enrichment_progress',
+                        {
+                            'subnet_id': subnet_id,
+                            'completed_hosts': completed,
+                            'total_hosts': total,
+                            'reachable_ips': len(reachable_ip_list),
+                            'subnet_last_scan_at': quick_finished_at.isoformat(),
+                        }
+                    )
+
+                enrichment_results = await ip_scan_service.enrich_multiple_ips(
+                    reachable_ip_list,
+                    snmp_profile,
+                    dns_servers,
+                    progress_callback=on_enrichment_progress
+                )
+
+                for enrichment_result in enrichment_results:
+                    ip_str = enrichment_result['ip_address']
+                    base_result = final_results_by_ip.get(ip_str)
+                    if base_result:
+                        final_results_by_ip[ip_str] = self._merge_scan_results(base_result, enrichment_result)
+                    else:
+                        final_results_by_ip[ip_str] = enrichment_result
+
+            new_devices = 0
+            changed_devices = 0
+            ordered_scan_results = []
+
+            for ip_str in ip_list:
+                scan_result = final_results_by_ip.get(ip_str)
+                if not scan_result:
+                    continue
+
+                # Find IP address record
+                ip_addr = ip_records_by_str.get(ip_str)
+                if not ip_addr:
+                    continue
+                ordered_scan_results.append(scan_result)
+                old_state = previous_state[ip_addr.id]
+
+                # Detect reachability changes against the pre-scan snapshot.
+                status_changed = old_state['is_reachable'] != scan_result['is_reachable']
+
+                if scan_result['is_reachable'] and not old_state['last_seen_at']:
                     new_devices += 1
-
-                if status_changed or hostname_changed or os_changed:
-                    changed_devices += 1
 
                 # Try to find MAC address
                 # First, try with MAC from scan result
@@ -400,7 +794,7 @@ class IPAMService:
                     # Try ARP table first
                     arp_result = await db.execute(
                         select(ARPTable)
-                        .where(cast(ARPTable.ip_address, Text) == ip_str)
+                        .where(func.host(ARPTable.ip_address) == ip_str)
                         .order_by(ARPTable.last_seen.desc())
                         .limit(1)
                     )
@@ -409,21 +803,25 @@ class IPAMService:
                         mac_to_lookup = str(arp_entry.mac_address)
                         logger.info(f"Found MAC for {ip_str} from ARP table: {mac_to_lookup}")
 
-                # Update basic IP address fields
-                ip_addr.is_reachable = scan_result['is_reachable']
-                ip_addr.response_time = scan_result['response_time']
-
                 # Update hostname with source tracking (SolarWinds-style)
-                ip_addr.hostname = scan_result.get('hostname')
-                ip_addr.hostname_source = scan_result.get('hostname_source')  # SNMP, DNS, ARP, or None
+                if scan_result.get('hostname') is not None:
+                    ip_addr.hostname = scan_result.get('hostname')
+                if scan_result.get('hostname_source') is not None:
+                    ip_addr.hostname_source = scan_result.get('hostname_source')  # SNMP, DNS, ARP, or None
 
                 # Update SolarWinds-style SNMP/DNS fields
-                ip_addr.dns_name = scan_result.get('dns_name')  # DNS PTR result
-                ip_addr.system_name = scan_result.get('system_name')  # SNMP sysName
-                ip_addr.contact = scan_result.get('contact')  # SNMP sysContact
-                ip_addr.location = scan_result.get('location')  # SNMP sysLocation
-                ip_addr.machine_type = scan_result.get('machine_type')  # SNMP sysDescr parsed
-                ip_addr.vendor = scan_result.get('vendor')  # SNMP vendor parsed
+                if scan_result.get('dns_name') is not None:
+                    ip_addr.dns_name = scan_result.get('dns_name')  # DNS PTR result
+                if scan_result.get('system_name') is not None:
+                    ip_addr.system_name = scan_result.get('system_name')  # SNMP sysName
+                if scan_result.get('contact') is not None:
+                    ip_addr.contact = scan_result.get('contact')  # SNMP sysContact
+                if scan_result.get('location') is not None:
+                    ip_addr.location = scan_result.get('location')  # SNMP sysLocation
+                if scan_result.get('machine_type') is not None:
+                    ip_addr.machine_type = scan_result.get('machine_type')  # SNMP sysDescr parsed
+                if scan_result.get('vendor') is not None:
+                    ip_addr.vendor = scan_result.get('vendor')  # SNMP vendor parsed
 
                 # Update last_boot_time from SNMP sysUpTime
                 if scan_result.get('last_boot_time'):
@@ -442,34 +840,14 @@ class IPAMService:
                     mac_to_lookup = str(ip_addr.mac_address)
                     logger.info(f"Using existing MAC for {ip_str}: {mac_to_lookup}")
 
-                ip_addr.os_type = scan_result['os_type']
-                ip_addr.os_name = scan_result['os_name']
-                ip_addr.os_version = scan_result['os_version']
-                ip_addr.os_vendor = scan_result['os_vendor']
-                ip_addr.last_scan_at = datetime.now(timezone.utc)
-                ip_addr.scan_count += 1
-
-                # Intelligent status update logic
-                if scan_result['is_reachable']:
-                    # IP is reachable now
-                    ip_addr.last_seen_at = datetime.now(timezone.utc)
-
-                    # If status is AVAILABLE or OFFLINE, mark as USED
-                    if ip_addr.status in [IPStatus.AVAILABLE.value, IPStatus.OFFLINE.value]:
-                        ip_addr.status = IPStatus.USED.value
-                else:
-                    # IP is NOT reachable
-                    # Only mark as OFFLINE if it hasn't been seen for a long time
-                    # This prevents temporary network issues from marking IPs as offline
-                    if ip_addr.last_seen_at:
-                        time_since_last_seen = datetime.now(timezone.utc) - ip_addr.last_seen_at
-                        offline_threshold_hours = settings.IPAM_OFFLINE_THRESHOLD_HOURS
-
-                        if time_since_last_seen.total_seconds() > offline_threshold_hours * 3600:
-                            # Mark as OFFLINE only if USED (don't change RESERVED or AVAILABLE)
-                            if ip_addr.status == IPStatus.USED.value:
-                                ip_addr.status = IPStatus.OFFLINE.value
-                                logger.info(f"Marking {ip_str} as OFFLINE (not seen for {time_since_last_seen.total_seconds()/3600:.1f} hours)")
+                if scan_result.get('os_type') is not None:
+                    ip_addr.os_type = scan_result['os_type']
+                if scan_result.get('os_name') is not None:
+                    ip_addr.os_name = scan_result['os_name']
+                if scan_result.get('os_version') is not None:
+                    ip_addr.os_version = scan_result['os_version']
+                if scan_result.get('os_vendor') is not None:
+                    ip_addr.os_vendor = scan_result['os_vendor']
 
                 # Try to get hostname from switches table if we don't have one
                 if not ip_addr.hostname:
@@ -493,12 +871,12 @@ class IPAMService:
 
                 # Detect network location changes
                 new_mac = str(ip_addr.mac_address) if ip_addr.mac_address else None
-                mac_changed = old_mac != new_mac
-                switch_changed = old_switch_id != ip_addr.switch_id
-                port_changed = old_switch_port != ip_addr.switch_port
-
-                # Update changed_devices count if location changed
-                if mac_changed or switch_changed or port_changed:
+                hostname_changed = old_state['hostname'] != ip_addr.hostname
+                os_changed = old_state['os_name'] != ip_addr.os_name
+                mac_changed = old_state['mac_address'] != new_mac
+                switch_changed = old_state['switch_id'] != ip_addr.switch_id
+                port_changed = old_state['switch_port'] != ip_addr.switch_port
+                if status_changed or hostname_changed or os_changed or mac_changed or switch_changed or port_changed:
                     changed_devices += 1
 
                 # Create history record with network location tracking
@@ -506,10 +884,10 @@ class IPAMService:
                     ip_address_id=ip_addr.id,
                     is_reachable=scan_result['is_reachable'],
                     response_time=scan_result['response_time'],
-                    hostname=scan_result['hostname'],
-                    mac_address=scan_result['mac_address'],
-                    os_type=scan_result['os_type'],
-                    os_name=scan_result['os_name'],
+                    hostname=ip_addr.hostname,
+                    mac_address=new_mac,
+                    os_type=ip_addr.os_type,
+                    os_name=ip_addr.os_name,
                     switch_id=ip_addr.switch_id,
                     switch_port=ip_addr.switch_port,
                     vlan_id=ip_addr.vlan_id,
@@ -522,25 +900,40 @@ class IPAMService:
                 )
                 db.add(history)
 
-            # Update subnet last scan time
-            subnet.last_scan_at = datetime.now(timezone.utc)
-
             await db.commit()
 
             elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
-            reachable = sum(1 for r in scan_results if r['is_reachable'])
+            reachable = sum(1 for r in ordered_scan_results if r['is_reachable'])
 
             summary = {
-                'total_scanned': len(scan_results),
+                'subnet_id': subnet_id,
+                'subnet_last_scan_at': quick_finished_at,
+                'total_scanned': len(ordered_scan_results),
                 'reachable': reachable,
-                'unreachable': len(scan_results) - reachable,
+                'unreachable': len(ordered_scan_results) - reachable,
                 'new_devices': new_devices,
                 'changed_devices': changed_devices,
-                'scan_duration': elapsed,
-                'results': scan_results
+                'scan_duration': elapsed
             }
 
-            logger.info(f"Subnet scan completed: {summary}")
+            if include_results:
+                summary['results'] = ordered_scan_results
+
+            logger.info(
+                "Subnet scan completed: "
+                f"subnet_id={subnet_id}, total={summary['total_scanned']}, "
+                f"reachable={summary['reachable']}, "
+                f"unreachable={summary['unreachable']}, "
+                f"new={summary['new_devices']}, "
+                f"changed={summary['changed_devices']}, "
+                f"duration={summary['scan_duration']:.2f}s"
+            )
+            await emit_progress(
+                'subnet_complete',
+                {
+                    'summary': summary,
+                }
+            )
             return summary
 
         except Exception as e:
@@ -549,6 +942,11 @@ class IPAMService:
             logger.error(f"Error during subnet scan {subnet_id}: {str(e)}")
             logger.exception(e)
             raise
+        finally:
+            # Release ORM state between subnets so a full auto-scan pass does not
+            # keep tens of thousands of IP/history objects attached to one session.
+            db.expunge_all()
+            self._release_scan_memory(f"subnet scan {subnet_id}")
 
     async def _update_switch_info(
         self,
@@ -593,8 +991,10 @@ class IPAMService:
                 )
                 return
 
-            # If not found in mac_table, try arp_table (may have switch but not port)
-            from models.arp_table import ARPTable
+            # If not found in lookup-eligible MAC data, try ARP to identify the
+            # switch first, then check raw MAC data on that same switch. This
+            # helps platforms whose ARP interface values are placeholders such as
+            # Dyn[I]/Oth[I] while the MAC table still has the physical port.
 
             result = await db.execute(
                 select(ARPTable, Switch)
@@ -610,9 +1010,34 @@ class IPAMService:
             if row:
                 arp_entry, switch = row
                 ip_addr.switch_id = switch.id
-                # ARP table usually doesn't have accurate port info, but may have interface
-                if arp_entry.interface:
+
+                same_switch_mac_result = await db.execute(
+                    select(MACTable)
+                    .where(
+                        and_(
+                            MACTable.switch_id == switch.id,
+                            cast(MACTable.mac_address, Text) == cast(mac_address.lower(), Text)
+                        )
+                    )
+                    .order_by(MACTable.last_seen.desc())
+                    .limit(1)
+                )
+                same_switch_mac_entry = same_switch_mac_result.scalar_one_or_none()
+
+                if same_switch_mac_entry:
+                    ip_addr.switch_port = same_switch_mac_entry.port_name
+                    ip_addr.vlan_id = same_switch_mac_entry.vlan_id or arp_entry.vlan_id
+                    logger.info(
+                        f"Found same-switch MAC port for {ip_addr.ip_address} (MAC: {mac_address}): "
+                        f"{switch.name} port {same_switch_mac_entry.port_name}"
+                    )
+                    return
+
+                # ARP interface is only a last resort and may be unusable on some models.
+                if self._is_usable_arp_interface(arp_entry.interface):
                     ip_addr.switch_port = arp_entry.interface
+                else:
+                    ip_addr.switch_port = None
                 ip_addr.vlan_id = arp_entry.vlan_id
                 logger.info(
                     f"Found switch info from ARP for {ip_addr.ip_address} (MAC: {mac_address}): "
@@ -751,7 +1176,7 @@ class IPAMService:
                     first_ip = str(list(net.hosts())[0] if net.num_addresses > 2 else net.network_address)
                     # Use text cast to compare INET with string
                     ip_check = await db.execute(
-                        select(IPAddress).where(cast(IPAddress.ip_address, Text) == first_ip)
+                        select(IPAddress).where(func.host(IPAddress.ip_address) == first_ip)
                     )
                     if ip_check.scalar_one_or_none():
                         logger.warning(f"Skipping subnet {normalized_network}: IP addresses already exist (overlapping subnet)")
@@ -824,26 +1249,42 @@ class IPAMService:
             'imported_ids': imported_ids
         }
 
-    async def scan_all_auto_subnets(self, db: AsyncSession) -> Dict:
+    async def scan_all_auto_subnets(
+        self,
+        db: AsyncSession,
+        scan_type: str = "quick",
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None] | None]] = None,
+        max_subnets: Optional[int] = None,
+    ) -> Dict:
         """
         Scan all subnets that have auto_scan enabled and are due for scanning.
 
         Returns:
             Dictionary with scan statistics
         """
-        logger.info("Starting automatic subnet scan")
+        logger.info(f"Starting automatic subnet scan (type: {scan_type})")
         start_time = datetime.now(timezone.utc)
 
-        # Get all enabled subnets with auto_scan
+        # Keep the scheduling session lightweight by only loading the metadata
+        # needed to decide which subnets are due. Each due subnet is then
+        # scanned with a fresh short-lived session.
         result = await db.execute(
-            select(IPSubnet).where(
+            select(
+                IPSubnet.id,
+                IPSubnet.name,
+                IPSubnet.network,
+                IPSubnet.last_scan_at,
+                IPSubnet.scan_interval,
+            ).where(
                 and_(
                     IPSubnet.enabled == True,
                     IPSubnet.auto_scan == True
                 )
             )
         )
-        subnets = result.scalars().all()
+        subnets = result.all()
+        # End the read transaction before the hours-long scan pass starts.
+        await db.commit()
 
         if not subnets:
             logger.info("No subnets with auto_scan enabled")
@@ -859,39 +1300,77 @@ class IPAMService:
         scanned_count = 0
         total_ips = 0
         failed_subnets = []
+        due_subnets = []
+        now = datetime.now(timezone.utc)
 
-        for subnet in subnets:
+        for subnet_id, subnet_name, subnet_network, last_scan_at, scan_interval in subnets:
             # Check if subnet needs scanning based on scan_interval
-            if subnet.last_scan_at:
-                time_since_scan = (datetime.now(timezone.utc) - subnet.last_scan_at).total_seconds()
-                if time_since_scan < subnet.scan_interval:
+            if last_scan_at:
+                time_since_scan = (now - last_scan_at).total_seconds()
+                if time_since_scan < scan_interval:
                     logger.debug(
-                        f"Skipping {subnet.name} - last scanned {time_since_scan:.0f}s ago "
-                        f"(interval: {subnet.scan_interval}s)"
+                        f"Skipping {subnet_name} - last scanned {time_since_scan:.0f}s ago "
+                        f"(interval: {scan_interval}s)"
                     )
                     continue
+            due_subnets.append((subnet_id, subnet_name, subnet_network))
+
+        total_due_subnets = len(due_subnets)
+        selected_due_subnets = due_subnets
+        deferred_subnets = 0
+
+        if max_subnets is not None and max_subnets >= 0:
+            selected_due_subnets = due_subnets[:max_subnets]
+            deferred_subnets = max(total_due_subnets - len(selected_due_subnets), 0)
+
+        logger.info(
+            f"{total_due_subnets} auto-scan subnets are due for scanning"
+            + (
+                f"; limiting this pass to {len(selected_due_subnets)} subnets and deferring {deferred_subnets}"
+                if deferred_subnets
+                else ""
+            )
+        )
+
+        for index, (subnet_id, subnet_name, subnet_network) in enumerate(selected_due_subnets, start=1):
+            subnet_db = None
 
             try:
-                logger.info(f"Scanning subnet: {subnet.name} ({subnet.network})")
-                scan_result = await self.scan_subnet(db, subnet.id, scan_type="full")
+                logger.info(f"Scanning subnet: {subnet_name} ({subnet_network})")
+                subnet_db = AsyncSessionLocal()
+                scan_result = await self.scan_subnet(
+                    subnet_db,
+                    subnet_id,
+                    scan_type=scan_type,
+                    include_results=False,
+                    progress_callback=progress_callback,
+                    subnet_index=index,
+                    total_subnets=len(selected_due_subnets)
+                )
                 scanned_count += 1
                 total_ips += scan_result.get('total_scanned', 0)
                 logger.info(
-                    f"Completed scan for {subnet.name}: "
+                    f"Completed scan for {subnet_name}: "
                     f"{scan_result.get('reachable', 0)}/{scan_result.get('total_scanned', 0)} reachable"
                 )
             except Exception as e:
-                logger.error(f"Failed to scan subnet {subnet.name}: {str(e)}")
+                logger.error(f"Failed to scan subnet {subnet_name}: {str(e)}")
                 failed_subnets.append({
-                    'subnet_id': subnet.id,
-                    'subnet_name': subnet.name,
+                    'subnet_id': subnet_id,
+                    'subnet_name': subnet_name,
                     'error': str(e)
                 })
+            finally:
+                if subnet_db is not None:
+                    await subnet_db.close()
+                self._release_scan_memory(f"auto-scan subnet {subnet_id}")
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 
         summary = {
-            'total_subnets': len(subnets),
+            'total_subnets': len(selected_due_subnets),
+            'total_due_subnets': total_due_subnets,
+            'deferred_subnets': deferred_subnets,
             'scanned_subnets': scanned_count,
             'failed_subnets': len(failed_subnets),
             'total_ips_scanned': total_ips,
@@ -901,12 +1380,53 @@ class IPAMService:
 
         logger.info(
             f"Automatic subnet scan completed: "
-            f"{scanned_count}/{len(subnets)} subnets scanned, "
+            f"{scanned_count}/{len(selected_due_subnets)} subnets scanned, "
             f"{total_ips} IPs total, "
+            f"deferred_subnets={deferred_subnets}, "
             f"duration: {elapsed:.1f}s"
         )
 
+        self._release_scan_memory("automatic subnet scan pass")
+
         return summary
+
+    async def cleanup_old_scan_history(
+        self,
+        db: AsyncSession,
+        days_to_keep: int = settings.IP_SCAN_HISTORY_RETENTION_DAYS,
+        batch_size: int = settings.IP_SCAN_HISTORY_CLEANUP_BATCH_SIZE
+    ) -> int:
+        """Delete stale IP scan history in batches to keep memory and lock time bounded."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_to_keep)
+        total_deleted = 0
+
+        while True:
+            stale_ids = (
+                select(IPScanHistory.id)
+                .where(IPScanHistory.scanned_at < cutoff)
+                .order_by(IPScanHistory.id.asc())
+                .limit(batch_size)
+            )
+
+            result = await db.execute(
+                delete(IPScanHistory)
+                .where(IPScanHistory.id.in_(stale_ids))
+                .execution_options(synchronize_session=False)
+            )
+            batch_deleted = result.rowcount or 0
+
+            if batch_deleted == 0:
+                break
+
+            total_deleted += batch_deleted
+            await db.commit()
+
+        if total_deleted:
+            logger.info(
+                f"Cleaned up {total_deleted} IP scan history rows older than {days_to_keep} days"
+            )
+
+        return total_deleted
 
     async def search_network(
         self,

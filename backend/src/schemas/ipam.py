@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, IPvAnyAddress, field_serializer
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
 
@@ -97,6 +97,13 @@ class IPAddressResponse(IPAddressBase):
     subnet_id: int
     is_reachable: bool
     response_time: Optional[int]
+    hostname_source: Optional[str] = None
+    dns_name: Optional[str] = None
+    system_name: Optional[str] = None
+    machine_type: Optional[str] = None
+    vendor: Optional[str] = None
+    contact: Optional[str] = None
+    location: Optional[str] = None
     os_type: Optional[str]
     os_name: Optional[str]
     os_version: Optional[str]
@@ -105,6 +112,7 @@ class IPAddressResponse(IPAddressBase):
     switch_port: Optional[str]
     vlan_id: Optional[int]
     last_seen_at: Optional[datetime]
+    last_boot_time: Optional[datetime]
     last_scan_at: Optional[datetime]
     scan_count: int
     created_at: datetime
@@ -137,6 +145,8 @@ class IPScanHistoryResponse(BaseModel):
     mac_address: Optional[str]
     os_type: Optional[str]
     os_name: Optional[str]
+    os_version: Optional[str] = None
+    os_vendor: Optional[str] = None
     switch_id: Optional[int]
     switch_port: Optional[str]
     vlan_id: Optional[int]
@@ -178,14 +188,54 @@ class IPScanResult(BaseModel):
 
 class IPScanSummary(BaseModel):
     """Schema for IP scan summary"""
+    subnet_id: Optional[int] = None
+    subnet_last_scan_at: Optional[datetime] = None
     total_scanned: int
     reachable: int
     unreachable: int
     new_devices: int
     changed_devices: int
     scan_duration: float
-    results: List[IPScanResult]
+    results: List[IPScanResult] = Field(default_factory=list)
     message: Optional[str] = None  # Optional message for async scan status
+
+
+class IPAMScanStatusResponse(BaseModel):
+    """Live status snapshot for an IPAM scan."""
+    running: bool
+    session_id: Optional[str] = None
+    source: Optional[str] = None
+    scan_type: Optional[str] = None
+    current_phase: str
+    phase_label: str
+    message: Optional[str] = None
+    error: Optional[str] = None
+    subnet_id: Optional[int] = None
+    subnet_name: Optional[str] = None
+    subnet_network: Optional[str] = None
+    current_subnet_index: int = 0
+    total_subnets: int = 0
+    completed_subnets: int = 0
+    current_subnet_total_ips: int = 0
+    current_subnet_completed_ips: int = 0
+    current_subnet_pending_ips: int = 0
+    current_subnet_reachable_ips: int = 0
+    current_subnet_unreachable_ips: int = 0
+    current_subnet_enrichment_total: int = 0
+    current_subnet_enrichment_completed: int = 0
+    current_subnet_last_scan_at: Optional[datetime] = None
+    total_ips_scanned: int = 0
+    started_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    last_completed_at: Optional[datetime] = None
+    summary: Optional[Dict[str, Any]] = None
+
+
+class IPAMScanStartResponse(BaseModel):
+    """Response returned when an async IPAM scan is launched."""
+    session_id: str
+    message: str
+    status: IPAMScanStatusResponse
 
 
 # Statistics Schemas

@@ -7,6 +7,7 @@ from services.vendors.base import VendorHandler
 from services.vendors.cisco import CiscoHandler
 from services.vendors.dell import DellHandler
 from services.vendors.alcatel import AlcatelHandler
+from services.cli_service import cli_service
 from models.switch import Switch
 
 
@@ -16,7 +17,7 @@ class SwitchConnectionError(Exception):
 
 
 class SwitchManager:
-    """Manages SSH connections to network switches"""
+    """Manages CLI connections to network switches"""
 
     def __init__(self):
         self.vendor_handlers: Dict[str, VendorHandler] = {
@@ -33,7 +34,7 @@ class SwitchManager:
         return handler
 
     def _get_device_params(self, switch: Switch) -> Dict:
-        """Prepare device parameters for netmiko connection"""
+        """Prepare device parameters for a Netmiko CLI connection."""
         # Decrypt credentials
         password = credential_encryption.decrypt(switch.password_encrypted)
         enable_password = None
@@ -53,12 +54,15 @@ class SwitchManager:
         if switch.vendor.lower() == 'dell' and switch.model and switch.model.lower().startswith('s'):
             device_type = 'dell_force10'
 
+        cli_transport = cli_service.normalize_cli_transport(getattr(switch, 'cli_transport', 'ssh'))
+        netmiko_device_type = cli_service._resolve_transport_device_type(device_type, cli_transport)
+
         device_params = {
-            'device_type': device_type,
+            'device_type': netmiko_device_type,
             'host': str(switch.ip_address),
             'username': switch.username,
             'password': password,
-            'port': switch.ssh_port,
+            'port': switch.ssh_port or cli_service.default_port_for_transport(cli_transport),
             'timeout': switch.connection_timeout,
             'session_timeout': switch.connection_timeout,
             'blocking_timeout': switch.connection_timeout,

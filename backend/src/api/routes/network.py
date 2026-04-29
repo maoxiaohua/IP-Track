@@ -24,10 +24,17 @@ from models.port_analysis import PortAnalysis
 from models.switch import Switch
 from services.network_data_collector import network_data_collector
 from services.network_scheduler import network_scheduler
+from services.port_analysis_service import port_analysis_service
 from services.port_lookup_policy_service import (
     build_lookup_eligible_clause,
     normalize_lookup_policy_override,
     serialize_lookup_policy,
+)
+from services.data_freshness_service import (
+    build_lookup_result_freshness,
+    build_optical_inventory_freshness,
+    build_optical_module_freshness,
+    build_port_analysis_freshness,
 )
 
 router = APIRouter(prefix="/network", tags=["network"])
@@ -37,6 +44,18 @@ class PortLookupPolicyUpdateRequest(BaseModel):
     port_name: str
     lookup_policy_override: Optional[str] = None
     lookup_policy_note: Optional[str] = None
+
+
+def _port_analysis_priority(port: PortAnalysis) -> tuple:
+    normalized_name = port_analysis_service.normalize_port_name(port.port_name)
+    return (
+        1 if port.lookup_policy_override else 0,
+        port.lookup_policy_updated_at or datetime.min.replace(tzinfo=timezone.utc),
+        1 if port.port_name == normalized_name else 0,
+        port.analyzed_at or datetime.min.replace(tzinfo=timezone.utc),
+        float(port.confidence_score or 0),
+        -len(port.port_name or ""),
+    )
 
 
 @router.get("/ip-location/{ip_address}")
@@ -68,6 +87,14 @@ async def get_ip_location(
         raise HTTPException(status_code=404, detail=f"IP {ip_address} not found in location database")
 
     location, switch = row
+    last_seen_at = max(
+        [ts for ts in [location.last_arp_seen, location.last_mac_seen, location.last_confirmed] if ts is not None],
+        default=None
+    )
+    data_age_seconds = (
+        int((datetime.now(timezone.utc) - last_seen_at).total_seconds())
+        if last_seen_at else None
+    )
 
     return {
         "ip_address": str(location.ip_address),
@@ -88,7 +115,12 @@ async def get_ip_location(
         "first_detected": location.first_detected.isoformat(),
         "last_confirmed": location.last_confirmed.isoformat(),
         "last_arp_seen": location.last_arp_seen.isoformat() if location.last_arp_seen else None,
-        "last_mac_seen": location.last_mac_seen.isoformat() if location.last_mac_seen else None
+        "last_mac_seen": location.last_mac_seen.isoformat() if location.last_mac_seen else None,
+        "freshness": build_lookup_result_freshness(
+            switch,
+            data_age_seconds=data_age_seconds,
+            last_seen_at=last_seen_at
+        )
     }
 
 
@@ -134,7 +166,22 @@ async def list_ip_locations(
                 "port_name": loc.port_name,
                 "vlan_id": loc.vlan_id,
                 "confidence_score": loc.confidence_score,
-                "last_confirmed": loc.last_confirmed.isoformat()
+                "last_confirmed": loc.last_confirmed.isoformat(),
+                "freshness_status": build_lookup_result_freshness(
+                    sw,
+                    data_age_seconds=(
+                        int((datetime.now(timezone.utc) - max(
+                            [ts for ts in [loc.last_arp_seen, loc.last_mac_seen, loc.last_confirmed] if ts is not None],
+                            default=loc.last_confirmed
+                        )).total_seconds())
+                        if (loc.last_arp_seen or loc.last_mac_seen or loc.last_confirmed)
+                        else None
+                    ),
+                    last_seen_at=max(
+                        [ts for ts in [loc.last_arp_seen, loc.last_mac_seen, loc.last_confirmed] if ts is not None],
+                        default=None
+                    )
+                )["status"]
             }
             for loc, sw in rows
         ]
@@ -164,6 +211,18 @@ async def get_port_analysis(
         raise HTTPException(status_code=404, detail=f"Switch {switch_id} not found or no port analysis available")
 
     switch = rows[0][1]
+    deduped_rows = {}
+    for port, row_switch in rows:
+        canonical_name = port_analysis_service.normalize_port_name(port.port_name)
+        existing = deduped_rows.get(canonical_name)
+        if existing is None or _port_analysis_priority(port) > _port_analysis_priority(existing[0]):
+            deduped_rows[canonical_name] = (port, row_switch, canonical_name)
+
+    normalized_rows = sorted(
+        deduped_rows.values(),
+        key=lambda item: item[2]
+    )
+    latest_analyzed_at = max((port.analyzed_at for port, _, _ in normalized_rows), default=None)
 
     return {
         "switch": {
@@ -171,9 +230,10 @@ async def get_port_analysis(
             "name": switch.name,
             "ip_address": str(switch.ip_address)
         },
+        "freshness": build_port_analysis_freshness(switch, latest_analyzed_at),
         "ports": [
             {
-                "port_name": port.port_name,
+                "port_name": canonical_name,
                 "mac_count": port.mac_count,
                 "unique_vlans": port.unique_vlans,
                 "port_type": port.port_type,
@@ -181,19 +241,19 @@ async def get_port_analysis(
                 "analyzed_at": port.analyzed_at.isoformat(),
                 **serialize_lookup_policy(port)
             }
-            for port, _ in rows
+            for port, _, canonical_name in normalized_rows
         ],
         "summary": {
-            "total_ports": len(rows),
-            "access_ports": sum(1 for p, _ in rows if p.port_type == 'access'),
-            "trunk_ports": sum(1 for p, _ in rows if p.port_type == 'trunk'),
-            "uplink_ports": sum(1 for p, _ in rows if p.port_type == 'uplink'),
-            "unknown_ports": sum(1 for p, _ in rows if p.port_type == 'unknown'),
+            "total_ports": len(normalized_rows),
+            "access_ports": sum(1 for p, _, _ in normalized_rows if p.port_type == 'access'),
+            "trunk_ports": sum(1 for p, _, _ in normalized_rows if p.port_type == 'trunk'),
+            "uplink_ports": sum(1 for p, _, _ in normalized_rows if p.port_type == 'uplink'),
+            "unknown_ports": sum(1 for p, _, _ in normalized_rows if p.port_type == 'unknown'),
             "lookup_included_ports": sum(
-                1 for p, _ in rows if serialize_lookup_policy(p)["lookup_included"]
+                1 for p, _, _ in normalized_rows if serialize_lookup_policy(p)["lookup_included"]
             ),
             "lookup_excluded_ports": sum(
-                1 for p, _ in rows if not serialize_lookup_policy(p)["lookup_included"]
+                1 for p, _, _ in normalized_rows if not serialize_lookup_policy(p)["lookup_included"]
             )
         }
     }
@@ -219,7 +279,7 @@ async def update_port_lookup_policy(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    port_name = request.port_name.strip()
+    port_name = port_analysis_service.normalize_port_name(request.port_name)
     if not port_name:
         raise HTTPException(status_code=400, detail="port_name is required")
 
@@ -342,8 +402,10 @@ async def search_optical_modules(
     Returns:
         List of optical modules with switch and location information
     """
-    query = select(OpticalModule).order_by(
-        desc(OpticalModule.collected_at),
+    query = select(OpticalModule, Switch).join(
+        Switch, OpticalModule.switch_id == Switch.id
+    ).order_by(
+        desc(OpticalModule.last_seen),
         OpticalModule.switch_name,
         OpticalModule.port_name
     )
@@ -384,14 +446,20 @@ async def search_optical_modules(
     query = query.limit(limit).offset(offset)
 
     result = await db.execute(query)
-    modules = result.scalars().all()
+    rows = result.all()
 
-    return {
-        "total": total_count,
-        "count": len(modules),
-        "offset": offset,
-        "limit": limit,
-        "modules": [
+    module_payloads = []
+    present_count = 0
+    historical_count = 0
+
+    for module, switch in rows:
+        module_freshness = build_optical_module_freshness(switch, module.last_seen)
+        if module_freshness["is_present"]:
+            present_count += 1
+        else:
+            historical_count += 1
+
+        module_payloads.append(
             {
                 "id": module.id,
                 "serial_number": module.serial_number,
@@ -406,57 +474,87 @@ async def search_optical_modules(
                 "port_name": module.port_name,
                 "collected_at": module.collected_at.isoformat(),
                 "first_seen": module.first_seen.isoformat(),
-                "last_seen": module.last_seen.isoformat()
+                "last_seen": module.last_seen.isoformat(),
+                "presence_status": module_freshness["presence_status"],
+                "is_present": module_freshness["is_present"],
+                "freshness_status": module_freshness["status"],
+                "freshness_warning": module_freshness["warning"],
+                "switch_is_reachable": switch.is_reachable,
+                "switch_last_optical_collection_at": module_freshness["last_optical_collection_at"],
+                "switch_last_optical_success_at": module_freshness["last_optical_success_at"],
+                "switch_last_optical_collection_status": module_freshness["last_optical_collection_status"],
+                "switch_last_optical_collection_message": module_freshness["last_optical_collection_message"],
             }
-            for module in modules
-        ]
+        )
+
+    return {
+        "total": total_count,
+        "count": len(module_payloads),
+        "offset": offset,
+        "limit": limit,
+        "present_count": present_count,
+        "historical_count": historical_count,
+        "modules": module_payloads
     }
 
 
 @router.get("/optical-modules/statistics")
 async def get_optical_module_statistics(db: AsyncSession = Depends(get_db)):
     """Get statistics about optical modules"""
-    # Total modules
-    result = await db.execute(select(func.count(OpticalModule.id)))
-    total_modules = result.scalar()
+    rows = (
+        await db.execute(
+            select(OpticalModule, Switch)
+            .join(Switch, OpticalModule.switch_id == Switch.id)
+        )
+    ).all()
 
-    # Modules by type
-    result = await db.execute(
-        select(OpticalModule.module_type, func.count(OpticalModule.id))
-        .group_by(OpticalModule.module_type)
-        .order_by(desc(func.count(OpticalModule.id)))
-    )
-    by_type = {row[0] if row[0] else "Unknown": row[1] for row in result.all()}
+    total_modules = len(rows)
+    present_modules = 0
+    historical_modules = 0
+    by_type: dict[str, int] = {}
+    by_vendor: dict[str, int] = {}
+    by_speed: dict[str, int] = {}
+    switch_ids = set()
+    present_switch_ids = set()
+    stale_switch_ids = set()
 
-    # Modules by vendor
-    result = await db.execute(
-        select(OpticalModule.vendor, func.count(OpticalModule.id))
-        .where(OpticalModule.vendor.isnot(None))
-        .group_by(OpticalModule.vendor)
-        .order_by(desc(func.count(OpticalModule.id)))
-        .limit(10)
-    )
-    by_vendor = {row[0]: row[1] for row in result.all()}
+    for module, switch in rows:
+        switch_ids.add(switch.id)
 
-    # Modules by speed
-    result = await db.execute(
-        select(OpticalModule.speed_gbps, func.count(OpticalModule.id))
-        .where(OpticalModule.speed_gbps.isnot(None))
-        .group_by(OpticalModule.speed_gbps)
-        .order_by(OpticalModule.speed_gbps)
-    )
-    by_speed = {f"{row[0]}G" if row[0] else "Unknown": row[1] for row in result.all()}
+        inventory_freshness = build_optical_inventory_freshness(switch)
+        if inventory_freshness["status"] == "stale":
+            stale_switch_ids.add(switch.id)
 
-    # Recent collections (last 24 hours)
-    one_day_ago = datetime.now() - timedelta(days=1)
-    result = await db.execute(
-        select(func.count(OpticalModule.id))
-        .where(OpticalModule.collected_at >= one_day_ago)
-    )
-    recent_collections = result.scalar()
+        module_freshness = build_optical_module_freshness(switch, module.last_seen)
+        if module_freshness["is_present"]:
+            present_modules += 1
+            present_switch_ids.add(switch.id)
+        else:
+            historical_modules += 1
+
+        module_type = module.module_type or "Unknown"
+        by_type[module_type] = by_type.get(module_type, 0) + 1
+
+        if module.vendor:
+            by_vendor[module.vendor] = by_vendor.get(module.vendor, 0) + 1
+
+        speed_label = f"{module.speed_gbps}G" if module.speed_gbps else "Unknown"
+        by_speed[speed_label] = by_speed.get(speed_label, 0) + 1
+
+    by_type = dict(sorted(by_type.items(), key=lambda item: item[1], reverse=True))
+    by_vendor = dict(sorted(by_vendor.items(), key=lambda item: item[1], reverse=True)[:10])
+    by_speed = dict(sorted(by_speed.items(), key=lambda item: item[0]))
+
+    one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
+    recent_collections = sum(1 for module, _ in rows if module.last_seen and module.last_seen >= one_day_ago)
 
     return {
         "total_modules": total_modules,
+        "present_modules": present_modules,
+        "historical_modules": historical_modules,
+        "switches_with_modules": len(switch_ids),
+        "switches_with_present_modules": len(present_switch_ids),
+        "stale_switches": len(stale_switch_ids),
         "by_type": by_type,
         "by_vendor": by_vendor,
         "by_speed": by_speed,

@@ -23,6 +23,7 @@ class IPLookupResult(BaseModel):
     data_age_seconds: Optional[int] = None  # Only for cache mode - how old is the data
     last_seen: Optional[str] = None  # Only for cache mode - when was the data last collected
     message: Optional[str] = None
+    freshness: Optional[dict] = None
 
 
 class IPLookupResponse(BaseModel):

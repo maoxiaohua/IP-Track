@@ -101,7 +101,8 @@ const router = createRouter({
   ]
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach((to, _from, next) => {
+  void _from
   document.title = `${to.meta.title} - IP Track System` || 'IP Track System'
   next()
 })

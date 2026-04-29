@@ -27,9 +27,11 @@ const getApiBaseUrl = () => {
     console.warn('Accessing via localhost - API calls may fail if backend is not on localhost')
   }
 
-  const port = '8100'  // Backend port
-  const url = `${protocol}//${hostname}:${port}`
-  console.log('Computed API URL:', url)
+  // Microservice deployments should use either the current origin behind a
+  // reverse proxy or an explicit VITE_API_BASE_URL. Do not fall back to the
+  // retired monolithic backend port.
+  const url = `${protocol}//${hostname}${window.location.port ? `:${window.location.port}` : ''}`
+  console.log('Computed API URL from current origin:', url)
   return url
 }
 
@@ -63,6 +65,10 @@ apiClient.interceptors.response.use(
     return response
   },
   (error) => {
+    if ((error.config as any)?.skipDefaultErrorHandler) {
+      return Promise.reject(error)
+    }
+
     if (error.response) {
       const message = error.response.data?.detail || 'An error occurred'
       ElMessage.error(message)

@@ -3,10 +3,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from api.deps import get_db
 from models.query_history import QueryHistory
+from models.switch import Switch
 from schemas.history import QueryHistoryResponse, QueryHistoryListResponse
+from services.data_freshness_service import build_lookup_result_freshness
 from utils.logger import logger
 
 router = APIRouter(prefix="/history", tags=["history"])
+
+
+def _serialize_history_item(item: QueryHistory, switch: Switch | None = None) -> QueryHistoryResponse:
+    payload = QueryHistoryResponse.model_validate(item).model_dump()
+
+    if switch:
+        freshness = build_lookup_result_freshness(switch)
+        payload.update({
+            "current_switch_is_reachable": switch.is_reachable,
+            "current_switch_collection_status": switch.last_collection_status,
+            "current_switch_collection_message": switch.last_collection_message,
+            "current_freshness_status": freshness["status"],
+            "current_freshness_warning": freshness["warning"],
+        })
+
+    return QueryHistoryResponse(**payload)
 
 
 @router.get("", response_model=QueryHistoryListResponse)
@@ -39,11 +57,22 @@ async def get_query_history(
         )
         items = result.scalars().all()
 
+        switch_ids = list({item.switch_id for item in items if item.switch_id is not None})
+        switch_map = {}
+        if switch_ids:
+            switch_result = await db.execute(
+                select(Switch).where(Switch.id.in_(switch_ids))
+            )
+            switch_map = {switch.id: switch for switch in switch_result.scalars().all()}
+
         return QueryHistoryListResponse(
             total=total,
             page=page,
             page_size=page_size,
-            items=[QueryHistoryResponse.model_validate(item) for item in items]
+            items=[
+                _serialize_history_item(item, switch_map.get(item.switch_id))
+                for item in items
+            ]
         )
 
     except Exception as e:
@@ -72,7 +101,14 @@ async def get_query_history_item(
                 detail=f"Query history item with ID {history_id} not found"
             )
 
-        return QueryHistoryResponse.model_validate(item)
+        switch = None
+        if item.switch_id is not None:
+            switch_result = await db.execute(
+                select(Switch).where(Switch.id == item.switch_id)
+            )
+            switch = switch_result.scalar_one_or_none()
+
+        return _serialize_history_item(item, switch)
 
     except HTTPException:
         raise

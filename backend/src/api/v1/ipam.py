@@ -1,9 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import cast, func, Integer, String
 from typing import List, Optional
+import asyncio
+import json
 from api.deps import get_db
+from core.database import AsyncSessionLocal
 from schemas.ipam import (
     IPSubnetCreate,
     IPSubnetUpdate,
@@ -14,6 +17,8 @@ from schemas.ipam import (
     IPAddressListResponse,
     IPScanRequest,
     IPScanSummary,
+    IPAMScanStartResponse,
+    IPAMScanStatusResponse,
     IPSubnetStatistics,
     IPAMDashboard,
     IPStatus,
@@ -26,6 +31,8 @@ from schemas.ipam import (
     SubnetCalculatorResponse
 )
 from services.ipam_service import ipam_service
+from services.ipam_scan_status import ipam_scan_status_service
+from services.network_scheduler import network_scheduler
 from models.ipam import IPAddress
 from utils.logger import logger
 
@@ -522,8 +529,13 @@ async def list_ip_addresses(
     if search:
         conditions.append(
             or_(
-                IPAddress.ip_address.cast(str).contains(search),
+                cast(IPAddress.ip_address, String).contains(search),
                 IPAddress.hostname.ilike(f'%{search}%'),
+                IPAddress.dns_name.ilike(f'%{search}%'),
+                IPAddress.system_name.ilike(f'%{search}%'),
+                IPAddress.machine_type.ilike(f'%{search}%'),
+                IPAddress.vendor.ilike(f'%{search}%'),
+                cast(IPAddress.mac_address, String).ilike(f'%{search}%'),
                 IPAddress.description.ilike(f'%{search}%')
             )
         )
@@ -551,9 +563,15 @@ async def list_ip_addresses(
     result = await db.execute(query)
     rows = result.all()
 
+    overlays = await ipam_service.get_live_location_overlays(
+        db,
+        [ip_addr for ip_addr, _ in rows]
+    )
+
     # Convert to response format
     items = []
     for ip_addr, switch_name in rows:
+        overlay = overlays.get(ip_addr.id, {})
         ip_dict = {
             'id': ip_addr.id,
             'subnet_id': ip_addr.subnet_id,
@@ -565,13 +583,13 @@ async def list_ip_addresses(
             'hostname_source': ip_addr.hostname_source,
             'dns_name': ip_addr.dns_name,
             'system_name': ip_addr.system_name,
-            'mac_address': str(ip_addr.mac_address) if ip_addr.mac_address else None,
+            'mac_address': str(ip_addr.mac_address) if ip_addr.mac_address else overlay.get('mac_address'),
             'vendor': ip_addr.vendor,
             'machine_type': ip_addr.machine_type,
-            'switch_id': ip_addr.switch_id,
-            'switch_name': switch_name,
-            'switch_port': ip_addr.switch_port,
-            'vlan_id': ip_addr.vlan_id,
+            'switch_id': ip_addr.switch_id or overlay.get('switch_id'),
+            'switch_name': switch_name or overlay.get('switch_name'),
+            'switch_port': ip_addr.switch_port or overlay.get('switch_port'),
+            'vlan_id': ip_addr.vlan_id or overlay.get('vlan_id'),
             'os_type': ip_addr.os_type,
             'os_name': ip_addr.os_name,
             'os_version': ip_addr.os_version,
@@ -614,10 +632,39 @@ async def get_ip_address(
         )
 
     ip_addr, subnet_name, switch_name = row
+    overlay = (await ipam_service.get_live_location_overlays(db, [ip_addr])).get(ip_addr.id, {})
     return {
-        **ip_addr.__dict__,
+        'id': ip_addr.id,
+        'subnet_id': ip_addr.subnet_id,
+        'ip_address': str(ip_addr.ip_address),
+        'status': ip_addr.status,
+        'is_reachable': ip_addr.is_reachable,
+        'response_time': ip_addr.response_time,
+        'hostname': ip_addr.hostname,
+        'hostname_source': ip_addr.hostname_source,
+        'dns_name': ip_addr.dns_name,
+        'system_name': ip_addr.system_name,
+        'machine_type': ip_addr.machine_type,
+        'vendor': ip_addr.vendor,
+        'contact': ip_addr.contact,
+        'location': ip_addr.location,
+        'mac_address': str(ip_addr.mac_address) if ip_addr.mac_address else overlay.get('mac_address'),
+        'os_type': ip_addr.os_type,
+        'os_name': ip_addr.os_name,
+        'os_version': ip_addr.os_version,
+        'os_vendor': ip_addr.os_vendor,
+        'switch_id': ip_addr.switch_id or overlay.get('switch_id'),
+        'switch_port': ip_addr.switch_port or overlay.get('switch_port'),
+        'vlan_id': ip_addr.vlan_id or overlay.get('vlan_id'),
+        'last_seen_at': ip_addr.last_seen_at,
+        'last_boot_time': ip_addr.last_boot_time,
+        'last_scan_at': ip_addr.last_scan_at,
+        'scan_count': ip_addr.scan_count,
+        'description': ip_addr.description,
+        'created_at': ip_addr.created_at,
+        'updated_at': ip_addr.updated_at,
         'subnet_name': subnet_name,
-        'switch_name': switch_name
+        'switch_name': switch_name or overlay.get('switch_name')
     }
 
 
@@ -667,6 +714,129 @@ async def get_ip_scan_history(
 
 
 # Scan endpoints
+@router.get("/scan-status", response_model=IPAMScanStatusResponse)
+async def get_scan_status():
+    """Return the latest IPAM scan status snapshot."""
+    return ipam_scan_status_service.get_status()
+
+
+@router.get("/scan-events")
+async def stream_scan_events(request: Request):
+    """Stream live IPAM scan progress via Server-Sent Events."""
+    async def event_generator():
+        queue = await ipam_scan_status_service.subscribe()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield f"data: {json.dumps(event, default=str, ensure_ascii=False)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            await ipam_scan_status_service.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@router.post("/scan-stream", response_model=IPAMScanStartResponse)
+async def start_scan_stream(
+    scan_request: IPScanRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Start an async subnet scan and watch progress through `/scan-events`.
+
+    This is intended for the SolarWinds-style UI flow where the request returns
+    immediately and progress is shown live at the bottom of the page.
+    """
+    if not scan_request.subnet_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="scan-stream 仅支持子网扫描，请提供 subnet_id"
+        )
+
+    if network_scheduler.is_ipam_scan_running():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=network_scheduler.get_ipam_scan_busy_message()
+        )
+
+    subnet = await ipam_service.get_subnet(db, scan_request.subnet_id)
+    if not subnet:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Subnet {scan_request.subnet_id} not found"
+        )
+
+    subnet_label = str(subnet.network)
+    await network_scheduler._ipam_scan_lock.acquire()
+
+    try:
+        network_scheduler.set_ipam_scan_context(
+            f"当前正在手动扫描子网 {subnet_label}"
+        )
+        session_id = await ipam_scan_status_service.start_scan(
+            source="manual",
+            scan_type=scan_request.scan_type,
+            total_subnets=1,
+            message=f"已启动手动扫描，准备扫描子网 {subnet_label}"
+        )
+    except Exception:
+        network_scheduler.clear_ipam_scan_context()
+        network_scheduler._ipam_scan_lock.release()
+        raise
+
+    async def run_manual_scan() -> None:
+        manual_db = AsyncSessionLocal()
+        try:
+            summary = await ipam_service.scan_subnet(
+                db=manual_db,
+                subnet_id=scan_request.subnet_id,
+                scan_type=scan_request.scan_type,
+                include_results=False,
+                progress_callback=ipam_scan_status_service.consume_scan_event,
+                subnet_index=1,
+                total_subnets=1
+            )
+            await ipam_scan_status_service.complete_scan(
+                summary=summary,
+                message=(
+                    f"子网 {subnet_label} 扫描完成，"
+                    f"在线 {summary.get('reachable', 0)}，"
+                    f"离线 {summary.get('unreachable', 0)}"
+                )
+            )
+        except Exception as exc:
+            logger.error(f"Async subnet scan failed for {subnet_label}: {exc}", exc_info=True)
+            await ipam_scan_status_service.fail_scan(
+                error=str(exc),
+                message=f"子网 {subnet_label} 扫描失败"
+            )
+        finally:
+            await manual_db.close()
+            network_scheduler.clear_ipam_scan_context()
+            network_scheduler._ipam_scan_lock.release()
+
+    asyncio.create_task(run_manual_scan())
+
+    return {
+        "session_id": session_id,
+        "message": f"已启动后台扫描：{subnet_label}",
+        "status": ipam_scan_status_service.get_status()
+    }
+
+
 @router.post("/scan", response_model=IPScanSummary)
 async def scan_ips(
     scan_request: IPScanRequest,
@@ -683,12 +853,50 @@ async def scan_ips(
     Frontend should poll for updated last_scan_at to detect completion.
     """
     if scan_request.subnet_id:
+        if network_scheduler.is_ipam_scan_running():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=network_scheduler.get_ipam_scan_busy_message()
+            )
+
         # Run scan synchronously (reliable but slow)
-        result = await ipam_service.scan_subnet(
-            db=db,
-            subnet_id=scan_request.subnet_id,
-            scan_type=scan_request.scan_type
-        )
+        async with network_scheduler._ipam_scan_lock:
+            network_scheduler.set_ipam_scan_context(
+                f"当前正在手动扫描子网 {scan_request.subnet_id}"
+            )
+            try:
+                subnet = await ipam_service.get_subnet(db, scan_request.subnet_id)
+                subnet_label = str(subnet.network) if subnet else str(scan_request.subnet_id)
+                await ipam_scan_status_service.start_scan(
+                    source="manual",
+                    scan_type=scan_request.scan_type,
+                    total_subnets=1,
+                    message=f"已启动同步扫描，准备扫描子网 {subnet_label}"
+                )
+                result = await ipam_service.scan_subnet(
+                    db=db,
+                    subnet_id=scan_request.subnet_id,
+                    scan_type=scan_request.scan_type,
+                    progress_callback=ipam_scan_status_service.consume_scan_event,
+                    subnet_index=1,
+                    total_subnets=1
+                )
+                await ipam_scan_status_service.complete_scan(
+                    summary=result,
+                    message=(
+                        f"子网 {subnet_label} 扫描完成，"
+                        f"在线 {result.get('reachable', 0)}，"
+                        f"离线 {result.get('unreachable', 0)}"
+                    )
+                )
+            except Exception as exc:
+                await ipam_scan_status_service.fail_scan(
+                    error=str(exc),
+                    message=f"子网 {scan_request.subnet_id} 扫描失败"
+                )
+                raise
+            finally:
+                network_scheduler.clear_ipam_scan_context()
         return result
 
     elif scan_request.ip_addresses:

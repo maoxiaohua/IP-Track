@@ -50,6 +50,11 @@ class AlarmResponse(AlarmBase):
     acknowledged_by: Optional[str] = None
     resolved_at: Optional[datetime] = None
     resolved_by: Optional[str] = None
+    current_switch_is_reachable: Optional[bool] = None
+    current_switch_collection_status: Optional[str] = None
+    current_switch_collection_message: Optional[str] = None
+    current_freshness_status: Optional[str] = None
+    current_freshness_warning: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -69,3 +74,64 @@ class AlarmStatsResponse(BaseModel):
     by_severity: Dict[str, int]
     by_source_type: Dict[str, int]
     top_failing_switches: Optional[List[Dict[str, Any]]] = None
+
+
+class SwitchAlarmGroupResponse(BaseModel):
+    """Aggregated alarm view for a single switch."""
+    switch_id: int
+    switch_name: str
+    switch_ip: Optional[str] = None
+    active_count: int
+    acknowledged_count: int
+    resolved_count: int
+    open_count: int
+    total_alarm_records: int
+    total_occurrences: int
+    highest_active_severity: Optional[str] = None
+    latest_alarm_id: Optional[int] = None
+    latest_alarm_title: Optional[str] = None
+    latest_alarm_message: Optional[str] = None
+    latest_alarm_status: Optional[str] = None
+    latest_event_at: Optional[datetime] = None
+    current_switch_is_reachable: Optional[bool] = None
+    current_switch_collection_status: Optional[str] = None
+    current_switch_collection_message: Optional[str] = None
+    current_freshness_status: Optional[str] = None
+    current_freshness_warning: Optional[str] = None
+
+
+class SwitchAlarmGroupListResponse(BaseModel):
+    items: List[SwitchAlarmGroupResponse]
+    total: int
+
+
+class SwitchAlarmTimelineEventResponse(BaseModel):
+    timestamp: datetime
+    event_type: str
+    alarm_id: int
+    severity: str
+    status: str
+    title: str
+    message: str
+    occurrence_count: int
+    actor: Optional[str] = None
+    note: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+class SwitchAlarmTimelineResponse(BaseModel):
+    switch_id: int
+    switch_name: str
+    switch_ip: Optional[str] = None
+    active_count: int
+    acknowledged_count: int
+    resolved_count: int
+    open_count: int
+    total_alarm_records: int
+    total_occurrences: int
+    current_switch_is_reachable: Optional[bool] = None
+    current_switch_collection_status: Optional[str] = None
+    current_switch_collection_message: Optional[str] = None
+    current_freshness_status: Optional[str] = None
+    current_freshness_warning: Optional[str] = None
+    events: List[SwitchAlarmTimelineEventResponse]

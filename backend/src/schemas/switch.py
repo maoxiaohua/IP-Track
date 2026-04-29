@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, IPvAnyAddress, validator
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 
 
@@ -13,6 +13,7 @@ class SwitchBase(BaseModel):
 
     # CLI/SSH fields
     cli_enabled: bool = False
+    cli_transport: Literal['ssh', 'telnet'] = 'ssh'
     ssh_port: Optional[int] = Field(default=22, ge=1, le=65535)
     username: Optional[str] = Field(None, max_length=100)
     connection_timeout: Optional[int] = Field(default=30, ge=5, le=300)
@@ -28,17 +29,17 @@ class SwitchCreate(SwitchBase):
     password: Optional[str] = None
     enable_password: Optional[str] = None
     
-    # SNMP credentials (required)
+    # SNMP credentials
     snmp_enabled: bool = True
     snmp_version: str = Field(default="3", pattern="^(2c|3)$")
     snmp_port: int = Field(default=161, ge=1, le=65535)
     
     # SNMPv3 fields
-    snmp_username: str = Field(..., min_length=1, max_length=100)
+    snmp_username: Optional[str] = Field(None, min_length=1, max_length=100)
     snmp_auth_protocol: str = Field(default="SHA", pattern="^(MD5|SHA|SHA256)$")
-    snmp_auth_password: str = Field(..., min_length=8, description="At least 8 characters")
-    snmp_priv_protocol: str = Field(default="AES128", pattern="^(DES|AES|AES128|AES192|AES256)$")
-    snmp_priv_password: str = Field(..., min_length=8, description="At least 8 characters")
+    snmp_auth_password: Optional[str] = Field(None, min_length=8, description="At least 8 characters")
+    snmp_priv_protocol: Optional[str] = Field(default="AES128", pattern="^(DES|AES|AES128|AES192|AES256)$")
+    snmp_priv_password: Optional[str] = Field(None, min_length=8, description="At least 8 characters")
     
     # SNMPv2c field
     snmp_community: Optional[str] = None
@@ -57,7 +58,7 @@ class SwitchCreate(SwitchBase):
     
     @validator('snmp_priv_password')
     def validate_snmp_priv_password(cls, v, values):
-        if values.get('snmp_version') == '3' and (not v or len(v) < 8):
+        if values.get('snmp_version') == '3' and v and len(v) < 8:
             raise ValueError('snmp_priv_password must be at least 8 characters for SNMPv3')
         return v
     
@@ -72,9 +73,10 @@ class SwitchUpdate(BaseModel):
     """Schema for updating a switch"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     ip_address: Optional[IPvAnyAddress] = None
-    vendor: Optional[str] = Field(None, pattern="^(cisco|dell|alcatel)$")
+    vendor: Optional[str] = Field(None, pattern="^(cisco|dell|alcatel|juniper)$")
     model: Optional[str] = Field(None, max_length=100)
     cli_enabled: Optional[bool] = None
+    cli_transport: Optional[Literal['ssh', 'telnet']] = None
     ssh_port: Optional[int] = Field(None, ge=1, le=65535)
     username: Optional[str] = Field(None, min_length=1, max_length=100)
     password: Optional[str] = Field(None, min_length=1)
@@ -127,8 +129,13 @@ class SwitchResponse(SwitchBase):
     auto_collect_mac: bool = True
     last_arp_collection_at: Optional[datetime] = None
     last_mac_collection_at: Optional[datetime] = None
+    last_optical_collection_at: Optional[datetime] = None
+    last_optical_success_at: Optional[datetime] = None
     last_collection_status: Optional[str] = None
     last_collection_message: Optional[str] = None
+    last_optical_collection_status: Optional[str] = None
+    last_optical_collection_message: Optional[str] = None
+    last_optical_modules_count: Optional[int] = None
     trunk_review_completed: bool = False
     trunk_review_completed_at: Optional[datetime] = None
     trunk_review_note: Optional[str] = None

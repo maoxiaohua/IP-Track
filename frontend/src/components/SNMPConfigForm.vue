@@ -71,13 +71,17 @@
               <el-option label="AES" value="AES" />
               <el-option label="DES" value="DES" />
             </el-select>
+            <div class="form-tip">
+              <el-icon><InfoFilled /></el-icon>
+              不填写加密密码时，将使用仅认证不加密的 SNMPv3 模式
+            </div>
           </el-form-item>
 
-          <el-form-item label="加密密码" prop="snmp_priv_password">
+          <el-form-item label="加密密码（可选）" prop="snmp_priv_password">
             <el-input
               v-model="formData.snmp_priv_password"
               type="password"
-              placeholder="至少 8 位字符"
+              placeholder="留空则不启用加密"
               show-password
               clearable
             />
@@ -186,7 +190,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, watch } from 'vue';
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
 import { InfoFilled, WarningFilled, Connection, Check, Close } from '@element-plus/icons-vue';
 import { testSNMPConnection, type SNMPConfig, type SNMPTestResponse } from '@/api/snmp';
 
@@ -225,19 +229,57 @@ const rules = reactive<FormRules>({
     { required: true, message: '请选择 SNMP 版本', trigger: 'change' }
   ],
   snmp_username: [
-    { required: true, message: '请输入用户名', trigger: 'blur' },
+    {
+      validator: (_rule: any, value: string, callback: (error?: Error) => void) => {
+        if (formData.snmp_enabled && formData.snmp_version === '3' && !value) {
+          callback(new Error('请输入用户名'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    },
     { min: 1, max: 100, message: '用户名长度在 1 到 100 个字符', trigger: 'blur' }
   ],
   snmp_auth_password: [
-    { required: true, message: '请输入认证密码', trigger: 'blur' },
-    { min: 8, message: '认证密码至少 8 位字符', trigger: 'blur' }
+    {
+      validator: (_rule: any, value: string, callback: (error?: Error) => void) => {
+        if (formData.snmp_enabled && formData.snmp_version === '3' && !value) {
+          callback(new Error('请输入认证密码'))
+          return
+        }
+        if (value && value.length < 8) {
+          callback(new Error('认证密码至少 8 位字符'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
   ],
   snmp_priv_password: [
-    { required: true, message: '请输入加密密码', trigger: 'blur' },
-    { min: 8, message: '加密密码至少 8 位字符', trigger: 'blur' }
+    {
+      validator: (_rule: any, value: string, callback: (error?: Error) => void) => {
+        if (value && value.length < 8) {
+          callback(new Error('加密密码至少 8 位字符'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
   ],
   snmp_community: [
-    { required: true, message: '请输入 Community 字符串', trigger: 'blur' }
+    {
+      validator: (_rule: any, value: string, callback: (error?: Error) => void) => {
+        if (formData.snmp_enabled && formData.snmp_version === '2c' && !value) {
+          callback(new Error('请输入 Community 字符串'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    }
   ]
 });
 

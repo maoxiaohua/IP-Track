@@ -8,6 +8,16 @@
         </div>
       </template>
 
+      <el-alert
+        v-if="result.freshness?.warning"
+        :title="result.freshness.status === 'stale' ? '当前定位基于历史缓存' : '定位结果提示'"
+        :description="freshnessDescription"
+        :type="result.freshness.status === 'stale' ? 'warning' : 'info'"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 16px;"
+      />
+
       <el-descriptions :column="2" border>
         <el-descriptions-item label="Target IP">
           <el-tag type="primary">{{ result.target_ip }}</el-tag>
@@ -35,6 +45,12 @@
 
         <el-descriptions-item label="Query Time">
           {{ result.query_time_ms }} ms
+        </el-descriptions-item>
+
+        <el-descriptions-item v-if="result.freshness?.switch_last_collection_status" label="Collection Status">
+          <el-tag :type="result.freshness.status === 'stale' ? 'warning' : 'success'">
+            {{ result.freshness.switch_last_collection_status }}
+          </el-tag>
         </el-descriptions-item>
 
         <el-descriptions-item v-if="result.data_age_seconds !== undefined" label="Data Age" :span="2">
@@ -68,11 +84,28 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { IPLookupResult } from '@/api/lookup'
 
-defineProps<{
+const props = defineProps<{
   result: IPLookupResult
 }>()
+
+const freshnessDescription = computed(() => {
+  if (!props.result.freshness?.warning) return ''
+
+  const parts = [props.result.freshness.warning]
+
+  if (props.result.freshness.last_collection_attempt_at) {
+    parts.push(`最近采集尝试：${new Date(props.result.freshness.last_collection_attempt_at).toLocaleString('zh-CN')}`)
+  }
+
+  if (props.result.freshness.switch_last_collection_message) {
+    parts.push(`最近采集说明：${props.result.freshness.switch_last_collection_message}`)
+  }
+
+  return parts.join(' ')
+})
 
 const formatDataAge = (seconds: number) => {
   if (seconds < 60) return `${seconds} seconds ago`

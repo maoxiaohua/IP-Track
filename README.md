@@ -69,11 +69,13 @@ A production-ready, open-source network monitoring platform for tracking IP addr
 
    Expected output:
    ```
-   NAME                STATUS              PORTS
-   iptrack-backend     Up X minutes        0.0.0.0:8101->8100/tcp
-   iptrack-frontend    Up X minutes        0.0.0.0:8001->5173/tcp
-   iptrack-postgres    Up X minutes        0.0.0.0:5432->5432/tcp
-   iptrack-redis       Up X minutes        0.0.0.0:6379->6379/tcp
+   NAME                     STATUS              PORTS
+   iptrack-backend-core     Up X minutes        0.0.0.0:8101->8100/tcp
+   iptrack-backend-ipam     Up X minutes        0.0.0.0:8102->8100/tcp
+   iptrack-backend-collector Up X minutes       0.0.0.0:8103->8100/tcp
+   iptrack-frontend         Up X minutes        0.0.0.0:8001->5173/tcp
+   iptrack-postgres         Up X minutes        0.0.0.0:5432->5432/tcp
+   iptrack-redis            Up X minutes        0.0.0.0:6379->6379/tcp
    ```
 
 6. **Access the application**
@@ -288,12 +290,25 @@ IP-Track runs several automated background tasks:
    # Migrations run automatically via database/init/*.sql on first PostgreSQL start
    ```
 
-6. **Start backend**
+6. **Start backend services**
    ```bash
    cd backend
    source venv/bin/activate
-   export $(cat ../.env | xargs)
-   uvicorn src.main:app --reload --host 0.0.0.0 --port 8100
+   export PYTHONPATH=$(pwd)/src
+   uvicorn main_core:app --reload --host 0.0.0.0 --port 8101
+   ```
+
+   In separate terminals, start the other two services:
+   ```bash
+   cd backend
+   source venv/bin/activate
+   export PYTHONPATH=$(pwd)/src
+   uvicorn main_ipam:app --reload --host 0.0.0.0 --port 8102
+
+   cd backend
+   source venv/bin/activate
+   export PYTHONPATH=$(pwd)/src
+   uvicorn main_collector:app --reload --host 0.0.0.0 --port 8103
    ```
 
 7. **Start frontend** (in another terminal)
@@ -304,7 +319,9 @@ IP-Track runs several automated background tasks:
 
 8. **Access application**
    - Frontend: http://localhost:5173 (Vite dev server)
-   - Backend: http://localhost:8100/api/docs
+   - Core API docs: http://localhost:8101/api/docs
+   - IPAM health: http://localhost:8102/health
+   - Collector health: http://localhost:8103/health
 
 ### Running Tests
 

@@ -74,11 +74,13 @@ echo ""
 echo "⏳ Waiting for PostgreSQL..."
 sleep 5
 
-# Wait for backend to be ready
-echo "⏳ Waiting for backend API..."
+# Wait for backend services to be ready
+echo "⏳ Waiting for backend services..."
 for i in {1..30}; do
-    if curl -s http://localhost:8100/health > /dev/null 2>&1; then
-        echo "✅ Backend API is ready"
+    if curl --noproxy '*' -s http://localhost:8101/health > /dev/null 2>&1 \
+        && curl --noproxy '*' -s http://localhost:8102/health > /dev/null 2>&1 \
+        && curl --noproxy '*' -s http://localhost:8103/health > /dev/null 2>&1; then
+        echo "✅ Backend services are ready"
         break
     fi
     sleep 2
@@ -87,7 +89,7 @@ done
 # Wait for frontend to be ready
 echo "⏳ Waiting for frontend..."
 for i in {1..30}; do
-    if curl -s http://localhost:8001 > /dev/null 2>&1; then
+    if curl --noproxy '*' -s http://localhost:8001 > /dev/null 2>&1; then
         echo "✅ Frontend is ready"
         break
     fi
@@ -101,8 +103,10 @@ echo "=========================================="
 echo ""
 echo "🌐 Access the application:"
 echo "   Frontend:  http://localhost:8001"
-echo "   Backend:   http://localhost:8100"
-echo "   API Docs:  http://localhost:8100/api/docs"
+echo "   Core API:  http://localhost:8101"
+echo "   IPAM API:  http://localhost:8102"
+echo "   Collector: http://localhost:8103"
+echo "   API Docs:  http://localhost:8101/api/docs"
 echo ""
 echo "📝 Next steps:"
 echo "   1. Open http://localhost:8001 in your browser"

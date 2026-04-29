@@ -1,10 +1,14 @@
 """
-SNMP Service for collecting ARP and MAC tables from network switches
+SNMP helpers for lightweight switch discovery and enrichment.
 
-This service uses SNMPv3 to query switches for:
-1. ARP tables (IP-MAC mappings)
-2. MAC address tables (MAC-Port mappings)
-3. Interface names and VLAN information
+The live ARP/MAC collection path now uses the global CLI-only policy
+(SSH/Telnet) because vendor SNMP FDB/ARP implementations vary widely and can
+be expensive on long-running deployments.
+
+SNMP remains useful here for:
+1. Device identification (sysName, sysDescr, sysObjectID)
+2. Optional interface and optical inventory enrichment
+3. Legacy L2 helper methods that are still available for troubleshooting
 
 Standard SNMP OIDs used:
 - IP-MIB::ipNetToMediaPhysAddress (1.3.6.1.2.1.4.22.1.2) - ARP MAC addresses
@@ -60,18 +64,40 @@ class SNMPService:
 
     def __init__(self):
         # Don't create a singleton engine - create per-request to avoid event loop issues
-        # Disable MIB loading to avoid MibNotFoundError in pysnmp 7.x
         import os
-        os.environ['PYSNMP_MIB_PKGS'] = ''  # Disable MIB package loading
-        logger.info("SNMP service initialized with asyncio (MIB loading disabled)")
+        # Numeric OIDs do not require explicit MIB package configuration.
+        # Setting PYSNMP_MIB_PKGS to an empty string causes pysnmp 7.x to try
+        # importing an empty module name during SnmpEngine() initialization.
+        os.environ.pop('PYSNMP_MIB_PKGS', None)
+        logger.info("SNMP service initialized with asyncio")
+
+    @staticmethod
+    def _dispose_engine(engine: Optional[SnmpEngine]) -> None:
+        """
+        pysnmp's asyncio SnmpEngine keeps dispatcher/security state alive unless
+        it is closed explicitly. In long-running IPAM scans this turns repeated
+        SNMP GETs into unbounded anonymous memory growth.
+        """
+        if engine is None:
+            return
+
+        try:
+            engine.close_dispatcher()
+        except Exception:
+            pass
+
+        try:
+            engine._close()
+        except Exception:
+            pass
 
     def _create_snmp_auth(
         self,
         username: str,
         auth_protocol: str,
         auth_password: str,
-        priv_protocol: str,
-        priv_password: str
+        priv_protocol: Optional[str],
+        priv_password: Optional[str]
     ) -> UsmUserData:
         """
         Create SNMPv3 authentication credentials
@@ -81,7 +107,7 @@ class SNMPService:
             auth_protocol: 'MD5', 'SHA', 'SHA256'
             auth_password: Authentication password
             priv_protocol: 'DES', 'AES', 'AES128', 'AES192', 'AES256'
-            priv_password: Privacy password
+            priv_password: Privacy password. When omitted, authNoPriv is used.
         """
         # Map protocol names to pysnmp protocol objects
         auth_map = {
@@ -99,7 +125,14 @@ class SNMPService:
         }
 
         auth_proto = auth_map.get(auth_protocol.upper(), usmHMACSHAAuthProtocol)
-        priv_proto = priv_map.get(priv_protocol.upper(), usmAesCfb128Protocol)
+        if not priv_password:
+            return UsmUserData(
+                username,
+                authKey=auth_password,
+                authProtocol=auth_proto
+            )
+
+        priv_proto = priv_map.get((priv_protocol or 'AES128').upper(), usmAesCfb128Protocol)
 
         return UsmUserData(
             username,
@@ -108,6 +141,13 @@ class SNMPService:
             authProtocol=auth_proto,
             privProtocol=priv_proto
         )
+
+    @staticmethod
+    def _decrypt_optional_password(encrypted_text: Optional[str]) -> Optional[str]:
+        """Decrypt an optional password field and return None when not configured."""
+        if not encrypted_text:
+            return None
+        return decrypt_password(encrypted_text)
 
     async def _walk_oid(
         self,
@@ -124,6 +164,7 @@ class SNMPService:
         Returns:
             List of (OID, value) tuples
         """
+        engine: Optional[SnmpEngine] = None
         try:
             results = []
             # Create a new SnmpEngine for each request to avoid event loop issues
@@ -166,6 +207,8 @@ class SNMPService:
         except Exception as e:
             logger.error(f"SNMP walk failed for {target_ip} OID {oid}: {str(e)}")
             return []
+        finally:
+            self._dispose_engine(engine)
 
     async def _get_oid(
         self,
@@ -173,11 +216,14 @@ class SNMPService:
         oid: str,
         auth_data: UsmUserData,
         port: int = 161,
-        timeout: int = 10  # Increased timeout from 5 to 10 seconds for slow devices
+        timeout: int = 10,  # Increased timeout from 5 to 10 seconds for slow devices
+        retries: int = 2,
+        log_errors: bool = True
     ) -> Optional[any]:
         """
         Perform SNMP GET on a specific OID using asyncio
         """
+        engine: Optional[SnmpEngine] = None
         try:
             logger.debug(f"Starting SNMP GET on {target_ip} OID {oid} with timeout={timeout}s")
 
@@ -185,7 +231,7 @@ class SNMPService:
             engine = SnmpEngine()
 
             # Create transport target using .create() method for pysnmp 7.x
-            transport = await UdpTransportTarget.create((target_ip, port), timeout=timeout, retries=2)
+            transport = await UdpTransportTarget.create((target_ip, port), timeout=timeout, retries=retries)
             logger.debug(f"Transport created for {target_ip}:{port}")
 
             errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
@@ -196,16 +242,23 @@ class SNMPService:
                 ObjectType(ObjectIdentity(oid))
             )
 
+            log_fn = logger.error if log_errors else logger.debug
             if errorIndication:
-                logger.error(f"❌ SNMP GET errorIndication on {target_ip} OID {oid}: {errorIndication} (type: {type(errorIndication).__name__})")
+                log_fn(
+                    f"❌ SNMP GET errorIndication on {target_ip} OID {oid}: "
+                    f"{errorIndication} (type: {type(errorIndication).__name__})"
+                )
                 return None
             elif errorStatus:
-                logger.error(f"❌ SNMP GET errorStatus on {target_ip} OID {oid}: {errorStatus.prettyPrint()} at index {errorIndex}")
+                log_fn(
+                    f"❌ SNMP GET errorStatus on {target_ip} OID {oid}: "
+                    f"{errorStatus.prettyPrint()} at index {errorIndex}"
+                )
                 return None
             else:
                 for varBind in varBinds:
                     value = varBind[1]
-                    logger.info(f"✅ SNMP GET success on {target_ip} OID {oid}: {value}")
+                    logger.debug(f"✅ SNMP GET success on {target_ip} OID {oid}: {value}")
                     return value
 
                 # If we get here, varBinds was empty
@@ -213,10 +266,14 @@ class SNMPService:
                 return None
 
         except Exception as e:
-            logger.error(f"❌ SNMP GET exception for {target_ip} OID {oid}: {type(e).__name__}: {str(e)}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            log_fn = logger.error if log_errors else logger.debug
+            log_fn(f"❌ SNMP GET exception for {target_ip} OID {oid}: {type(e).__name__}: {str(e)}")
+            if log_errors:
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
             return None
+        finally:
+            self._dispose_engine(engine)
 
     def _format_mac_address(self, mac_bytes) -> str:
         """
@@ -291,14 +348,16 @@ class SNMPService:
         try:
             # Decrypt SNMP passwords
             auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
-            priv_password = decrypt_password(switch_config['snmp_priv_password_encrypted'])
+            priv_password = self._decrypt_optional_password(
+                switch_config.get('snmp_priv_password_encrypted')
+            )
 
             # Create SNMP authentication
             auth_data = self._create_snmp_auth(
                 username=switch_config['snmp_username'],
                 auth_protocol=switch_config['snmp_auth_protocol'],
                 auth_password=auth_password,
-                priv_protocol=switch_config['snmp_priv_protocol'],
+                priv_protocol=switch_config.get('snmp_priv_protocol'),
                 priv_password=priv_password
             )
 
@@ -368,14 +427,16 @@ class SNMPService:
         try:
             # Decrypt SNMP passwords
             auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
-            priv_password = decrypt_password(switch_config['snmp_priv_password_encrypted'])
+            priv_password = self._decrypt_optional_password(
+                switch_config.get('snmp_priv_password_encrypted')
+            )
 
             # Create SNMP authentication
             auth_data = self._create_snmp_auth(
                 username=switch_config['snmp_username'],
                 auth_protocol=switch_config['snmp_auth_protocol'],
                 auth_password=auth_password,
-                priv_protocol=switch_config['snmp_priv_protocol'],
+                priv_protocol=switch_config.get('snmp_priv_protocol'),
                 priv_password=priv_password
             )
 
@@ -465,14 +526,16 @@ class SNMPService:
 
             # Decrypt SNMP passwords
             auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
-            priv_password = decrypt_password(switch_config['snmp_priv_password_encrypted'])
+            priv_password = self._decrypt_optional_password(
+                switch_config.get('snmp_priv_password_encrypted')
+            )
 
             # Create SNMP authentication
             auth_data = self._create_snmp_auth(
                 username=switch_config['snmp_username'],
                 auth_protocol=switch_config['snmp_auth_protocol'],
                 auth_password=auth_password,
-                priv_protocol=switch_config['snmp_priv_protocol'],
+                priv_protocol=switch_config.get('snmp_priv_protocol'),
                 priv_password=priv_password
             )
 
@@ -512,13 +575,15 @@ class SNMPService:
             logger.info(f"Getting device info from {switch_ip} via SNMP")
 
             auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
-            priv_password = decrypt_password(switch_config['snmp_priv_password_encrypted'])
+            priv_password = self._decrypt_optional_password(
+                switch_config.get('snmp_priv_password_encrypted')
+            )
 
             auth_data = self._create_snmp_auth(
                 username=switch_config['snmp_username'],
                 auth_protocol=switch_config['snmp_auth_protocol'],
                 auth_password=auth_password,
-                priv_protocol=switch_config['snmp_priv_protocol'],
+                priv_protocol=switch_config.get('snmp_priv_protocol'),
                 priv_password=priv_password
             )
 
@@ -698,19 +763,22 @@ class SNMPService:
 
             # Decrypt SNMP passwords
             auth_password = decrypt_password(snmp_profile['auth_password_encrypted'])
-            priv_password = decrypt_password(snmp_profile['priv_password_encrypted'])
+            priv_password = self._decrypt_optional_password(
+                snmp_profile.get('priv_password_encrypted')
+            )
 
             # Create SNMP authentication
             auth_data = self._create_snmp_auth(
                 username=snmp_profile['username'],
                 auth_protocol=snmp_profile.get('auth_protocol', 'SHA'),
                 auth_password=auth_password,
-                priv_protocol=snmp_profile.get('priv_protocol', 'AES'),
+                priv_protocol=snmp_profile.get('priv_protocol'),
                 priv_password=priv_password
             )
 
             port = snmp_profile.get('port', 161)
             timeout = snmp_profile.get('timeout', 5)
+            retries = max(0, int(snmp_profile.get('retries', 2) or 0))
 
             # Query all OIDs
             result = {
@@ -726,23 +794,29 @@ class SNMPService:
                 'os_version': None
             }
 
-            # sysName (hostname)
-            sys_name = await self._get_oid(target_ip, self.OID_SYS_NAME, auth_data, port, timeout)
+            # Probe the two key identification OIDs first. If both are missing, this
+            # host is usually not a usable SNMP target for IPAM enrichment.
+            sys_name = await self._get_oid(
+                target_ip,
+                self.OID_SYS_NAME,
+                auth_data,
+                port,
+                timeout,
+                retries=retries,
+                log_errors=False
+            )
             if sys_name:
                 result['system_name'] = ''.join(c for c in str(sys_name) if c.isprintable()).strip()
 
-            # sysContact
-            sys_contact = await self._get_oid(target_ip, self.OID_SYS_CONTACT, auth_data, port, timeout)
-            if sys_contact:
-                result['contact'] = str(sys_contact).strip()
-
-            # sysLocation
-            sys_location = await self._get_oid(target_ip, self.OID_SYS_LOCATION, auth_data, port, timeout)
-            if sys_location:
-                result['location'] = str(sys_location).strip()
-
-            # sysDescr (for machine_type and vendor extraction)
-            sys_descr = await self._get_oid(target_ip, self.OID_SYS_DESCR, auth_data, port, timeout)
+            sys_descr = await self._get_oid(
+                target_ip,
+                self.OID_SYS_DESCR,
+                auth_data,
+                port,
+                timeout,
+                retries=retries,
+                log_errors=False
+            )
             if sys_descr:
                 descr = str(sys_descr).strip()
                 # Try to extract vendor and machine type from sysDescr
@@ -807,8 +881,49 @@ class SNMPService:
                     f"type={os_info['os_type']}, name={os_info['os_name']}, version={os_info['os_version']}"
                 )
 
+            if not result['system_name'] and not sys_descr:
+                logger.debug(
+                    f"Skipping optional SNMP enrichment for {target_ip}: "
+                    "both sysName and sysDescr were unavailable"
+                )
+                return None
+
+            # sysContact and sysLocation are useful enrichment fields, but they are not
+            # worth five separate timeout cycles on endpoints that barely respond.
+            sys_contact = await self._get_oid(
+                target_ip,
+                self.OID_SYS_CONTACT,
+                auth_data,
+                port,
+                timeout,
+                retries=retries,
+                log_errors=False
+            )
+            if sys_contact:
+                result['contact'] = str(sys_contact).strip()
+
+            sys_location = await self._get_oid(
+                target_ip,
+                self.OID_SYS_LOCATION,
+                auth_data,
+                port,
+                timeout,
+                retries=retries,
+                log_errors=False
+            )
+            if sys_location:
+                result['location'] = str(sys_location).strip()
+
             # sysUpTime (time ticks since boot, convert to last_boot_time)
-            sys_uptime = await self._get_oid(target_ip, self.OID_SYS_UPTIME, auth_data, port, timeout)
+            sys_uptime = await self._get_oid(
+                target_ip,
+                self.OID_SYS_UPTIME,
+                auth_data,
+                port,
+                timeout,
+                retries=retries,
+                log_errors=False
+            )
             if sys_uptime:
                 try:
                     # sysUpTime is in hundredths of seconds
@@ -825,8 +940,8 @@ class SNMPService:
                 except Exception as e:
                     logger.warning(f"Failed to parse sysUpTime for {target_ip}: {str(e)}")
 
-            # Return result if we got at least one field
-            if result['system_name'] or result['contact'] or result['location']:
+            # Return result if SNMP yielded any meaningful identification data.
+            if any(value not in (None, '') for value in result.values()):
                 logger.info(
                     f"Got device identification from {target_ip}: "
                     f"sysName={result['system_name']}, "
@@ -837,7 +952,7 @@ class SNMPService:
                 )
                 return result
             else:
-                logger.warning(f"No device identification data retrieved from {target_ip}")
+                logger.debug(f"No device identification data retrieved from {target_ip}")
                 return None
 
         except Exception as e:
@@ -897,8 +1012,10 @@ class SNMPService:
                 username=switch_config['snmp_username'],
                 auth_protocol=switch_config.get('snmp_auth_protocol', 'SHA'),
                 auth_password=decrypt_password(switch_config['snmp_auth_password_encrypted']),
-                priv_protocol=switch_config.get('snmp_priv_protocol', 'AES'),
-                priv_password=decrypt_password(switch_config['snmp_priv_password_encrypted'])
+                priv_protocol=switch_config.get('snmp_priv_protocol'),
+                priv_password=self._decrypt_optional_password(
+                    switch_config.get('snmp_priv_password_encrypted')
+                )
             )
 
             # Step 1: Walk entPhysicalDescr and entPhysicalClass to find optical modules

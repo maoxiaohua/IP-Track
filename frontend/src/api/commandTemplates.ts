@@ -28,6 +28,9 @@ export interface TestConnectionRequest {
   switch_ip: string
   switch_username: string
   switch_password: string
+  switch_enable_password?: string
+  switch_port?: number
+  cli_transport?: 'ssh' | 'telnet'
   template_id: number
   test_type: 'arp' | 'mac'
 }
@@ -105,6 +108,6 @@ export function deleteCommandTemplate(id: number) {
 /**
  * Test a command template
  */
-export function testCommandTemplate(data: TestConnectionRequest): Promise<TestConnectionResponse> {
-  return apiClient.post('/api/v1/command-templates/test', data)
+export function testCommandTemplate(data: TestConnectionRequest) {
+  return apiClient.post<TestConnectionResponse>('/api/v1/command-templates/test', data)
 }

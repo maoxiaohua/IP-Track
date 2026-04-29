@@ -11,6 +11,8 @@
               <span style="color: #67c23a">{{ subnet.available_ips || 0 }} available</span>
               <span> | </span>
               <span style="color: #409eff">{{ subnet.used_ips || 0 }} used</span>
+              <span> | </span>
+              <span>Last Scan: {{ subnet.last_scan_at ? formatDateTime(subnet.last_scan_at) : 'Never' }}</span>
             </div>
           </div>
           <div style="display: flex; gap: 10px">
@@ -22,13 +24,39 @@
               <el-icon><Edit /></el-icon>
               编辑子网
             </el-button>
-            <el-button type="success" @click="scanSubnet" :loading="scanning">
+            <el-button type="success" @click="scanSubnet" :loading="scanning || isCurrentSubnetScanning" :disabled="Boolean(scanStatus?.running)">
               <el-icon><Refresh /></el-icon>
               扫描子网
             </el-button>
           </div>
         </div>
       </template>
+
+      <div v-if="shouldShowScanStatus" class="detail-scan-status">
+        <div class="detail-scan-status-top">
+          <div>
+            <div class="detail-scan-title">{{ scanSourceLabel }} | {{ scanTypeLabel }} | {{ scanStatus?.phase_label || '状态未知' }}</div>
+            <div class="detail-scan-message">{{ scanStatus?.message || '等待扫描状态更新' }}</div>
+          </div>
+          <el-tag :type="scanStatus?.running ? 'warning' : scanStatus?.current_phase === 'error' ? 'danger' : 'success'">
+            {{ scanStatus?.running ? '进行中' : scanStatus?.current_phase === 'error' ? '失败' : '完成' }}
+          </el-tag>
+        </div>
+
+        <div class="detail-scan-metrics">
+          <span>当前子网: {{ currentScanSubnetLabel }}</span>
+          <span>子网进度: {{ subnetProgressText }}</span>
+          <span>主机探测: {{ quickProgressText }}</span>
+          <span>识别进度: {{ enrichmentProgressText }}</span>
+        </div>
+
+        <el-progress
+          v-if="scanStatus?.running"
+          :percentage="scanProgressPercent"
+          :stroke-width="14"
+          status="success"
+        />
+      </div>
 
       <!-- Filters -->
       <el-row :gutter="20" style="margin-bottom: 20px">
@@ -71,6 +99,9 @@
         stripe
         style="width: 100%"
         :default-sort="{ prop: 'ip_address', order: 'ascending' }"
+        highlight-current-row
+        :current-row-key="selectedIpId || undefined"
+        row-key="id"
       >
         <!-- Status Icon -->
         <el-table-column label="Status" width="80" align="center">
@@ -98,7 +129,7 @@
         <el-table-column prop="ip_address" label="IP Address" width="140" sortable :sort-method="sortByIpAddress">
           <template #default="{ row }">
             <span
-              style="font-family: monospace; font-weight: 500; color: #409eff; cursor: pointer"
+              class="ip-address-link"
               @click="openIPDetail(row.id)"
             >{{ row.ip_address }}</span>
           </template>
@@ -116,7 +147,7 @@
         <!-- Response Time -->
         <el-table-column label="Response Time" width="120">
           <template #default="{ row }">
-            <span v-if="row.response_time">{{ row.response_time }}</span>
+            <span v-if="row.response_time != null">{{ row.response_time }} ms</span>
             <span v-else style="color: #909399">-</span>
           </template>
         </el-table-column>
@@ -207,7 +238,11 @@
     </el-card>
 
     <!-- IP Detail Drawer -->
-    <IPDetailDrawer v-model="showDrawer" :ip-id="selectedIpId" />
+    <IPDetailDrawer
+      v-model="showDrawer"
+      :ip-id="selectedIpId"
+      :refresh-key="detailDrawerRefreshKey"
+    />
 
     <!-- Edit Subnet Dialog -->
     <el-dialog v-model="showEditDialog" title="编辑 IP 子网" width="600px">
@@ -240,7 +275,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -254,18 +289,28 @@ import {
   Remove
 } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
+import { ipamApi, type IPAMScanStatus } from '@/api/ipam'
 import IPDetailDrawer from '@/components/IPDetailDrawer.vue'
+import { useIPAMScanMonitor } from '@/composables/useIPAMScanMonitor'
 
 interface IPAddress {
   id: number
   ip_address: string
   status: string
   is_reachable: boolean
-  response_time?: string
+  response_time?: number
   hostname?: string
   dns_name?: string
   system_name?: string
   machine_type?: string
+  vendor?: string
+  switch_id?: number
+  switch_name?: string
+  switch_port?: string
+  vlan_id?: number
+  os_type?: string
+  os_name?: string
+  os_version?: string
   last_boot_time?: string
   description?: string
   last_seen_at?: string
@@ -273,11 +318,14 @@ interface IPAddress {
 }
 
 interface Subnet {
+  id?: number
   network: string
   subnet_name: string
+  name?: string
   total_ips: number
   available_ips: number
   used_ips: number
+  last_scan_at?: string
 }
 
 const route = useRoute()
@@ -288,7 +336,8 @@ const subnet = ref<Subnet>({
   subnet_name: '',
   total_ips: 0,
   available_ips: 0,
-  used_ips: 0
+  used_ips: 0,
+  last_scan_at: ''
 })
 const ipAddresses = ref<IPAddress[]>([])
 const loading = ref(false)
@@ -312,11 +361,166 @@ const filters = ref({
 
 const showDrawer = ref(false)
 const selectedIpId = ref<number | null>(null)
+const detailDrawerRefreshKey = ref(0)
+let lastStatusNotificationKey = ''
 
 const openIPDetail = (ipId: number) => {
+  if (selectedIpId.value === ipId && showDrawer.value) {
+    detailDrawerRefreshKey.value += 1
+    return
+  }
   selectedIpId.value = ipId
   showDrawer.value = true
 }
+
+const handleScanStatusChange = (status: IPAMScanStatus, previous: IPAMScanStatus | null) => {
+  if (status.subnet_id === subnetId && status.current_subnet_last_scan_at) {
+    subnet.value.last_scan_at = status.current_subnet_last_scan_at
+  }
+
+  const notificationKey = `${status.type || status.current_phase}:${status.session_id || 'none'}:${status.updated_at || ''}`
+
+  if (
+    status.subnet_id === subnetId &&
+    previous?.current_subnet_last_scan_at !== status.current_subnet_last_scan_at &&
+    status.current_subnet_last_scan_at
+  ) {
+    void loadSubnet()
+    void loadIPs()
+    if (showDrawer.value && selectedIpId.value) {
+      detailDrawerRefreshKey.value += 1
+    }
+  }
+
+  if (notificationKey === lastStatusNotificationKey) {
+    return
+  }
+
+  if (status.type === 'complete') {
+    lastStatusNotificationKey = notificationKey
+    if (status.subnet_id === subnetId && status.source === 'manual') {
+      const summary = status.summary as any
+      ElMessage.success(
+        status.message ||
+        `扫描完成：${summary?.reachable ?? 0} 个在线，${summary?.unreachable ?? 0} 个离线`
+      )
+    }
+    if (status.subnet_id === subnetId) {
+      void loadSubnet()
+      void loadIPs()
+      if (showDrawer.value && selectedIpId.value) {
+        detailDrawerRefreshKey.value += 1
+      }
+    }
+    return
+  }
+
+  if (status.type === 'error') {
+    lastStatusNotificationKey = notificationKey
+    if (status.subnet_id === subnetId || status.source === 'manual') {
+      ElMessage.error(status.message || status.error || 'IPAM 扫描失败')
+    }
+  }
+}
+
+const {
+  scanStatus,
+  monitorSupported,
+  connect: connectScanMonitor,
+  loadInitialStatus
+} = useIPAMScanMonitor({
+  onStatus: handleScanStatusChange
+})
+
+const isFreshScanStatus = (status: IPAMScanStatus | null) => {
+  if (!status) {
+    return false
+  }
+  const reference = status.updated_at || status.last_completed_at
+  if (!reference) {
+    return false
+  }
+  return Date.now() - new Date(reference).getTime() < 10 * 60 * 1000
+}
+
+const shouldShowScanStatus = computed(() => {
+  return Boolean(
+    scanStatus.value &&
+    (
+      scanStatus.value.running ||
+      (
+        (scanStatus.value.current_phase === 'completed' || scanStatus.value.current_phase === 'error') &&
+        isFreshScanStatus(scanStatus.value)
+      )
+    )
+  )
+})
+
+const scanSourceLabel = computed(() => {
+  return scanStatus.value?.source === 'auto' ? '自动扫描' : '手动扫描'
+})
+
+const scanTypeLabel = computed(() => {
+  return scanStatus.value?.scan_type === 'quick' ? '快速模式' : '全量模式'
+})
+
+const currentScanSubnetLabel = computed(() => {
+  return scanStatus.value?.subnet_network || scanStatus.value?.subnet_name || '等待扫描任务'
+})
+
+const subnetProgressText = computed(() => {
+  const status = scanStatus.value
+  if (!status) {
+    return '-'
+  }
+  return `${status.completed_subnets}/${status.total_subnets || 0}`
+})
+
+const quickProgressText = computed(() => {
+  const status = scanStatus.value
+  if (!status) {
+    return '-'
+  }
+  return `${status.current_subnet_completed_ips}/${status.current_subnet_total_ips}，待回复 ${status.current_subnet_pending_ips}`
+})
+
+const enrichmentProgressText = computed(() => {
+  const status = scanStatus.value
+  if (!status) {
+    return '-'
+  }
+  if (status.scan_type === 'quick') {
+    return '本次为快速扫描，未执行识别'
+  }
+  if (!status.current_subnet_enrichment_total) {
+    return '等待在线主机识别'
+  }
+  return `${status.current_subnet_enrichment_completed}/${status.current_subnet_enrichment_total}`
+})
+
+const scanProgressPercent = computed(() => {
+  const status = scanStatus.value
+  if (!status) {
+    return 0
+  }
+
+  const totalSubnets = status.total_subnets || 1
+  const completedSubnets = Math.min(status.completed_subnets || 0, totalSubnets)
+  let currentSubnetProgress = 0
+
+  if (status.current_phase === 'enrichment' && status.current_subnet_enrichment_total > 0) {
+    currentSubnetProgress = status.current_subnet_enrichment_completed / status.current_subnet_enrichment_total
+  } else if (status.current_subnet_total_ips > 0) {
+    currentSubnetProgress = status.current_subnet_completed_ips / status.current_subnet_total_ips
+  }
+
+  const overall = ((completedSubnets + currentSubnetProgress) / totalSubnets) * 100
+  return Math.max(0, Math.min(100, Math.round(overall)))
+})
+
+const isCurrentSubnetScanning = computed(() => {
+  return Boolean(scanStatus.value?.running && scanStatus.value?.subnet_id === subnetId)
+})
 
 // Pagination removed - show all IPs for easier searching
 
@@ -324,7 +528,10 @@ const openIPDetail = (ipId: number) => {
 const loadSubnet = async () => {
   try {
     const response = await apiClient.get(`/api/v1/ipam/subnets/${subnetId}`)
-    subnet.value = response.data
+    subnet.value = {
+      ...response.data,
+      subnet_name: response.data.subnet_name || response.data.name || ''
+    }
 
     // Update edit form with loaded data
     editForm.value = {
@@ -379,34 +586,35 @@ const loadIPs = async () => {
   }
 }
 
-// Scan subnet (SYNC mode - waits for completion)
+// Scan subnet in the background and follow progress via SSE.
 const scanSubnet = async () => {
   scanning.value = true
   try {
-    // API call is SYNCHRONOUS - it will wait 2-3 minutes until scan completes
-    const response = await apiClient.post('/api/v1/ipam/scan', {
-      subnet_id: subnetId,
-      scan_type: 'full'
-    })
-
-    // When we reach here, scan is ALREADY COMPLETED
-    const result = response.data
-
-    // Show success message with results
-    if (result.message) {
-      // This was an async/background scan (shouldn't happen in sync mode)
-      ElMessage.success(result.message)
-    } else {
-      // Normal completion
-      ElMessage.success(`扫描完成：${result.reachable} 个在线，${result.unreachable} 个离线`)
+    const response = await ipamApi.startSubnetScan(subnetId, 'full')
+    if (response.mode === 'sync') {
+      if (response.summary?.subnet_last_scan_at) {
+        subnet.value.last_scan_at = response.summary.subnet_last_scan_at
+      }
+      ElMessage.success(
+        response.message ||
+        `同步扫描完成：${response.summary?.reachable ?? 0} 个在线，${response.summary?.unreachable ?? 0} 个离线`
+      )
+      await loadSubnet()
+      await loadIPs()
+      if (showDrawer.value && selectedIpId.value) {
+        detailDrawerRefreshKey.value += 1
+      }
+      return
     }
 
-    // Immediately refresh data (scan is already done)
-    await loadSubnet()
-    await loadIPs()
-
+    ElMessage.success(response.message || '已启动后台扫描')
   } catch (error: any) {
-    ElMessage.error(error.response?.data?.detail || '扫描失败')
+    if (error.response?.status === 409) {
+      ElMessage.warning(error.response?.data?.detail || '当前已有扫描任务正在运行，请稍后重试')
+      await loadSubnet()
+    } else {
+      ElMessage.error(error.response?.data?.detail || '扫描失败')
+    }
   } finally {
     scanning.value = false
   }
@@ -468,7 +676,7 @@ const getLastResponse = (ip: IPAddress): string => {
 
 // Get color for Last Response
 const getLastResponseColor = (ip: IPAddress): string => {
-  const dateStr = ip.last_seen_at || ip.last_scan_at
+  const dateStr = ip.last_seen_at
   if (!dateStr) return '#909399'
 
   const diffMs = new Date().getTime() - new Date(dateStr).getTime()
@@ -482,8 +690,8 @@ const getLastResponseColor = (ip: IPAddress): string => {
 
 // Sort by last response
 const sortByLastResponse = (a: IPAddress, b: IPAddress): number => {
-  const dateA = new Date(a.last_seen_at || a.last_scan_at || 0).getTime()
-  const dateB = new Date(b.last_seen_at || b.last_scan_at || 0).getTime()
+  const dateA = new Date(a.last_seen_at || 0).getTime()
+  const dateB = new Date(b.last_seen_at || 0).getTime()
   return dateB - dateA  // Most recent first
 }
 
@@ -504,7 +712,8 @@ const getStatusTooltip = (ip: IPAddress): string => {
 }
 
 // Format datetime
-const formatDateTime = (dateStr: string): string => {
+const formatDateTime = (dateStr?: string | null): string => {
+  if (!dateStr) return '-'
   try {
     return new Date(dateStr).toLocaleString('zh-CN', {
       year: 'numeric',
@@ -521,6 +730,11 @@ const formatDateTime = (dateStr: string): string => {
 onMounted(() => {
   loadSubnet()
   loadIPs()
+  void loadInitialStatus().then((supported) => {
+    if (supported && monitorSupported.value) {
+      connectScanMonitor()
+    }
+  })
 })
 </script>
 
@@ -535,6 +749,43 @@ onMounted(() => {
   align-items: flex-start;
 }
 
+.detail-scan-status {
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  border: 1px solid #d9ecff;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #f4f9ff 0%, #ffffff 100%);
+}
+
+.detail-scan-status-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.detail-scan-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f2a44;
+}
+
+.detail-scan-message {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #5c6b82;
+}
+
+.detail-scan-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: #22324d;
+}
+
 :deep(.el-table) {
   font-size: 13px;
 }
@@ -543,4 +794,34 @@ onMounted(() => {
   background-color: #f5f7fa;
   font-weight: 600;
 }
+
+.ip-address-link {
+  font-family: 'SFMono-Regular', 'Cascadia Code', 'Consolas', 'Liberation Mono',
+    'Courier New', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1d4ed8;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.ip-address-link:hover {
+  color: #1e3a8a;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@media (max-width: 768px) {
+  .subnet-detail-solarwinds {
+    padding: 12px;
+  }
+
+  .header-bar {
+    flex-direction: column;
+    gap: 14px;
+  }
+}
+
 </style>

@@ -15,10 +15,12 @@ class IPStatus(str, enum.Enum):
 
 
 class HostnameSource(str, enum.Enum):
-    """Hostname source - priority: SNMP > DNS > ARP > MANUAL"""
+    """Hostname source - priority: SNMP > DNS > NETBIOS > ARP > SWITCH > MANUAL"""
     SNMP = "SNMP"        # From SNMP sysName (OID 1.3.6.1.2.1.1.5.0)
     DNS = "DNS"          # From DNS reverse lookup (PTR record)
+    NETBIOS = "NETBIOS"  # From NetBIOS node status (Windows hosts)
     ARP = "ARP"          # From switch ARP table
+    SWITCH = "SWITCH"    # From switch inventory when IP itself is a switch
     MANUAL = "MANUAL"    # Manually entered by user
 
 

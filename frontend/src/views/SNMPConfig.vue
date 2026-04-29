@@ -26,8 +26,8 @@
         :closable="false"
         show-icon
       >
-        <p>在此页面配置交换机的 SNMP 凭据，系统将使用这些凭据自动收集网络数据（ARP 表、MAC 表）。</p>
-        <p>推荐使用 <strong>SNMPv3</strong>，提供更好的安全性（加密和认证）。</p>
+        <p>在此页面配置交换机的 SNMP 凭据，系统会使用这些凭据做设备识别和轻量补充采集，例如硬件型号、系统信息以及部分 SNMP 可读属性。</p>
+        <p>ARP/MAC 表已统一走交换机 CLI 采集（SSH/Telnet）；推荐使用 <strong>SNMPv3</strong>，同时兼容仅认证不加密的老设备场景。</p>
       </el-alert>
     </el-card>
 
@@ -191,7 +191,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import {
   Setting,

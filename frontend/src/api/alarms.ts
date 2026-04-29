@@ -39,6 +39,11 @@ export interface Alarm {
   acknowledged_by?: string | null
   resolved_at?: string | null
   resolved_by?: string | null
+  current_switch_is_reachable?: boolean | null
+  current_switch_collection_status?: string | null
+  current_switch_collection_message?: string | null
+  current_freshness_status?: 'fresh' | 'stale' | null
+  current_freshness_warning?: string | null
 }
 
 export interface AlarmListParams {
@@ -65,6 +70,66 @@ export interface AlarmStats {
     switch_name: string
     alarm_count: number
   }>
+}
+
+export interface SwitchAlarmGroup {
+  switch_id: number
+  switch_name: string
+  switch_ip?: string | null
+  active_count: number
+  acknowledged_count: number
+  resolved_count: number
+  open_count: number
+  total_alarm_records: number
+  total_occurrences: number
+  highest_active_severity?: string | null
+  latest_alarm_id?: number | null
+  latest_alarm_title?: string | null
+  latest_alarm_message?: string | null
+  latest_alarm_status?: string | null
+  latest_event_at?: string | null
+  current_switch_is_reachable?: boolean | null
+  current_switch_collection_status?: string | null
+  current_switch_collection_message?: string | null
+  current_freshness_status?: 'fresh' | 'stale' | null
+  current_freshness_warning?: string | null
+}
+
+export interface SwitchAlarmGroupListResponse {
+  items: SwitchAlarmGroup[]
+  total: number
+}
+
+export interface SwitchAlarmTimelineEvent {
+  timestamp: string
+  event_type: 'created' | 'reoccurred' | 'acknowledged' | 'resolved' | 'auto_resolved' | string
+  alarm_id: number
+  severity: string
+  status: string
+  title: string
+  message: string
+  occurrence_count: number
+  actor?: string | null
+  note?: string | null
+  details?: any | null
+}
+
+export interface SwitchAlarmTimeline {
+  switch_id: number
+  switch_name: string
+  switch_ip?: string | null
+  active_count: number
+  acknowledged_count: number
+  resolved_count: number
+  open_count: number
+  total_alarm_records: number
+  total_occurrences: number
+  current_switch_is_reachable?: boolean | null
+  current_switch_collection_status?: string | null
+  current_switch_collection_message?: string | null
+  current_freshness_status?: 'fresh' | 'stale' | null
+  current_freshness_warning?: string | null
+  events: SwitchAlarmTimelineEvent[]
 }
 
 export const alarmsApi = {
@@ -108,6 +173,20 @@ export const alarmsApi = {
   // Get alarm statistics
   getStats: async (): Promise<AlarmStats> => {
     const response = await apiClient.get('/api/v1/alarms/stats')
+    return response.data
+  },
+
+  getSwitchGroups: async (limit: number = 100): Promise<SwitchAlarmGroupListResponse> => {
+    const response = await apiClient.get('/api/v1/alarms/switch-groups', {
+      params: { limit }
+    })
+    return response.data
+  },
+
+  getSwitchTimeline: async (switchId: number, limit: number = 200): Promise<SwitchAlarmTimeline> => {
+    const response = await apiClient.get(`/api/v1/alarms/switches/${switchId}/timeline`, {
+      params: { limit }
+    })
     return response.data
   }
 }

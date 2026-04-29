@@ -45,7 +45,7 @@
       <el-table-column label="认证配置" width="130">
         <template #default="{ row }">
           <div style="display: flex; gap: 4px; flex-wrap: wrap;">
-            <el-tooltip :content="row.cli_enabled ? 'SSH CLI 已启用' : 'SSH CLI 未启用'" placement="top">
+            <el-tooltip :content="row.cli_enabled ? `CLI 已启用 (${(row.cli_transport || 'ssh').toUpperCase()})` : 'CLI 未启用'" placement="top">
               <el-tag :type="row.cli_enabled ? 'success' : 'info'" size="small">CLI</el-tag>
             </el-tooltip>
             <el-tooltip :content="row.has_snmp_credentials ? 'SNMP 已配置' : 'SNMP 未配置'" placement="top">
@@ -148,7 +148,7 @@
             </el-tooltip>
 
             <!-- Secondary Actions (Dropdown) -->
-            <el-dropdown trigger="click" @command="(cmd) => handleAction(cmd, row)">
+            <el-dropdown trigger="click" @command="(cmd: string) => handleAction(cmd, row)">
               <el-button size="small" :icon="More" circle />
               <template #dropdown>
                 <el-dropdown-menu>

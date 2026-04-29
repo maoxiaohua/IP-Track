@@ -18,6 +18,17 @@ export interface IPLookupResult {
   data_age_seconds?: number  // How old is the cached data
   last_seen?: string  // When was the data last collected
   message?: string
+  freshness?: {
+    status: 'fresh' | 'stale'
+    reason: string
+    warning?: string | null
+    switch_last_collection_status?: string | null
+    switch_last_collection_message?: string | null
+    switch_is_reachable?: boolean | null
+    last_collection_attempt_at?: string | null
+    data_age_seconds?: number | null
+    last_seen_at?: string | null
+  }
 }
 
 export interface IPLookupResponse {
@@ -38,6 +49,11 @@ export interface QueryHistoryItem {
   error_message?: string
   query_time_ms?: number
   queried_at: string
+  current_switch_is_reachable?: boolean | null
+  current_switch_collection_status?: string | null
+  current_switch_collection_message?: string | null
+  current_freshness_status?: 'fresh' | 'stale' | null
+  current_freshness_warning?: string | null
 }
 
 export interface QueryHistoryListResponse {

@@ -7,6 +7,7 @@ based on the number of MAC addresses learned and port naming conventions.
 USER REQUIREMENT: Only 1 MAC = access port, >1 MAC = trunk port
 """
 
+import re
 from typing import Dict, List
 from enum import Enum
 from utils.logger import logger
@@ -22,6 +23,29 @@ class PortType(str, Enum):
 
 class PortAnalysisService:
     """Service for analyzing port types based on MAC count"""
+
+    _PORT_NAME_PATTERNS = (
+        (r'^(?:tengigabitethernet|te)\s*(?P<suffix>\d.+)$', 'Te'),
+        (r'^(?:fortygigabitethernet|fortygige|fo)\s*(?P<suffix>\d.+)$', 'Fo'),
+        (r'^(?:gigabitethernet|gi)\s*(?P<suffix>\d.+)$', 'Gi'),
+        (r'^(?:fastethernet|fa)\s*(?P<suffix>\d.+)$', 'Fa'),
+        (r'^(?:hundredgigabitethernet|hundredgige|hu)\s*(?P<suffix>\d.+)$', 'Hu'),
+        (r'^(?:twentyfivegigabitethernet|twentyfivegige|twe)\s*(?P<suffix>\d.+)$', 'Twe'),
+    )
+
+    def normalize_port_name(self, port_name: str) -> str:
+        """Normalize equivalent interface names to a single canonical form."""
+        cleaned = re.sub(r'\s+', ' ', str(port_name or '').strip())
+        if not cleaned:
+            return ''
+
+        for pattern, canonical_prefix in self._PORT_NAME_PATTERNS:
+            match = re.match(pattern, cleaned, re.IGNORECASE)
+            if match:
+                suffix = re.sub(r'\s+', '', match.group('suffix').strip())
+                return f"{canonical_prefix} {suffix}"
+
+        return cleaned
 
     def classify_port(
         self,
@@ -132,8 +156,13 @@ class PortAnalysisService:
         port_stats = {}
 
         for entry in mac_table_entries:
-            port = entry['port_name']
+            port = self.normalize_port_name(entry['port_name'])
+            if not port:
+                continue
             vlan = entry.get('vlan_id')
+            mac_address = str(entry.get('mac_address') or '').lower()
+            if not mac_address:
+                continue
 
             if port not in port_stats:
                 port_stats[port] = {
@@ -141,7 +170,7 @@ class PortAnalysisService:
                     'vlans': set()
                 }
 
-            port_stats[port]['macs'].add(entry['mac_address'])
+            port_stats[port]['macs'].add(mac_address)
             if vlan:
                 port_stats[port]['vlans'].add(vlan)
 

@@ -1,10 +1,13 @@
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple, Callable, Awaitable, Any
 import asyncio
+import inspect
 import subprocess
 import socket
 import re
 import time
 import shutil
+import struct
+import random
 from concurrent.futures import ThreadPoolExecutor
 from core.config import settings
 from utils.logger import logger
@@ -35,6 +38,31 @@ class IPScanService:
         self.nmap_cmd = shutil.which('nmap')
 
         logger.info(f"IP scan service initialized: ping={self.ping_cmd}, arp={self.arp_cmd}, nmap={self.nmap_cmd}, concurrency_limit=20")
+
+    @staticmethod
+    def _build_result(ip: str) -> Dict[str, Any]:
+        return {
+            'ip_address': ip,
+            'is_reachable': False,
+            'response_time': None,
+            'hostname': None,
+            'hostname_source': None,  # SNMP, DNS, NETBIOS, ARP, or None
+            'dns_name': None,  # DNS PTR lookup result
+            'system_name': None,  # SNMP sysName
+            'contact': None,  # SNMP sysContact
+            'location': None,  # SNMP sysLocation
+            'machine_type': None,  # SNMP sysDescr parsed
+            'vendor': None,  # SNMP sysDescr parsed
+            'last_boot_time': None,  # SNMP sysUpTime converted
+            'mac_address': None,
+            'os_type': None,
+            'os_name': None,
+            'os_version': None,
+            'os_vendor': None,
+            'switch_name': None,
+            'switch_port': None,
+            'vlan_id': None
+        }
 
     def _ping_ip(self, ip: str, timeout: int = 5) -> tuple[bool, Optional[int]]:
         """
@@ -92,6 +120,140 @@ class IPScanService:
             return hostname
         except Exception:
             return None
+
+    def _encode_netbios_name(self, name: str = '*') -> bytes:
+        """
+        Encode a NetBIOS name for NBSTAT queries (RFC 1002 first-level encoding).
+        """
+        if name == '*':
+            raw_name = b'*' + b'\x00' * 15
+        else:
+            raw_name = name.upper().encode('ascii', 'ignore')[:15].ljust(15, b' ') + b'\x00'
+
+        encoded = bytearray()
+        for byte in raw_name:
+            encoded.append(ord('A') + ((byte >> 4) & 0x0F))
+            encoded.append(ord('A') + (byte & 0x0F))
+
+        return bytes([32]) + bytes(encoded) + b'\x00'
+
+    def _skip_dns_name(self, data: bytes, offset: int) -> int:
+        """
+        Skip a DNS-style encoded name in an NBNS packet.
+        """
+        while offset < len(data):
+            length = data[offset]
+            if length == 0:
+                return offset + 1
+            if (length & 0xC0) == 0xC0:
+                return offset + 2
+            offset += 1 + length
+        return offset
+
+    def _normalize_hostname_candidate(self, value: Optional[str]) -> Optional[str]:
+        """
+        Clean and validate hostname-like values before storing them.
+        """
+        if not value:
+            return None
+
+        cleaned = ''.join(ch for ch in value.strip() if ch.isprintable()).strip(" .\x00")
+        if not cleaned:
+            return None
+
+        if cleaned in {'*', '__MSBROWSE__'}:
+            return None
+
+        return cleaned
+
+    def _get_netbios_hostname(self, ip: str, timeout: float = 1.5) -> Optional[str]:
+        """
+        Query Windows NetBIOS node status (UDP/137) and return the best hostname.
+
+        This helps identify Windows endpoints that do not expose SNMP and do not
+        have a reverse DNS PTR record.
+        """
+        sock = None
+        try:
+            transaction_id = random.randint(0, 0xFFFF)
+            header = struct.pack('>HHHHHH', transaction_id, 0x0000, 1, 0, 0, 0)
+            question = self._encode_netbios_name('*') + struct.pack('>HH', 0x0021, 0x0001)
+            packet = header + question
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(timeout)
+            sock.sendto(packet, (ip, 137))
+            data, _ = sock.recvfrom(4096)
+
+            if len(data) < 12:
+                return None
+
+            qdcount = struct.unpack('>H', data[4:6])[0]
+            ancount = struct.unpack('>H', data[6:8])[0]
+            offset = 12
+
+            for _ in range(qdcount):
+                offset = self._skip_dns_name(data, offset)
+                offset += 4
+
+            candidates: List[Tuple[int, str]] = []
+
+            for _ in range(ancount):
+                offset = self._skip_dns_name(data, offset)
+                if offset + 10 > len(data):
+                    break
+
+                rrtype, rrclass, _ttl, rdlength = struct.unpack('>HHIH', data[offset:offset + 10])
+                offset += 10
+                rdata = data[offset:offset + rdlength]
+                offset += rdlength
+
+                if rrtype != 0x0021 or rrclass != 0x0001 or not rdata:
+                    continue
+
+                name_count = rdata[0]
+                pos = 1
+                for _ in range(name_count):
+                    if pos + 18 > len(rdata):
+                        break
+
+                    raw_name = rdata[pos:pos + 15].decode('ascii', 'ignore')
+                    suffix = rdata[pos + 15]
+                    flags = struct.unpack('>H', rdata[pos + 16:pos + 18])[0]
+                    is_group = bool(flags & 0x8000)
+                    pos += 18
+
+                    if is_group:
+                        continue
+
+                    hostname = self._normalize_hostname_candidate(raw_name)
+                    if not hostname:
+                        continue
+
+                    priority = {
+                        0x20: 1,  # File server service
+                        0x00: 2,  # Workstation service
+                        0x03: 3,  # Messenger service
+                    }.get(suffix, 99)
+                    candidates.append((priority, hostname))
+
+            if not candidates:
+                return None
+
+            candidates.sort(key=lambda item: item[0])
+            best_hostname = candidates[0][1]
+            logger.debug(f"NetBIOS hostname for {ip}: {best_hostname}")
+            return best_hostname
+
+        except Exception as e:
+            logger.debug(f"NetBIOS lookup failed for {ip}: {str(e)}")
+            return None
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
 
     def _dns_ptr_lookup(self, ip: str, timeout: int = 5, dns_servers: Optional[List[str]] = None) -> Optional[str]:
         """
@@ -428,38 +590,27 @@ class IPScanService:
             Dict with scan results including:
             - is_reachable, response_time
             - hostname (best available from SNMP/DNS/ARP priority)
-            - hostname_source (SNMP, DNS, ARP)
+            - hostname_source (SNMP, DNS, NETBIOS, ARP)
             - dns_name (from DNS PTR)
             - system_name (from SNMP sysName)
             - contact, location, machine_type, vendor (from SNMP)
             - last_boot_time (from SNMP sysUpTime)
             - mac_address, os_type, os_name, etc.
         """
-        result = {
-            'ip_address': ip,
-            'is_reachable': False,
-            'response_time': None,
-            'hostname': None,
-            'hostname_source': None,  # SNMP, DNS, ARP, or None
-            'dns_name': None,  # DNS PTR lookup result
-            'system_name': None,  # SNMP sysName
-            'contact': None,  # SNMP sysContact
-            'location': None,  # SNMP sysLocation
-            'machine_type': None,  # SNMP sysDescr parsed
-            'vendor': None,  # SNMP sysDescr parsed
-            'last_boot_time': None,  # SNMP sysUpTime converted
-            'mac_address': None,
-            'os_type': None,
-            'os_name': None,
-            'os_version': None,
-            'os_vendor': None,
-            'switch_name': None,
-            'switch_port': None,
-            'vlan_id': None
-        }
+        result = self._build_result(ip)
+
+        if scan_type == "enrich":
+            result['is_reachable'] = True
+            return self._enrich_single_ip(
+                result=result,
+                ip=ip,
+                snmp_profile=snmp_profile,
+                dns_servers=dns_servers
+            )
 
         # Step 1: Ping check
-        is_reachable, response_time = self._ping_ip(ip)
+        ping_timeout = max(1, settings.STATUS_CHECK_PING_TIMEOUT_SECONDS)
+        is_reachable, response_time = self._ping_ip(ip, timeout=ping_timeout)
         result['is_reachable'] = is_reachable
         result['response_time'] = response_time
 
@@ -470,54 +621,29 @@ class IPScanService:
         if scan_type == "quick":
             return result
 
-        # Step 3: SNMP device identification (HIGHEST PRIORITY)
-        # Try SNMP first if profile is provided
-        snmp_os_data = None  # Track SNMP OS info separately
-        if snmp_profile:
-            try:
-                from services.snmp_service import snmp_service
-                import asyncio
+        return self._enrich_single_ip(
+            result=result,
+            ip=ip,
+            snmp_profile=snmp_profile,
+            dns_servers=dns_servers
+        )
 
-                # Get device identification via SNMP
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    snmp_data = loop.run_until_complete(
-                        snmp_service.get_device_identification(ip, snmp_profile)
-                    )
-                    if snmp_data:
-                        result['system_name'] = snmp_data.get('system_name')
-                        result['contact'] = snmp_data.get('contact')
-                        result['location'] = snmp_data.get('location')
-                        result['last_boot_time'] = snmp_data.get('last_boot_time')
-                        result['machine_type'] = snmp_data.get('machine_type')
-                        result['vendor'] = snmp_data.get('vendor')
+    def _enrich_single_ip(
+        self,
+        *,
+        result: Dict[str, Any],
+        ip: str,
+        snmp_profile: Optional[Dict] = None,
+        dns_servers: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        # Step 3: OS detection baseline
+        # Keep the baseline lightweight for subnet sweeps. Running nmap against
+        # every reachable host turns a /24 scan into a multi-minute operation,
+        # so use TTL-based detection here and let SNMP refine network devices.
+        baseline_os_info = self._detect_os_simple(ip)
+        result.update(baseline_os_info)
 
-                        # Capture SNMP OS data (highest priority)
-                        snmp_os_data = {
-                            'os_type': snmp_data.get('os_type'),
-                            'os_name': snmp_data.get('os_name'),
-                            'os_version': snmp_data.get('os_version')
-                        }
-
-                        # Set OS data from SNMP (highest priority)
-                        result['os_type'] = snmp_os_data['os_type']
-                        result['os_name'] = snmp_os_data['os_name']
-                        result['os_version'] = snmp_os_data['os_version']
-
-                        # SNMP sysName is the highest priority hostname
-                        if result['system_name']:
-                            result['hostname'] = result['system_name']
-                            result['hostname_source'] = 'SNMP'
-                            logger.debug(f"Hostname from SNMP for {ip}: {result['system_name']}")
-                finally:
-                    loop.close()
-
-            except Exception as e:
-                logger.debug(f"SNMP device identification failed for {ip}: {str(e)}")
-
-        # Step 4: DNS PTR lookup (SECOND PRIORITY)
-        # Only query DNS if we didn't get hostname from SNMP
+        # Step 4: DNS PTR lookup
         if not result['hostname']:
             dns_name = self._dns_ptr_lookup(ip, dns_servers=dns_servers)
             if dns_name:
@@ -526,20 +652,79 @@ class IPScanService:
                 result['hostname_source'] = 'DNS'
                 logger.debug(f"Hostname from DNS for {ip}: {dns_name}")
 
-        # Step 5: Get MAC address (can be used for ARP-based hostname later)
+        # Step 4b: System resolver reverse lookup (same source classification as DNS)
+        if not result['hostname']:
+            reverse_name = self._normalize_hostname_candidate(self._resolve_hostname(ip))
+            if reverse_name:
+                result['dns_name'] = reverse_name
+                result['hostname'] = reverse_name
+                result['hostname_source'] = 'DNS'
+                logger.debug(f"Hostname from system resolver for {ip}: {reverse_name}")
+
+        # Step 5: Windows hostname fallback via NetBIOS
+        if not result['hostname'] and result.get('os_type') == 'windows':
+            netbios_name = self._get_netbios_hostname(ip)
+            if netbios_name:
+                result['hostname'] = netbios_name
+                result['hostname_source'] = 'NETBIOS'
+                logger.debug(f"Hostname from NetBIOS for {ip}: {netbios_name}")
+
+        # Step 6: SNMP device identification (highest priority for network devices)
+        # Restrict SNMP to likely network devices or hosts we still cannot name.
+        # Applying SNMP to every reachable endpoint in a /24 causes large timeout
+        # amplification on subnets dominated by PCs and printers.
+        snmp_os_data = None  # Track SNMP OS info separately
+        should_try_snmp = bool(snmp_profile) and (
+            result.get('os_type') == 'network'
+            or not result.get('hostname')
+        )
+        if should_try_snmp:
+            try:
+                from services.snmp_service import snmp_service
+
+                snmp_data = asyncio.run(
+                    snmp_service.get_device_identification(ip, snmp_profile)
+                )
+                if snmp_data:
+                    result['system_name'] = snmp_data.get('system_name')
+                    result['contact'] = snmp_data.get('contact')
+                    result['location'] = snmp_data.get('location')
+                    result['last_boot_time'] = snmp_data.get('last_boot_time')
+                    result['machine_type'] = snmp_data.get('machine_type')
+                    result['vendor'] = snmp_data.get('vendor')
+
+                    snmp_os_data = {
+                        'os_type': snmp_data.get('os_type'),
+                        'os_name': snmp_data.get('os_name'),
+                        'os_version': snmp_data.get('os_version')
+                    }
+
+                    if snmp_os_data['os_type']:
+                        result['os_type'] = snmp_os_data['os_type']
+                    if snmp_os_data['os_name']:
+                        result['os_name'] = snmp_os_data['os_name']
+                    if snmp_os_data['os_version']:
+                        result['os_version'] = snmp_os_data['os_version']
+
+                    # SNMP sysName remains the highest priority hostname when available.
+                    if result['system_name']:
+                        result['hostname'] = result['system_name']
+                        result['hostname_source'] = 'SNMP'
+                        logger.debug(f"Hostname from SNMP for {ip}: {result['system_name']}")
+
+            except Exception as e:
+                logger.debug(f"SNMP device identification failed for {ip}: {str(e)}")
+
+        # Step 7: Get MAC address (can be used for ARP-based hostname later)
         mac = self._get_mac_address(ip)
         if mac:
             result['mac_address'] = mac
 
-        # Step 6: OS detection (smart merging with SNMP data)
-        nmap_os_info = self._detect_os(ip)
-
-        # Smart merging: only use Nmap data if SNMP didn't provide it
+        # Step 8: OS detection merge
+        nmap_os_info = baseline_os_info
         if snmp_os_data and any(snmp_os_data.values()):
-            # SNMP data exists - use as primary source, fill gaps with Nmap
             logger.debug(f"Using SNMP OS data for {ip} (highest priority)")
 
-            # Fill missing fields from Nmap
             if not result.get('os_type') and nmap_os_info.get('os_type'):
                 result['os_type'] = nmap_os_info['os_type']
                 logger.debug(f"Filled os_type from Nmap: {nmap_os_info['os_type']}")
@@ -556,7 +741,6 @@ class IPScanService:
             if not result.get('os_vendor') and nmap_os_info.get('os_vendor'):
                 result['os_vendor'] = nmap_os_info['os_vendor']
         else:
-            # No SNMP data - use Nmap as primary source
             logger.debug(f"Using Nmap OS data for {ip} (SNMP unavailable)")
             result.update(nmap_os_info)
 
@@ -598,7 +782,8 @@ class IPScanService:
         ip_list: List[str],
         scan_type: str = "full",
         snmp_profile: Optional[Dict] = None,
-        dns_servers: Optional[List[str]] = None
+        dns_servers: Optional[List[str]] = None,
+        progress_callback: Optional[Callable[[Dict, int, int], Awaitable[None] | None]] = None
     ) -> List[Dict]:
         """
         Scan multiple IPs concurrently with optional SNMP profile
@@ -612,27 +797,59 @@ class IPScanService:
         logger.info(f"Starting scan of {len(ip_list)} IPs (type: {scan_type}, SNMP: {'enabled' if snmp_profile else 'disabled'})")
         start_time = time.time()
 
-        # Create tasks for all IPs
+        valid_results = []
+        total = len(ip_list)
+
+        if total == 0:
+            return valid_results
+
         tasks = [
-            self.scan_ip_async(ip, scan_type, snmp_profile, dns_servers)
+            asyncio.create_task(
+                self.scan_ip_async(ip, scan_type, snmp_profile, dns_servers)
+            )
             for ip in ip_list
         ]
 
-        # Wait for all scans to complete
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        completed = 0
+        for task in asyncio.as_completed(tasks):
+            try:
+                result = await task
+            except Exception as exc:
+                logger.error(f"Scan error: {exc}")
+                continue
 
-        # Filter out exceptions
-        valid_results = []
-        for result in results:
-            if isinstance(result, dict):
-                valid_results.append(result)
-            else:
-                logger.error(f"Scan error: {result}")
+            if not isinstance(result, dict):
+                logger.error(f"Unexpected scan result: {result}")
+                continue
+
+            valid_results.append(result)
+            completed += 1
+
+            if progress_callback:
+                callback_result = progress_callback(result, completed, total)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
 
         elapsed = time.time() - start_time
         logger.info(f"Scan completed in {elapsed:.2f}s: {len(valid_results)} results")
 
         return valid_results
+
+    async def enrich_multiple_ips(
+        self,
+        ip_list: List[str],
+        snmp_profile: Optional[Dict] = None,
+        dns_servers: Optional[List[str]] = None,
+        progress_callback: Optional[Callable[[Dict, int, int], Awaitable[None] | None]] = None
+    ) -> List[Dict]:
+        """Enrich already-reachable IPs without repeating the full subnet sweep."""
+        return await self.scan_multiple_ips(
+            ip_list=ip_list,
+            scan_type="enrich",
+            snmp_profile=snmp_profile,
+            dns_servers=dns_servers,
+            progress_callback=progress_callback
+        )
 
 
 # Singleton instance
