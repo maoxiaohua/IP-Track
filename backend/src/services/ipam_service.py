@@ -456,6 +456,76 @@ class IPAMService:
             'utilization_percent': round(utilization, 2)
         }
 
+    async def get_batch_subnet_statistics(
+        self,
+        db: AsyncSession,
+        subnet_ids: List[int]
+    ) -> Dict[int, Dict]:
+        """Get statistics for multiple subnets in a single batch query."""
+        if not subnet_ids:
+            return {}
+
+        # Init empty stats for every requested subnet
+        result_map: Dict[int, Dict] = {
+            sid: {
+                'total_ips': 0,
+                'available_ips': 0,
+                'used_ips': 0,
+                'reserved_ips': 0,
+                'offline_ips': 0,
+                'reachable_count': 0,
+                'utilization_percent': 0.0
+            }
+            for sid in subnet_ids
+        }
+
+        # Single query: count IPs grouped by subnet_id and status
+        status_result = await db.execute(
+            select(
+                IPAddress.subnet_id,
+                IPAddress.status,
+                func.count(IPAddress.id).label('count')
+            )
+            .where(IPAddress.subnet_id.in_(subnet_ids))
+            .group_by(IPAddress.subnet_id, IPAddress.status)
+        )
+
+        for row in status_result:
+            sid = row.subnet_id
+            status_key = row.status.value if hasattr(row.status, 'value') else row.status
+            if sid in result_map:
+                result_map[sid][f'{status_key}_ips'] = row.count
+
+        # Single query: count reachable IPs per subnet
+        reachable_result = await db.execute(
+            select(
+                IPAddress.subnet_id,
+                func.count(IPAddress.id).label('count')
+            )
+            .where(
+                and_(
+                    IPAddress.subnet_id.in_(subnet_ids),
+                    IPAddress.is_reachable == True
+                )
+            )
+            .group_by(IPAddress.subnet_id)
+        )
+
+        for row in reachable_result:
+            sid = row.subnet_id
+            if sid in result_map:
+                result_map[sid]['reachable_count'] = row.count
+
+        # Calculate total_ips and utilization for each subnet
+        for sid, stats in result_map.items():
+            total = stats['available_ips'] + stats['used_ips'] + stats['reserved_ips'] + stats['offline_ips']
+            stats['total_ips'] = total
+            stats['utilization_percent'] = round(
+                (stats['used_ips'] / total * 100) if total > 0 else 0, 2
+            )
+
+        return result_map
+
     async def list_ip_addresses(
         self,
         db: AsyncSession,
@@ -1071,11 +1141,17 @@ class IPAMService:
         total_ips = sum(stats.values())
         utilization = (stats.get('used', 0) / total_ips * 100) if total_ips > 0 else 0
 
-        # Get subnet statistics (all subnets for proper display)
+        # Get subnet statistics (all subnets for proper display) - batch query
         subnets = await self.list_subnets(db, limit=1000)
+        subnet_ids = [s.id for s in subnets]
+        batch_stats = await self.get_batch_subnet_statistics(db, subnet_ids)
         subnet_stats = []
         for subnet in subnets:
-            subnet_stat = await self.get_subnet_statistics(db, subnet.id)
+            subnet_stat = batch_stats.get(subnet.id, {
+                'total_ips': 0, 'available_ips': 0, 'used_ips': 0,
+                'reserved_ips': 0, 'offline_ips': 0, 'reachable_count': 0,
+                'utilization_percent': 0.0
+            })
             subnet_stats.append({
                 'subnet_id': subnet.id,
                 'subnet_name': subnet.name,

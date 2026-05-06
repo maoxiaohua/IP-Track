@@ -1749,6 +1749,56 @@ class CLIService:
                     logger.warning(f"Error processing fallback commands: {str(e)}")
 
             logger.warning(f"All MAC commands failed or returned 0 entries for {switch_ip}")
+
+            # Dell Force10 (FTOS) fallback → retry with OS10 driver
+            if device_type == 'dell_force10':
+                logger.info(f"Dell Force10 returned 0 MAC entries from {switch_ip}, retrying with OS10 driver...")
+                if connection:
+                    try:
+                        connection.disconnect()
+                    except Exception:
+                        pass
+                    connection = None
+
+                os10_conn = self._create_cli_connection(
+                    host=switch_ip,
+                    username=switch_config['username'],
+                    password=password,
+                    device_type='dell_os10',
+                    port=switch_config.get('ssh_port'),
+                    timeout=switch_config.get('connection_timeout', 30),
+                    enable_secret=enable_secret,
+                    transport=transport
+                )
+                if os10_conn:
+                    connection = os10_conn  # For cleanup in finally
+                    try:
+                        os10_output = self._execute_command(
+                            os10_conn,
+                            command,
+                            device_type='dell_os10',
+                            transport=transport,
+                            read_timeout=90,
+                            delay_factor=4,
+                            max_loops=200,
+                        )
+                        os10_parser = self._get_parser('dell_os10', 'mac')
+                        if os10_parser:
+                            os10_entries = os10_parser(os10_output)
+                            if os10_entries:
+                                logger.info(
+                                    f"✅ Collected {len(os10_entries)} MAC entries from {switch_ip}"
+                                    f" via CLI (OS10 fallback)"
+                                )
+                                return os10_entries
+                            else:
+                                logger.warning(
+                                    f"OS10 MAC fallback parsed 0 entries from {switch_ip}. "
+                                    f"Output sample (first 1000 chars):\n{os10_output[:1000]}"
+                                )
+                    except Exception as os10_err:
+                        logger.warning(f"OS10 MAC fallback failed on {switch_ip}: {str(os10_err)[:200]}")
+
             return []
 
         except Exception as e:
@@ -2045,15 +2095,15 @@ class CLIService:
                     device_type=device_type,
                     transport=transport,
                     read_timeout=90,
-                    delay_factor=3,
+                    delay_factor=4 if self._base_device_type(device_type) == 'dell_force10' else 3,
                     max_loops=200,
                 )
 
                 arp_entries = parser(output)
 
-                # Debug: Log first 1000 chars of output if parsing returns 0 results for Dell Force10
+                # Debug: Log output if parsing returns 0 results for Dell Force10
                 if not arp_entries and device_type == 'dell_force10':
-                    logger.warning(f"Dell Force10 '{command}' parsing returned 0 entries. Output sample (first 1000 chars):\n{output[:1000]}")
+                    logger.warning(f"Dell Force10 '{command}' parsing returned 0 entries. Output sample (first 2000 chars):\n{output[:2000]}")
 
                 if arp_entries:
                     logger.info(f"✅ Collected {len(arp_entries)} ARP entries from {switch_ip} via CLI (main command)")
@@ -2108,6 +2158,56 @@ class CLIService:
                     logger.warning(f"Error processing ARP fallback commands: {str(e)}")
 
             logger.warning(f"All ARP commands failed or returned 0 entries for {switch_ip}")
+
+            # Dell Force10 (FTOS) fallback → retry with OS10 driver
+            if device_type == 'dell_force10':
+                logger.info(f"Dell Force10 returned 0 ARP entries from {switch_ip}, retrying with OS10 driver...")
+                if connection:
+                    try:
+                        connection.disconnect()
+                    except Exception:
+                        pass
+                    connection = None
+
+                os10_conn = self._create_cli_connection(
+                    host=switch_ip,
+                    username=switch_config['username'],
+                    password=password,
+                    device_type='dell_os10',
+                    port=switch_config.get('ssh_port'),
+                    timeout=switch_config.get('connection_timeout', 30),
+                    enable_secret=enable_secret,
+                    transport=transport
+                )
+                if os10_conn:
+                    connection = os10_conn  # For cleanup in finally
+                    try:
+                        os10_output = self._execute_command(
+                            os10_conn,
+                            command,
+                            device_type='dell_os10',
+                            transport=transport,
+                            read_timeout=90,
+                            delay_factor=4,
+                            max_loops=200,
+                        )
+                        os10_parser = self._get_parser('dell_os10', 'arp')
+                        if os10_parser:
+                            os10_entries = os10_parser(os10_output)
+                            if os10_entries:
+                                logger.info(
+                                    f"✅ Collected {len(os10_entries)} ARP entries from {switch_ip}"
+                                    f" via CLI (OS10 fallback)"
+                                )
+                                return os10_entries
+                            else:
+                                logger.warning(
+                                    f"OS10 ARP fallback parsed 0 entries from {switch_ip}. "
+                                    f"Output sample (first 1000 chars):\n{os10_output[:1000]}"
+                                )
+                    except Exception as os10_err:
+                        logger.warning(f"OS10 ARP fallback failed on {switch_ip}: {str(os10_err)[:200]}")
+
             return []
 
         except Exception as e:

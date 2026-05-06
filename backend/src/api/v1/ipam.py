@@ -334,10 +334,16 @@ async def list_subnets(
     """List all IP subnets"""
     subnets = await ipam_service.list_subnets(db, skip=skip, limit=limit)
 
-    # Add statistics to each subnet
+    # Add statistics to each subnet using batch query
+    subnet_ids = [s.id for s in subnets]
+    batch_stats = await ipam_service.get_batch_subnet_statistics(db, subnet_ids)
     result = []
     for subnet in subnets:
-        stats = await ipam_service.get_subnet_statistics(db, subnet.id)
+        stats = batch_stats.get(subnet.id, {
+            'total_ips': 0, 'available_ips': 0, 'used_ips': 0,
+            'reserved_ips': 0, 'offline_ips': 0, 'reachable_count': 0,
+            'utilization_percent': 0.0
+        })
         subnet_dict = {
             "id": subnet.id,
             "name": subnet.name,

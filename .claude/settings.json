@@ -1,8 +1,17 @@
 {
-  "apiKeyHelper": "echo 'sk-ant-apiRbQEcaHSYHr0qQvQ7ovbMcuRzetdnuC4AqchV7uo'",
-  "env": {
-    "ANTHROPIC_API_KEY": "sk-ant-apiRbQEcaHSYHr0qQvQ7ovbMcuRzetdnuC4AqchV7uo",
-    "ANTHROPIC_BASE_URL": "https://user-api-01.aiweber.com",
-    "HTTPS_PROXY": "http://87.254.212.121:8080"
-  }
+    "env": {
+        "ANTHROPIC_AUTH_TOKEN": "sk-5be0d2f948d24faea406614364c607af",
+        "ANTHROPIC_BASE_URL": "https://dashscope.aliyuncs.com/apps/anthropic",
+        "ANTHROPIC_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_SMALL_FAST_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-v4-pro",
+        "HTTP_PROXY": "http://87.254.212.121:8080",
+        "HTTPS_PROXY": "http://87.254.212.121:8080",
+        "NO_PROXY": "localhost,127.0.0.1,.internal.local"
+
+    }
 }
+

@@ -61,7 +61,7 @@
       <!-- Filters -->
       <el-row :gutter="20" style="margin-bottom: 20px">
         <el-col :span="6">
-          <el-select v-model="filters.status" placeholder="筛选状态" clearable @change="loadIPs">
+          <el-select v-model="filters.status" placeholder="筛选状态" clearable @change="handleFilterChange">
             <el-option label="All" value="" />
             <el-option label="Available" value="available" />
             <el-option label="Used" value="used" />
@@ -69,7 +69,7 @@
           </el-select>
         </el-col>
         <el-col :span="6">
-          <el-select v-model="filters.is_reachable" placeholder="筛选可达性" clearable @change="loadIPs">
+          <el-select v-model="filters.is_reachable" placeholder="筛选可达性" clearable @change="handleFilterChange">
             <el-option label="All" value="" />
             <el-option label="Online" :value="true" />
             <el-option label="Offline" :value="false" />
@@ -80,22 +80,22 @@
             v-model="filters.search"
             placeholder="搜索 IP 地址、主机名、DNS 名称..."
             clearable
-            @change="loadIPs"
-          >
-            <template #prefix>
+            @change="handleFilterChange">
+          <template #prefix>
               <el-icon><Search /></el-icon>
             </template>
           </el-input>
         </el-col>
       </el-row>
 
-      <!-- IP Table (SolarWinds Style) - All IPs shown for easy searching -->
+      <!-- IP Table with pagination -->
       <div style="margin-bottom: 10px; color: #909399; font-size: 13px">
-        显示全部 {{ ipAddresses.length }} 个 IP 地址
+        显示全部 {{ totalIPCount }} 个 IP 地址（当前页 {{ ipAddresses.length }} 条）
       </div>
       <el-table
         :data="ipAddresses"
-        v-loading="loading"
+        v-loading="initialLoading"
+        element-loading-text="正在加载 IP 地址..."
         stripe
         style="width: 100%"
         :default-sort="{ prop: 'ip_address', order: 'ascending' }"
@@ -235,6 +235,18 @@
         </el-table-column>
       </el-table>
 
+      <!-- Pagination -->
+      <el-pagination
+        v-model:current-page="pagination.currentPage"
+        v-model:page-size="pagination.pageSize"
+        :page-sizes="[50, 100, 200, 500]"
+        :total="totalIPCount"
+        layout="total, sizes, prev, pager, next, jumper"
+        style="margin-top: 20px; justify-content: center"
+        @size-change="loadIPs"
+        @current-change="loadIPs"
+      />
+
     </el-card>
 
     <!-- IP Detail Drawer -->
@@ -341,8 +353,15 @@ const subnet = ref<Subnet>({
 })
 const ipAddresses = ref<IPAddress[]>([])
 const loading = ref(false)
+const initialLoading = ref(true)
+const refreshing = ref(false)
 const scanning = ref(false)
 const showEditDialog = ref(false)
+
+const pagination = ref({
+  currentPage: 1,
+  pageSize: 100
+})
 
 const editForm = ref({
   name: '',
@@ -362,6 +381,7 @@ const filters = ref({
 const showDrawer = ref(false)
 const selectedIpId = ref<number | null>(null)
 const detailDrawerRefreshKey = ref(0)
+const totalIPCount = ref(0)
 let lastStatusNotificationKey = ''
 
 const openIPDetail = (ipId: number) => {
@@ -380,18 +400,6 @@ const handleScanStatusChange = (status: IPAMScanStatus, previous: IPAMScanStatus
 
   const notificationKey = `${status.type || status.current_phase}:${status.session_id || 'none'}:${status.updated_at || ''}`
 
-  if (
-    status.subnet_id === subnetId &&
-    previous?.current_subnet_last_scan_at !== status.current_subnet_last_scan_at &&
-    status.current_subnet_last_scan_at
-  ) {
-    void loadSubnet()
-    void loadIPs()
-    if (showDrawer.value && selectedIpId.value) {
-      detailDrawerRefreshKey.value += 1
-    }
-  }
-
   if (notificationKey === lastStatusNotificationKey) {
     return
   }
@@ -406,11 +414,7 @@ const handleScanStatusChange = (status: IPAMScanStatus, previous: IPAMScanStatus
       )
     }
     if (status.subnet_id === subnetId) {
-      void loadSubnet()
-      void loadIPs()
-      if (showDrawer.value && selectedIpId.value) {
-        detailDrawerRefreshKey.value += 1
-      }
+      refreshDataInBackground()
     }
     return
   }
@@ -559,14 +563,22 @@ const handleEditSubmit = async () => {
   }
 }
 
-// Load ALL IP addresses (no pagination - show everything)
+// Filter change - reset to page 1 and reload
+const handleFilterChange = () => {
+  pagination.value.currentPage = 1
+  loadIPs()
+}
+
+// Load IP addresses with pagination
 const loadIPs = async () => {
-  loading.value = true
+  if (initialLoading.value) {
+    loading.value = true
+  }
   try {
     const params: any = {
       subnet_id: subnetId,
-      skip: 0,  // Start from beginning
-      limit: 10000  // Backend max limit
+      skip: (pagination.value.currentPage - 1) * pagination.value.pageSize,
+      limit: pagination.value.pageSize
     }
 
     if (filters.value.status) params.status = filters.value.status
@@ -575,14 +587,47 @@ const loadIPs = async () => {
 
     const response = await apiClient.get('/api/v1/ipam/ip-addresses', { params })
     ipAddresses.value = response.data.items || []
+    totalIPCount.value = response.data.total || 0
     ipAddresses.value.sort((a, b) => sortByIpAddress(a, b))
-
-    // Log for debugging
-    console.log(`Loaded ${ipAddresses.value.length} IP addresses for subnet ${subnetId}`)
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '加载 IP 地址失败')
   } finally {
     loading.value = false
+    initialLoading.value = false
+  }
+}
+
+// Refresh data without blocking UI
+const refreshDataInBackground = async () => {
+  refreshing.value = true
+  try {
+    const subnetResponse = await apiClient.get(`/api/v1/ipam/subnets/${subnetId}`)
+    subnet.value = {
+      ...subnetResponse.data,
+      subnet_name: subnetResponse.data.subnet_name || subnetResponse.data.name || ''
+    }
+
+    const params: any = {
+      subnet_id: subnetId,
+      skip: (pagination.value.currentPage - 1) * pagination.value.pageSize,
+      limit: pagination.value.pageSize
+    }
+    if (filters.value.status) params.status = filters.value.status
+    if (filters.value.is_reachable !== '') params.is_reachable = filters.value.is_reachable
+    if (filters.value.search) params.search = filters.value.search
+
+    const ipResponse = await apiClient.get('/api/v1/ipam/ip-addresses', { params })
+    ipAddresses.value = ipResponse.data.items || []
+    totalIPCount.value = ipResponse.data.total || 0
+    ipAddresses.value.sort((a, b) => sortByIpAddress(a, b))
+
+    if (showDrawer.value && selectedIpId.value) {
+      detailDrawerRefreshKey.value += 1
+    }
+  } catch (error: any) {
+    console.error('Background refresh failed:', error)
+  } finally {
+    refreshing.value = false
   }
 }
 
@@ -599,11 +644,7 @@ const scanSubnet = async () => {
         response.message ||
         `同步扫描完成：${response.summary?.reachable ?? 0} 个在线，${response.summary?.unreachable ?? 0} 个离线`
       )
-      await loadSubnet()
-      await loadIPs()
-      if (showDrawer.value && selectedIpId.value) {
-        detailDrawerRefreshKey.value += 1
-      }
+      await refreshDataInBackground()
       return
     }
 

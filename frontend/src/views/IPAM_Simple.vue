@@ -82,7 +82,8 @@
       <el-table
         :data="paginatedSubnets"
         stripe
-        v-loading="loading"
+        v-loading="initialLoading"
+        element-loading-text="正在加载子网数据..."
         style="width: 100%"
         @row-click="handleRowClick"
         :row-style="{ cursor: 'pointer' }"
@@ -370,6 +371,8 @@ interface Subnet {
 const router = useRouter()
 const subnets = ref<Subnet[]>([])
 const loading = ref(false)
+const initialLoading = ref(true)
+const refreshing = ref(false)
 const scanning = ref<Record<number, boolean>>({})
 const showAddSubnetDialog = ref(false)
 const showBatchImportDialog = ref(false)
@@ -448,23 +451,15 @@ const handleScanStatusChange = (status: IPAMScanStatus, previous: IPAMScanStatus
         `扫描完成：${summary?.reachable ?? 0} 个在线，${summary?.unreachable ?? 0} 个离线`
       )
     }
-    void loadSubnets()
+    refreshSubnetsInBackground()
     return
   }
 
   if (status.type === 'error') {
     lastStatusNotificationKey = notificationKey
     ElMessage.error(status.message || status.error || 'IPAM 扫描失败')
-    void loadSubnets()
+    refreshSubnetsInBackground()
     return
-  }
-
-  if (
-    previous?.current_subnet_last_scan_at !== status.current_subnet_last_scan_at &&
-    status.subnet_id &&
-    status.current_subnet_last_scan_at
-  ) {
-    void loadSubnets()
   }
 }
 
@@ -592,9 +587,11 @@ watch(searchText, () => {
   pagination.value.currentPage = 1
 })
 
-// Load subnets
+// Load subnets (initial load - shows loading overlay)
 const loadSubnets = async () => {
-  loading.value = true
+  if (initialLoading.value) {
+    loading.value = true
+  }
   try {
     const response = await apiClient.get('/api/v1/ipam/dashboard')
     subnets.value = response.data.subnets || []
@@ -609,6 +606,27 @@ const loadSubnets = async () => {
     ElMessage.error(error.response?.data?.detail || '加载子网失败')
   } finally {
     loading.value = false
+    initialLoading.value = false
+  }
+}
+
+// Refresh subnets without blocking UI (no loading overlay)
+const refreshSubnetsInBackground = async () => {
+  refreshing.value = true
+  try {
+    const response = await apiClient.get('/api/v1/ipam/dashboard')
+    subnets.value = response.data.subnets || []
+
+    subnets.value.sort((a, b) => {
+      const aUtil = a.utilization_percent ?? 0
+      const bUtil = b.utilization_percent ?? 0
+      return bUtil - aUtil
+    })
+  } catch (error: any) {
+    // Silent - don't show error for background refresh
+    console.error('Background subnet refresh failed:', error)
+  } finally {
+    refreshing.value = false
   }
 }
 
