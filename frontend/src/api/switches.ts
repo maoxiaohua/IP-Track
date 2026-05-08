@@ -6,8 +6,6 @@ export interface Switch {
   ip_address: string
   vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper'
   model?: string
-  role?: string
-  priority?: number
   enabled: boolean
 
   // CLI fields
@@ -126,7 +124,7 @@ export interface SwitchListParams {
   limit?: number
   search?: string
   trunk_review_completed?: boolean
-  sort_by?: 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'connection_status'
+  sort_by?: 'id' | 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'connection_status'
   sort_order?: 'asc' | 'desc'
 }
 
@@ -260,18 +258,6 @@ export const switchesApi = {
   // Test switch connection
   test: async (id: number): Promise<SwitchTestResponse> => {
     const response = await apiClient.post(`/api/v1/switches/${id}/test`)
-    return response.data
-  },
-
-  // Ping a switch
-  ping: async (id: number): Promise<any> => {
-    const response = await apiClient.post(`/api/v1/switches/${id}/ping`)
-    return response.data
-  },
-
-  // Ping all switches
-  pingAll: async (): Promise<any> => {
-    const response = await apiClient.post('/api/v1/switches/ping-all')
     return response.data
   },
 

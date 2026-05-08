@@ -33,6 +33,10 @@ class CLIService:
         'nokia_sros': ['environment more false'],
         'nokia_srl': ['environment more false'],
         'alcatel_aos': ['environment no more'],
+        'arista_eos': ['terminal length 0'],
+        'hp_procurve': ['no page'],
+        'hp_comware': ['screen-length disable'],
+        'huawei': ['screen-length 0 temporary'],
     }
     TELNET_DEVICE_TYPE_ALIASES = {
         'cisco_xe': 'cisco_ios_telnet',
@@ -41,6 +45,10 @@ class CLIService:
         'dell_os10': 'generic_telnet',
         'nokia_srl': 'generic_telnet',
         'alcatel_aos': 'generic_telnet',
+        'hp_comware': 'generic_telnet',
+        'arista_eos': 'generic_telnet',
+        'hp_procurve': 'generic_telnet',
+        'huawei': 'generic_telnet',
     }
 
     def __init__(self):
@@ -1406,6 +1414,167 @@ class CLIService:
 
         return mac_entries
 
+    # ==================== Arista EOS Parsers ====================
+
+    def _parse_arista_eos_arp_table(self, output: str) -> List[Dict]:
+        """Parse Arista EOS 'show ip arp' output (similar to Cisco IOS format).
+
+        Example:
+        Address         Age (min)  Hardware Addr   Interface
+        10.1.1.1        30         aabb.ccdd.eeff  Ethernet1
+        """
+        entries = []
+        for line in output.split('\n'):
+            line = line.strip()
+            if not line or 'Address' in line or '---' in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 3:
+                ip = parts[0]
+                mac = parts[2] if len(parts) > 2 else ''
+                if not re.match(r'^\d+\.\d+\.\d+\.\d+$', ip):
+                    continue
+                mac = mac.replace('.', '').lower()
+                if len(mac) == 12:
+                    mac = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+                if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+                    continue
+                interface = parts[3] if len(parts) > 3 else ''
+                entries.append({'ip_address': ip, 'mac_address': mac, 'vlan_id': None, 'interface': interface})
+        return entries
+
+    def _parse_arista_eos_mac_table(self, output: str) -> List[Dict]:
+        """Parse Arista EOS 'show mac address-table' output (similar to Cisco IOS).
+
+        Example:
+        Vlan    Mac Address       Type        Ports
+        ----    -----------       ----        -----
+        100     aabb.ccdd.eeff    DYNAMIC     Et1
+        """
+        entries = []
+        for line in output.split('\n'):
+            line = line.strip()
+            if not line or 'Mac Address' in line or '---' in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 4:
+                vlan = parts[0]
+                mac = parts[1].replace('.', '').lower()
+                if len(mac) == 12:
+                    mac = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+                if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+                    continue
+                is_dynamic = 1 if 'dynamic' in parts[2].lower() else 0
+                port = parts[3]
+                entries.append({'mac_address': mac, 'port_name': port, 'vlan_id': int(vlan) if vlan.isdigit() else None, 'is_dynamic': is_dynamic})
+        return entries
+
+    # ==================== HPE ProCurve Parsers ====================
+
+    def _parse_hpe_procurve_arp_table(self, output: str) -> List[Dict]:
+        """Parse HPE ProCurve 'show arp' output.
+
+        Example:
+        IP ARP table
+        IP Address     MAC Address       Type    Port
+        -------------  ----------------- ------- ----------
+        10.1.1.1       aabbcc-ddeeff     dynamic 1
+        """
+        entries = []
+        for line in output.split('\n'):
+            line = line.strip()
+            if not line or 'IP Address' in line or '---' in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 3 and re.match(r'^\d+\.\d+\.\d+\.\d+$', parts[0]):
+                ip = parts[0]
+                mac = parts[1].replace('-', '').lower()
+                if len(mac) == 12:
+                    mac = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+                if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+                    continue
+                interface = parts[3] if len(parts) > 3 else ''
+                entries.append({'ip_address': ip, 'mac_address': mac, 'vlan_id': None, 'interface': interface})
+        return entries
+
+    def _parse_hpe_procurve_mac_table(self, output: str) -> List[Dict]:
+        """Parse HPE ProCurve 'show mac-address' output.
+
+        Example:
+        Status and Counters - Port Address Table
+        MAC Address     Located on Port
+        -------------   ---------------
+        aabbcc-ddeeff   1
+        """
+        entries = []
+        for line in output.split('\n'):
+            line = line.strip()
+            if not line or 'MAC Address' in line or '---' in line or 'Status' in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and re.match(r'^[0-9a-fA-F-]+$', parts[0]):
+                mac = parts[0].replace('-', '').lower()
+                if len(mac) == 12:
+                    mac = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+                if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+                    continue
+                port = parts[1]
+                entries.append({'mac_address': mac, 'port_name': port, 'vlan_id': None, 'is_dynamic': 1})
+        return entries
+
+    # ==================== Huawei VRP Parsers ====================
+
+    def _parse_huawei_vrp_arp_table(self, output: str) -> List[Dict]:
+        """Parse Huawei VRP 'display arp all' output.
+
+        Example:
+        IP ADDRESS      MAC ADDRESS     EXPIRE(M) TYPE INTERFACE      VPN-INSTANCE
+        10.1.1.1        aabb-ccdd-eeff  19        D     GE0/0/1       --
+        """
+        entries = []
+        for line in output.split('\n'):
+            line = line.strip()
+            if not line or 'IP ADDRESS' in line or '---' in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 4 and re.match(r'^\d+\.\d+\.\d+\.\d+$', parts[0]):
+                ip = parts[0]
+                mac = parts[1].replace('-', '').lower()
+                if len(mac) == 12:
+                    mac = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+                if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+                    continue
+                interface = parts[4] if len(parts) > 4 else ''
+                vlan = parts[5] if len(parts) > 5 and parts[5].isdigit() else None
+                entries.append({'ip_address': ip, 'mac_address': mac, 'vlan_id': int(vlan) if vlan else None, 'interface': interface})
+        return entries
+
+    def _parse_huawei_vrp_mac_table(self, output: str) -> List[Dict]:
+        """Parse Huawei VRP 'display mac-address' output.
+
+        Example:
+        MAC Address    VLAN/VSI          Learned-From        Type
+        aabb-ccdd-eeff 100/-             GE0/0/1             dynamic
+        """
+        entries = []
+        for line in output.split('\n'):
+            line = line.strip()
+            if not line or 'MAC Address' in line or '---' in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 3 and re.match(r'^[0-9a-fA-F-]+$', parts[0]):
+                mac = parts[0].replace('-', '').lower()
+                if len(mac) == 12:
+                    mac = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+                if not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+                    continue
+                vlan_str = parts[1].split('/')[0] if '/' in parts[1] else parts[1]
+                vlan = int(vlan_str) if vlan_str.isdigit() else None
+                port = parts[2]
+                is_dynamic = 1 if len(parts) > 3 and 'dynamic' in parts[3].lower() else 0
+                entries.append({'mac_address': mac, 'port_name': port, 'vlan_id': vlan, 'is_dynamic': is_dynamic})
+        return entries
+
     def _parse_juniper_system_info(self, output: str) -> Dict[str, str]:
         """
         Parse Juniper 'show system information' output
@@ -2101,9 +2270,9 @@ class CLIService:
 
                 arp_entries = parser(output)
 
-                # Debug: Log output if parsing returns 0 results for Dell Force10
-                if not arp_entries and device_type == 'dell_force10':
-                    logger.warning(f"Dell Force10 '{command}' parsing returned 0 entries. Output sample (first 2000 chars):\n{output[:2000]}")
+                # Debug: Log output if parsing returns 0 results
+                if not arp_entries and device_type in ('dell_force10', 'dell_os10'):
+                    logger.warning(f"Dell {device_type} '{command}' parsing returned 0 entries. Output sample (first 2000 chars):\n{output[:2000]}")
 
                 if arp_entries:
                     logger.info(f"✅ Collected {len(arp_entries)} ARP entries from {switch_ip} via CLI (main command)")
@@ -2372,6 +2541,18 @@ class CLIService:
             'juniper': {
                 'arp': self._parse_juniper_arp_table,
                 'mac': self._parse_juniper_mac_table
+            },
+            'arista_eos': {
+                'arp': self._parse_arista_eos_arp_table,
+                'mac': self._parse_arista_eos_mac_table
+            },
+            'hpe_procurve': {
+                'arp': self._parse_hpe_procurve_arp_table,
+                'mac': self._parse_hpe_procurve_mac_table
+            },
+            'huawei_vrp': {
+                'arp': self._parse_huawei_vrp_arp_table,
+                'mac': self._parse_huawei_vrp_mac_table
             }
         }
 
@@ -2469,8 +2650,11 @@ class CLIService:
                 logger.debug(f"Dell inventory media output:\n{output}")
                 modules = self._parse_dell_inventory_media(output)
             
-            # Dell S9100: show interface transceiver
-            elif vendor_lower == 'dell' and ('9100' in model_upper or 's9100' in model_upper):
+            # Dell Force10/DNOS9 (S3000, S4000, Z9000 series): show interface transceiver
+            elif vendor_lower == 'dell' and (
+                '3148' in model_upper or '4148' in model_upper or
+                '9100' in model_upper or 's9100' in model_upper
+            ):
                 logger.info(f"Using 'show interface transceiver' for Dell {model}")
                 command = 'show interface transceiver'
                 output = connection.send_command_timing(command, delay_factor=2)
@@ -2507,6 +2691,14 @@ class CLIService:
                 logger.info(f"Using per-port transceiver query for Alcatel/Nokia {model}")
                 modules = self._collect_alcatel_transceivers(connection)
             
+            # Juniper: show interfaces diagnostics optics
+            elif vendor_lower == 'juniper':
+                logger.info(f"Using 'show interfaces diagnostics optics' for Juniper {model}")
+                command = 'show interfaces diagnostics optics'
+                output = connection.send_command_timing(command, delay_factor=2)
+                logger.debug(f"Command output length: {len(output)} bytes")
+                modules = self._parse_juniper_optics(output)
+
             else:
                 logger.warning(f"Unsupported vendor/model for optical module CLI collection: {vendor} {model}")
             
@@ -2975,6 +3167,51 @@ class CLIService:
             logger.error(f"Error parsing Alcatel transceiver info for {port_name}: {str(e)}", exc_info=True)
             return None
     
+    def _parse_juniper_optics(self, output: str) -> List[Dict]:
+        """Parse Juniper 'show interfaces diagnostics optics' output."""
+        modules = []
+        if not output:
+            return modules
+
+        blocks = re.split(r'^Physical interface:', output, flags=re.MULTILINE)
+        for block in blocks:
+            if not block.strip():
+                continue
+
+            lines = block.strip().split('\n')
+            port_name_raw = lines[0].strip() if lines else ''
+            port_name = self._normalize_optical_port_name(port_name_raw)
+
+            vendor = None
+            part_number = None
+            serial_number = None
+
+            for line in lines[1:]:
+                line_lower = line.lower().strip()
+                if 'vendor name' in line_lower:
+                    vendor = line.split(':', 1)[-1].strip()
+                elif 'vendor part number' in line_lower or 'part number' in line_lower:
+                    part_number = line.split(':', 1)[-1].strip()
+                elif 'vendor serial number' in line_lower or 'serial number' in line_lower:
+                    serial_number = line.split(':', 1)[-1].strip()
+
+            module_type = self._infer_module_type_from_port_name(port_name_raw)
+            speed = self._extract_speed_gbps(port_name_raw)
+
+            has_identity = any([vendor, part_number, serial_number])
+            if has_identity:
+                modules.append({
+                    'port_name': port_name,
+                    'module_type': module_type,
+                    'vendor': vendor,
+                    'model': part_number,
+                    'serial_number': serial_number,
+                    'speed_gbps': speed,
+                })
+
+        logger.info(f"Parsed {len(modules)} optical modules from Juniper optics output")
+        return modules
+
     def _identify_module_type(self, type_str: str) -> str:
         """Identify module type from description string"""
         if not type_str:
@@ -3020,31 +3257,6 @@ class CLIService:
             return match.group(1)
         return cleaned
 
-    def _infer_module_type_from_port_name(self, port_name: str) -> str:
-        """Infer a generic optical module type when the platform hides the PID."""
-        port_lower = (port_name or '').lower()
-
-        if port_lower.startswith(('hundredgige', 'hundredgig', 'hu')):
-            return 'QSFP28'
-        if port_lower.startswith(('fortygige', 'fortygig', 'fo')):
-            return 'QSFP+'
-        if port_lower.startswith(('tengigabitethernet', 'tengige', 'te', 'twentyfivegig', 'twe')):
-            return 'SFP+'
-        if port_lower.startswith(('gigabitethernet', 'gi', 'fastethernet', 'fa', 'ethernet')):
-            return 'SFP'
-        return 'Transceiver'
-
-    def _normalize_optical_port_name(self, interface_name: str) -> str:
-        """Normalize vendor-specific interface labels to the canonical port token."""
-        if not interface_name:
-            return interface_name
-
-        cleaned = interface_name.strip()
-        match = re.search(r'(\d+(?:/\d+){1,2})$', cleaned)
-        if match:
-            return match.group(1)
-        return cleaned
-    
     def _extract_speed_gbps(self, speed_str: str) -> Optional[int]:
         """Extract speed in Gbps from speed string"""
         try:

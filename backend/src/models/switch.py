@@ -84,3 +84,8 @@ class Switch(Base):
 
     def __repr__(self):
         return f"<Switch(id={self.id}, name='{self.name}', ip='{self.ip_address}')>"
+
+    @property
+    def has_snmp_credentials(self) -> bool:
+        """True when SNMP is enabled and auth credentials are fully configured."""
+        return bool(self.snmp_enabled and self.snmp_auth_password_encrypted)

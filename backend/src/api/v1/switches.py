@@ -23,6 +23,8 @@ from services.data_freshness_service import (
 )
 from services.network_data_collector import network_data_collector
 from services.status_checker import switch_status_checker
+from services.alarm_service import alarm_service
+from models.alarm import AlarmSourceType
 from utils.logger import logger
 from utils.network import ping_host, ping_multiple_hosts
 
@@ -823,20 +825,6 @@ async def collect_switch_arp_table(
 
         logger.info(f"Manual ARP collection triggered for switch {switch.name} ({switch.ip_address})")
 
-        # Prepare switch config for CLI
-        cli_config = {
-            'username': switch.username,
-            'password_encrypted': switch.password_encrypted,
-            'enable_password_encrypted': switch.enable_password_encrypted,
-            'device_type': 'nokia_sros',  # Will be determined based on vendor
-            'vendor': switch.vendor,
-            'model': switch.model,
-            'name': switch.name,
-            'cli_transport': switch.cli_transport,
-            'ssh_port': switch.ssh_port,
-            'connection_timeout': switch.connection_timeout
-        }
-
         arp_entries = []
         collection_method = None
 
@@ -847,15 +835,26 @@ async def collect_switch_arp_table(
         )
         if switch.cli_enabled and switch.password_encrypted:
             try:
+                # Match auto-collection path: load DB templates and close read
+                # transaction before the blocking SSH call (same as collect_arp_single_switch)
+                templates = await network_data_collector._load_command_templates(db)
+                cli_config = network_data_collector._build_cli_config(switch)
+                await db.commit()
+
+                # Track collection method (same as auto path)
+                switch.arp_collection_method = 'cli'
+                switch.arp_method_override = False
+
                 arp_entries_cli = await asyncio.to_thread(
                     cli_service.collect_arp_table_cli,
                     str(switch.ip_address),
                     cli_config,
-                    None  # templates
+                    templates
                 )
                 if arp_entries_cli:
                     arp_entries = arp_entries_cli
                     collection_method = 'CLI'
+                    switch.arp_collection_success_count += 1
                     logger.info(f"Collected {len(arp_entries)} ARP entries via CLI from {switch.name}")
             except Exception as e:
                 logger.warning(f"CLI ARP collection failed for {switch.name}: {str(e)}")
@@ -863,13 +862,28 @@ async def collect_switch_arp_table(
             logger.warning(f"CLI ARP collection skipped for {switch.name}: CLI credentials are not configured")
 
         if not arp_entries:
+            # 0 entries from a successful CLI run - mark as partial (matching auto path)
+            switch.arp_collection_fail_count += 1
+            now = datetime.now(timezone.utc)
+            switch.last_arp_collection_at = now
+            switch.last_collection_status = 'partial'
+            switch.last_collection_message = "ARP: 0 entries after trying all available methods"
+            db.add(switch)
+            resolved_count = await alarm_service.auto_resolve_alarms(
+                db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
+            )
+            await db.commit()
+            logger.info(
+                f"ARP collection returned 0 entries for {switch.name} (valid result); "
+                f"auto-resolved {resolved_count} alarm(s)"
+            )
             return {
                 'switch_id': switch_id,
                 'switch_name': switch.name,
                 'switch_ip': str(switch.ip_address),
                 'total_entries': 0,
-                'collection_method': None,
-                'message': 'Failed to collect ARP table via CLI (global policy)',
+                'collection_method': 'CLI',
+                'message': 'ARP table is empty - collection completed successfully',
                 'entries': []
             }
 
@@ -897,8 +911,21 @@ async def collect_switch_arp_table(
             db.add(arp_record)
 
         await db.commit()
+        await db.refresh(switch)
 
-        logger.info(f"✅ Stored {len(arp_entries)} ARP entries for {switch.name}")
+        # Update switch collection status and auto-resolve any failure alarms
+        switch.last_arp_collection_at = now
+        switch.last_collection_status = 'success'
+        switch.last_collection_message = f"ARP: {len(arp_entries)} entries via {collection_method} (manual)"
+        db.add(switch)
+        resolved_count = await alarm_service.auto_resolve_alarms(
+            db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
+        )
+        await db.commit()
+        logger.info(
+            f"✅ Stored {len(arp_entries)} ARP entries for {switch.name}; "
+            f"auto-resolved {resolved_count} alarm(s)"
+        )
 
         return {
             'switch_id': switch_id,
@@ -941,20 +968,6 @@ async def collect_switch_mac_table(
 
         logger.info(f"Manual MAC collection triggered for switch {switch.name} ({switch.ip_address})")
 
-        # Prepare switch config for CLI
-        cli_config = {
-            'username': switch.username,
-            'password_encrypted': switch.password_encrypted,
-            'enable_password_encrypted': switch.enable_password_encrypted,
-            'device_type': 'nokia_sros',
-            'vendor': switch.vendor,
-            'model': switch.model,
-            'name': switch.name,
-            'cli_transport': switch.cli_transport,
-            'ssh_port': switch.ssh_port,
-            'connection_timeout': switch.connection_timeout
-        }
-
         mac_entries = []
         collection_method = None
 
@@ -965,15 +978,26 @@ async def collect_switch_mac_table(
         )
         if switch.cli_enabled and switch.password_encrypted:
             try:
+                # Match auto-collection path: load DB templates and close read
+                # transaction before the blocking SSH call (same as collect_mac_single_switch)
+                templates = await network_data_collector._load_command_templates(db)
+                cli_config = network_data_collector._build_cli_config(switch)
+                await db.commit()
+
+                # Track collection method (same as auto path)
+                switch.mac_collection_method = 'cli'
+                switch.mac_method_override = False
+
                 mac_entries_cli = await asyncio.to_thread(
                     cli_service.collect_mac_table_cli,
                     str(switch.ip_address),
                     cli_config,
-                    None  # templates
+                    templates
                 )
                 if mac_entries_cli:
                     mac_entries = mac_entries_cli
                     collection_method = 'CLI'
+                    switch.mac_collection_success_count += 1
                     logger.info(f"Collected {len(mac_entries)} MAC entries via CLI from {switch.name}")
             except Exception as e:
                 logger.warning(f"CLI MAC collection failed for {switch.name}: {str(e)}")
@@ -981,13 +1005,28 @@ async def collect_switch_mac_table(
             logger.warning(f"CLI MAC collection skipped for {switch.name}: CLI credentials are not configured")
 
         if not mac_entries:
+            # 0 entries from a successful CLI run - mark as partial (matching auto path)
+            switch.mac_collection_fail_count += 1
+            now = datetime.now(timezone.utc)
+            switch.last_mac_collection_at = now
+            switch.last_collection_status = 'partial'
+            switch.last_collection_message = "MAC: 0 entries after trying all available methods"
+            db.add(switch)
+            resolved_count = await alarm_service.auto_resolve_alarms(
+                db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
+            )
+            await db.commit()
+            logger.info(
+                f"MAC collection returned 0 entries for {switch.name} (valid result); "
+                f"auto-resolved {resolved_count} alarm(s)"
+            )
             return {
                 'switch_id': switch_id,
                 'switch_name': switch.name,
                 'switch_ip': str(switch.ip_address),
                 'total_entries': 0,
-                'collection_method': None,
-                'message': 'Failed to collect MAC table via CLI (global policy)',
+                'collection_method': 'CLI',
+                'message': 'MAC table is empty - collection completed successfully',
                 'entries': []
             }
 
@@ -1014,8 +1053,21 @@ async def collect_switch_mac_table(
             db.add(mac_record)
 
         await db.commit()
+        await db.refresh(switch)
 
-        logger.info(f"✅ Stored {len(mac_entries)} MAC entries for {switch.name}")
+        # Update switch collection status and auto-resolve any failure alarms
+        switch.last_mac_collection_at = now
+        switch.last_collection_status = 'success'
+        switch.last_collection_message = f"MAC: {len(mac_entries)} entries via {collection_method} (manual)"
+        db.add(switch)
+        resolved_count = await alarm_service.auto_resolve_alarms(
+            db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
+        )
+        await db.commit()
+        logger.info(
+            f"✅ Stored {len(mac_entries)} MAC entries for {switch.name}; "
+            f"auto-resolved {resolved_count} alarm(s)"
+        )
 
         return {
             'switch_id': switch_id,
@@ -1058,23 +1110,14 @@ async def collect_switch_device_info(
 
         logger.info(f"Manual device info collection triggered for switch {switch.name} ({switch.ip_address})")
 
-        # Prepare switch config for CLI
-        cli_config = {
-            'username': switch.username,
-            'password_encrypted': switch.password_encrypted,
-            'enable_password_encrypted': switch.enable_password_encrypted,
-            'vendor': switch.vendor,
-            'model': switch.model,
-            'name': switch.name,
-            'cli_transport': switch.cli_transport,
-            'ssh_port': switch.ssh_port,
-            'connection_timeout': switch.connection_timeout
-        }
+        # Match auto-collection path: use _build_cli_config and commit before SSH
+        cli_config = network_data_collector._build_cli_config(switch)
         cli_config['device_type'] = cli_service._resolve_device_type(
             switch.vendor or '',
             switch.model or '',
             switch.name or ''
         )
+        await db.commit()
 
         # Collect device info
         device_info = await asyncio.to_thread(
@@ -1098,12 +1141,13 @@ async def collect_switch_device_info(
         
         if device_info.get('hostname'):
             hostname = device_info['hostname']
-            # Validate hostname
-            if (hostname and 
+            # Validate hostname (matches auto path validation including control-char check)
+            if (hostname and
                 hostname != switch.name and
                 len(hostname) >= 2 and
                 hostname.strip() not in [':', '-', '_', '.'] and
-                any(c.isalnum() for c in hostname)):
+                any(c.isalnum() for c in hostname) and
+                not any(ord(c) < 32 for c in hostname)):
                 old_values['name'] = switch.name
                 switch.name = hostname
                 updated_fields.append('name')
@@ -1119,6 +1163,14 @@ async def collect_switch_device_info(
             await db.commit()
             await db.refresh(switch)
             logger.info(f"✅ Updated device info for {switch.ip_address}: {updated_fields}")
+
+        # Auto-resolve any failure alarms now that we successfully collected device info
+        resolved_count = await alarm_service.auto_resolve_alarms(
+            db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
+        )
+        if resolved_count:
+            await db.commit()
+            logger.info(f"Auto-resolved {resolved_count} alarm(s) after device-info collection for {switch.name}")
 
         return {
             'switch_id': switch_id,
@@ -1322,6 +1374,19 @@ async def collect_switch_optical_modules(
         logger.info(f"Manual optical module collection triggered for switch {switch.name} ({switch.ip_address})")
 
         modules = await network_data_collector.collect_optical_single_switch(db, switch)
+
+        # Sync main collection status for UI when optical-only collection succeeds
+        if switch.last_optical_collection_status in ('success', 'empty'):
+            switch.last_collection_status = 'success'
+            switch.last_collection_message = switch.last_optical_collection_message
+            db.add(switch)
+            resolved_count = await alarm_service.auto_resolve_alarms(
+                db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
+            )
+            logger.info(f"Optical collection succeeded for {switch.name}; auto-resolved {resolved_count} alarm(s)")
+        else:
+            resolved_count = 0
+
         await db.commit()
         await db.refresh(switch)
 

@@ -46,8 +46,6 @@
               <el-option label="SHA (推荐)" value="SHA" />
               <el-option label="SHA256" value="SHA256" />
               <el-option label="MD5" value="MD5" />
-              <el-option label="SHA384" value="SHA384" />
-              <el-option label="SHA512" value="SHA512" />
             </el-select>
           </el-form-item>
 

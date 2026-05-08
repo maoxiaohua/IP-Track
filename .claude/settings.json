@@ -1,7 +1,7 @@
 {
     "env": {
-        "ANTHROPIC_AUTH_TOKEN": "sk-5be0d2f948d24faea406614364c607af",
-        "ANTHROPIC_BASE_URL": "https://dashscope.aliyuncs.com/apps/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "sk-RYjW1hIMiw1CrKBis3QCtf6RVrM1rF7o8oAH3OrjaCj11q3o",
+        "ANTHROPIC_BASE_URL": "https://dsapi.online",
         "ANTHROPIC_MODEL": "deepseek-v4-pro",
         "ANTHROPIC_SMALL_FAST_MODEL": "deepseek-v4-pro",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",

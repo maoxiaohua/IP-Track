@@ -8,7 +8,7 @@ export interface SNMPConfig {
   snmp_enabled: boolean;
   snmp_version: '2c' | '3';
   snmp_username?: string;
-  snmp_auth_protocol?: 'MD5' | 'SHA' | 'SHA256' | 'SHA384' | 'SHA512';
+  snmp_auth_protocol?: 'MD5' | 'SHA' | 'SHA256';
   snmp_auth_password?: string;
   snmp_priv_protocol?: 'DES' | 'AES' | 'AES128' | 'AES192' | 'AES256';
   snmp_priv_password?: string;

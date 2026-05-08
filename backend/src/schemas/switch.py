@@ -7,7 +7,7 @@ class SwitchBase(BaseModel):
     """Base switch schema"""
     name: str = Field(..., min_length=1, max_length=100)
     ip_address: IPvAnyAddress
-    vendor: str = Field(..., pattern="^(cisco|dell|alcatel|juniper)$")
+    vendor: str = Field(..., pattern="^(cisco|dell|alcatel|juniper|arista|hpe|huawei)$")
     model: Optional[str] = Field(None, max_length=100)
     enabled: bool = True
 
@@ -116,7 +116,10 @@ class SwitchResponse(SwitchBase):
     # SNMP status
     snmp_enabled: bool = False
     snmp_version: Optional[str] = None
+    snmp_port: Optional[int] = None
     snmp_username: Optional[str] = None
+    snmp_auth_protocol: Optional[str] = None
+    snmp_priv_protocol: Optional[str] = None
     has_snmp_credentials: bool = False
 
     # Connection status fields

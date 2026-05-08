@@ -37,6 +37,9 @@ class CollectionStrategy:
         'cisco': CollectionMethod.SNMP_PRIMARY,
         'dell': CollectionMethod.SNMP_PRIMARY,
         'juniper': CollectionMethod.AUTO,
+        'arista': CollectionMethod.CLI_PRIMARY,
+        'hpe': CollectionMethod.CLI_PRIMARY,
+        'huawei': CollectionMethod.CLI_PRIMARY,
     }
 
     # 型号级别的精确策略（覆盖厂商默认策略）
@@ -95,6 +98,12 @@ class CollectionStrategy:
 
             # S5000系列 - OS10 (支持SNMP)
             'S5232F-ON': CollectionMethod.SNMP_PRIMARY,
+            # S5232 sub-variants running DNOS9/Force10
+            'S5232-C1': CollectionMethod.CLI_ONLY,
+            'S5232-C2': CollectionMethod.CLI_ONLY,
+            'S5232-S1': CollectionMethod.CLI_ONLY,
+            'S5232-S2': CollectionMethod.CLI_ONLY,
+            'S5232-D1': CollectionMethod.CLI_ONLY,
 
             # Z9000系列 - DNOS9/Force10 (CLI-only)
             'Z9100-ON': CollectionMethod.CLI_ONLY,
@@ -289,6 +298,22 @@ OPTIMIZED_CLI_TEMPLATES: List[Dict] = [
         'description': 'Dell S4000系列 - Force10 DNOS9'
     },
 
+    # Dell S5232-C/S sub-variants - DNOS9/Force10 (CLI-only, not OS10)
+    {
+        'vendor': 'dell',
+        'model_pattern': 's5232-*',  # S5232-C1, S5232-C2, S5232-S1, S5232-S2, S5232-D1
+        'device_type': 'dell_force10',
+        'arp_command': 'show arp',
+        'arp_parser_type': 'dell_force10',
+        'arp_enabled': True,
+        'mac_command': 'show mac-address-table',
+        'mac_parser_type': 'dell_force10',
+        'mac_enabled': True,
+        'priority': 210,  # Higher than generic s5* to match before OS10 template
+        'enabled': True,
+        'description': 'Dell S5232-C/S系列 - Force10 DNOS9'
+    },
+
     # Dell S5000系列 - OS10
     {
         'vendor': 'dell',
@@ -434,6 +459,57 @@ OPTIMIZED_CLI_TEMPLATES: List[Dict] = [
         'priority': 150,
         'enabled': True,
         'description': 'Juniper JunOS通用模板'
+    },
+
+    # ==================== Arista Templates ====================
+
+    {
+        'vendor': 'arista',
+        'model_pattern': '*',
+        'device_type': 'arista_eos',
+        'arp_command': 'show ip arp',
+        'arp_parser_type': 'arista_eos',
+        'arp_enabled': True,
+        'mac_command': 'show mac address-table',
+        'mac_parser_type': 'arista_eos',
+        'mac_enabled': True,
+        'priority': 150,
+        'enabled': True,
+        'description': 'Arista EOS通用模板'
+    },
+
+    # ==================== HPE/Aruba Templates ====================
+
+    {
+        'vendor': 'hpe',
+        'model_pattern': '*',
+        'device_type': 'hp_procurve',
+        'arp_command': 'show arp',
+        'arp_parser_type': 'hpe_procurve',
+        'arp_enabled': True,
+        'mac_command': 'show mac-address',
+        'mac_parser_type': 'hpe_procurve',
+        'mac_enabled': True,
+        'priority': 150,
+        'enabled': True,
+        'description': 'HPE/Aruba ProCurve通用模板'
+    },
+
+    # ==================== Huawei Templates ====================
+
+    {
+        'vendor': 'huawei',
+        'model_pattern': '*',
+        'device_type': 'huawei',
+        'arp_command': 'display arp all',
+        'arp_parser_type': 'huawei_vrp',
+        'arp_enabled': True,
+        'mac_command': 'display mac-address',
+        'mac_parser_type': 'huawei_vrp',
+        'mac_enabled': True,
+        'priority': 150,
+        'enabled': True,
+        'description': 'Huawei VRP通用模板'
     },
 ]
 

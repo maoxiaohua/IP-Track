@@ -37,7 +37,7 @@ class SNMPConfigRequest(BaseModel):
 
     # SNMPv3 fields
     snmp_username: Optional[str] = None
-    snmp_auth_protocol: Optional[str] = Field(default="SHA", pattern="^(MD5|SHA|SHA256|SHA384|SHA512)$")
+    snmp_auth_protocol: Optional[str] = Field(default="SHA", pattern="^(MD5|SHA|SHA256)$")
     snmp_auth_password: Optional[str] = None
     snmp_priv_protocol: Optional[str] = Field(default="AES128", pattern="^(DES|AES|AES128|AES192|AES256)$")
     snmp_priv_password: Optional[str] = None
