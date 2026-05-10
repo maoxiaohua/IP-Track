@@ -10,6 +10,7 @@ const SubnetDetail = () => import('@/views/SubnetDetail_SolarWinds.vue')
 const CommandTemplates = () => import('@/views/CommandTemplates.vue')
 const Alarms = () => import('@/views/Alarms.vue')
 const OpticalModules = () => import('@/views/OpticalModules.vue')
+const OSTypeIPList = () => import('@/views/OSTypeIPList.vue')
 const SNMPProfiles = () => import('@/views/SNMPProfiles.vue')
 const SNMPConfig = () => import('@/views/SNMPConfig.vue')
 const Settings = () => import('@/views/Settings.vue')
@@ -91,6 +92,12 @@ const router = createRouter({
       name: 'SubnetDetail',
       component: SubnetDetail,
       meta: { title: 'Subnet Detail' }
+    },
+    {
+      path: '/ipam/os-type',
+      name: 'OSTypeIPList',
+      component: OSTypeIPList,
+      meta: { title: 'OS 设备清单' }
     },
     {
       path: '/history',

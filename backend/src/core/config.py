@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     OS_DETECTION_PREFER_SNMP: bool = True  # Prefer SNMP over Nmap when both available
     NMAP_OS_TIMEOUT: int = 30  # Timeout for nmap OS detection (seconds)
 
+    # MAC OUI Vendor Lookup
+    OUI_DOWNLOAD_URL: str = 'https://standards-oui.ieee.org/oui/oui.txt'
+    OUI_CACHE_TTL_DAYS: int = 7
+
     # Worker Pools
     COLLECTION_WORKERS: int = 10
     IP_LOOKUP_WORKERS: int = 50

@@ -893,22 +893,21 @@ class IPAMService:
                 if scan_result.get('vendor') is not None:
                     ip_addr.vendor = scan_result.get('vendor')  # SNMP vendor parsed
 
-                # Update last_boot_time from SNMP sysUpTime
-                if scan_result.get('last_boot_time'):
-                    # Parse ISO format datetime string
-                    try:
-                        ip_addr.last_boot_time = datetime.fromisoformat(scan_result['last_boot_time'])
-                    except:
-                        pass
-
-                # Only update MAC if we have one (don't overwrite with None)
+                # Update MAC address
                 if mac_to_lookup:
                     ip_addr.mac_address = mac_to_lookup
-
-                # If we still don't have MAC but IP already has one in DB, use existing MAC
                 elif ip_addr.mac_address and scan_result['is_reachable']:
                     mac_to_lookup = str(ip_addr.mac_address)
-                    logger.info(f"Using existing MAC for {ip_str}: {mac_to_lookup}")
+
+                # OUI vendor lookup from MAC (supplementary to SNMP)
+                if not ip_addr.vendor and mac_to_lookup:
+                    try:
+                        from services.oui_lookup import lookup_vendor
+                        oui_vendor = lookup_vendor(mac_to_lookup)
+                        if oui_vendor:
+                            ip_addr.vendor = oui_vendor
+                    except Exception:
+                        pass
 
                 if scan_result.get('os_type') is not None:
                     ip_addr.os_type = scan_result['os_type']

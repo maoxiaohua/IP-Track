@@ -28,7 +28,9 @@ from schemas.ipam import (
     NetworkSearchRequest,
     NetworkSearchResponse,
     SubnetCalculatorRequest,
-    SubnetCalculatorResponse
+    SubnetCalculatorResponse,
+    OSTypeStatItem,
+    OSTypeStatisticsResponse
 )
 from services.ipam_service import ipam_service
 from services.ipam_scan_status import ipam_scan_status_service
@@ -501,6 +503,8 @@ async def list_ip_addresses(
     subnet_id: Optional[int] = Query(None),
     status: Optional[IPStatus] = Query(None),
     is_reachable: Optional[bool] = Query(None),
+    os_type: Optional[str] = Query(None),
+    vendor: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=10000),
@@ -512,6 +516,7 @@ async def list_ip_addresses(
     - **subnet_id**: Filter by subnet
     - **status**: Filter by status (available, used, reserved, offline)
     - **is_reachable**: Filter by reachability
+    - **os_type**: Filter by OS type (windows, linux, network, etc.)
     - **search**: Search in IP, hostname, or description
     - **skip**: Number of records to skip (pagination)
     - **limit**: Maximum number of records to return (1-10000)
@@ -532,6 +537,10 @@ async def list_ip_addresses(
         conditions.append(IPAddress.status == status)
     if is_reachable is not None:
         conditions.append(IPAddress.is_reachable == is_reachable)
+    if os_type:
+        conditions.append(IPAddress.os_type == os_type)
+    if vendor:
+        conditions.append(IPAddress.vendor.ilike(f'%{vendor}%'))
     if search:
         conditions.append(
             or_(
@@ -541,6 +550,8 @@ async def list_ip_addresses(
                 IPAddress.system_name.ilike(f'%{search}%'),
                 IPAddress.machine_type.ilike(f'%{search}%'),
                 IPAddress.vendor.ilike(f'%{search}%'),
+                IPAddress.os_type.ilike(f'%{search}%'),
+                IPAddress.os_name.ilike(f'%{search}%'),
                 cast(IPAddress.mac_address, String).ilike(f'%{search}%'),
                 IPAddress.description.ilike(f'%{search}%')
             )
@@ -933,6 +944,92 @@ async def scan_ips(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Either subnet_id or ip_addresses must be provided"
         )
+
+
+# OS type statistics endpoint
+@router.get("/statistics/os-type", response_model=OSTypeStatisticsResponse)
+async def get_os_type_statistics(
+    subnet_id: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get IP count grouped by OS type (windows, linux, network, etc.)"""
+    from sqlalchemy import select, func, and_
+
+    conditions = [IPAddress.os_type.isnot(None)]
+    if subnet_id:
+        conditions.append(IPAddress.subnet_id == subnet_id)
+
+    query = (
+        select(IPAddress.os_type, func.count(IPAddress.id))
+        .where(and_(*conditions))
+        .group_by(IPAddress.os_type)
+        .order_by(func.count(IPAddress.id).desc())
+    )
+    result = await db.execute(query)
+    rows = result.all()
+
+    os_types = []
+    total = 0
+    for os_type, count in rows:
+        if os_type:
+            total += count
+            os_types.append(OSTypeStatItem(
+                os_type=os_type,
+                count=count,
+                label=_get_os_type_label(os_type),
+            ))
+
+    return OSTypeStatisticsResponse(os_types=os_types, total_classified=total)
+
+
+def _get_os_type_label(os_type: str) -> str:
+    """Map os_type value to a human-readable label."""
+    labels = {
+        'windows': 'Windows',
+        'linux': 'Linux',
+        'macos': 'macOS',
+        'network': 'Network Device',
+        'unix': 'Unix',
+        'printer': 'Printer',
+        'camera': 'IP Camera',
+    }
+    return labels.get(os_type.lower(), os_type.capitalize())
+
+
+# Vendor statistics endpoint
+@router.get("/statistics/vendor", response_model=OSTypeStatisticsResponse)
+async def get_vendor_statistics(
+    subnet_id: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get IP count grouped by vendor (from MAC OUI lookup)."""
+    from sqlalchemy import select, func, and_
+
+    conditions = [IPAddress.vendor.isnot(None)]
+    if subnet_id:
+        conditions.append(IPAddress.subnet_id == subnet_id)
+
+    query = (
+        select(IPAddress.vendor, func.count(IPAddress.id))
+        .where(and_(*conditions))
+        .group_by(IPAddress.vendor)
+        .order_by(func.count(IPAddress.id).desc())
+    )
+    result = await db.execute(query)
+    rows = result.all()
+
+    os_types = []
+    total = 0
+    for vendor_name, count in rows:
+        if vendor_name:
+            total += count
+            os_types.append(OSTypeStatItem(
+                os_type=vendor_name,
+                count=count,
+                label=vendor_name,
+            ))
+
+    return OSTypeStatisticsResponse(os_types=os_types, total_classified=total)
 
 
 # Dashboard endpoint

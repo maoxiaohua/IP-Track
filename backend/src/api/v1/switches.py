@@ -809,9 +809,8 @@ async def collect_switch_arp_table(
     switch_id: int,
     db: AsyncSession = Depends(get_db)
 ):
-    """Manually collect ARP table from switch via the global CLI-only policy."""
+    """Manually collect ARP table from switch using per-vendor strategy with fallback."""
     try:
-        # Verify switch exists
         result = await db.execute(
             select(Switch).where(Switch.id == switch_id)
         )
@@ -825,106 +824,12 @@ async def collect_switch_arp_table(
 
         logger.info(f"Manual ARP collection triggered for switch {switch.name} ({switch.ip_address})")
 
-        arp_entries = []
-        collection_method = None
-
-        from config.collection_strategy import CollectionStrategy
-
-        logger.info(
-            f"Collecting ARP via {CollectionStrategy.get_l2_table_primary_method()} for {switch.name}"
-        )
-        if switch.cli_enabled and switch.password_encrypted:
-            try:
-                # Match auto-collection path: load DB templates and close read
-                # transaction before the blocking SSH call (same as collect_arp_single_switch)
-                templates = await network_data_collector._load_command_templates(db)
-                cli_config = network_data_collector._build_cli_config(switch)
-                await db.commit()
-
-                # Track collection method (same as auto path)
-                switch.arp_collection_method = 'cli'
-                switch.arp_method_override = False
-
-                arp_entries_cli = await asyncio.to_thread(
-                    cli_service.collect_arp_table_cli,
-                    str(switch.ip_address),
-                    cli_config,
-                    templates
-                )
-                if arp_entries_cli:
-                    arp_entries = arp_entries_cli
-                    collection_method = 'CLI'
-                    switch.arp_collection_success_count += 1
-                    logger.info(f"Collected {len(arp_entries)} ARP entries via CLI from {switch.name}")
-            except Exception as e:
-                logger.warning(f"CLI ARP collection failed for {switch.name}: {str(e)}")
-        else:
-            logger.warning(f"CLI ARP collection skipped for {switch.name}: CLI credentials are not configured")
-
-        if not arp_entries:
-            # 0 entries from a successful CLI run - mark as partial (matching auto path)
-            switch.arp_collection_fail_count += 1
-            now = datetime.now(timezone.utc)
-            switch.last_arp_collection_at = now
-            switch.last_collection_status = 'partial'
-            switch.last_collection_message = "ARP: 0 entries after trying all available methods"
-            db.add(switch)
-            resolved_count = await alarm_service.auto_resolve_alarms(
-                db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
-            )
-            await db.commit()
-            logger.info(
-                f"ARP collection returned 0 entries for {switch.name} (valid result); "
-                f"auto-resolved {resolved_count} alarm(s)"
-            )
-            return {
-                'switch_id': switch_id,
-                'switch_name': switch.name,
-                'switch_ip': str(switch.ip_address),
-                'total_entries': 0,
-                'collection_method': 'CLI',
-                'message': 'ARP table is empty - collection completed successfully',
-                'entries': []
-            }
-
-        # Store in database
-        now = datetime.now(timezone.utc)
-        
-        # Delete old entries for this switch
-        await db.execute(
-            ARPTable.__table__.delete().where(ARPTable.switch_id == switch_id)
-        )
-
-        # Insert new entries
-        for entry in arp_entries:
-            arp_record = ARPTable(
-                switch_id=switch_id,
-                ip_address=entry['ip_address'],
-                mac_address=entry['mac_address'],
-                vlan_id=entry.get('vlan_id'),
-                interface=entry.get('interface'),
-                age_seconds=entry.get('age_seconds'),
-                collected_at=now,
-                first_seen=now,
-                last_seen=now
-            )
-            db.add(arp_record)
-
+        arp_entries = await network_data_collector.collect_arp_single_switch(db, switch)
         await db.commit()
-        await db.refresh(switch)
 
-        # Update switch collection status and auto-resolve any failure alarms
-        switch.last_arp_collection_at = now
-        switch.last_collection_status = 'success'
-        switch.last_collection_message = f"ARP: {len(arp_entries)} entries via {collection_method} (manual)"
-        db.add(switch)
-        resolved_count = await alarm_service.auto_resolve_alarms(
-            db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
-        )
-        await db.commit()
-        logger.info(
-            f"✅ Stored {len(arp_entries)} ARP entries for {switch.name}; "
-            f"auto-resolved {resolved_count} alarm(s)"
+        collection_method = switch.arp_collection_method or 'unknown'
+        message = switch.last_collection_message or (
+            f'Successfully collected {len(arp_entries)} ARP entries via {collection_method}'
         )
 
         return {
@@ -932,9 +837,9 @@ async def collect_switch_arp_table(
             'switch_name': switch.name,
             'switch_ip': str(switch.ip_address),
             'total_entries': len(arp_entries),
-            'collection_method': collection_method,
-            'message': f'Successfully collected {len(arp_entries)} ARP entries via {collection_method}',
-            'entries': arp_entries[:100]  # Return first 100 for preview
+            'collection_method': collection_method.upper(),
+            'message': message,
+            'entries': arp_entries[:100]
         }
 
     except HTTPException:
@@ -952,9 +857,8 @@ async def collect_switch_mac_table(
     switch_id: int,
     db: AsyncSession = Depends(get_db)
 ):
-    """Manually collect MAC table from switch via the global CLI-only policy."""
+    """Manually collect MAC table from switch using per-vendor strategy with fallback."""
     try:
-        # Verify switch exists
         result = await db.execute(
             select(Switch).where(Switch.id == switch_id)
         )
@@ -968,105 +872,12 @@ async def collect_switch_mac_table(
 
         logger.info(f"Manual MAC collection triggered for switch {switch.name} ({switch.ip_address})")
 
-        mac_entries = []
-        collection_method = None
-
-        from config.collection_strategy import CollectionStrategy
-
-        logger.info(
-            f"Collecting MAC via {CollectionStrategy.get_l2_table_primary_method()} for {switch.name}"
-        )
-        if switch.cli_enabled and switch.password_encrypted:
-            try:
-                # Match auto-collection path: load DB templates and close read
-                # transaction before the blocking SSH call (same as collect_mac_single_switch)
-                templates = await network_data_collector._load_command_templates(db)
-                cli_config = network_data_collector._build_cli_config(switch)
-                await db.commit()
-
-                # Track collection method (same as auto path)
-                switch.mac_collection_method = 'cli'
-                switch.mac_method_override = False
-
-                mac_entries_cli = await asyncio.to_thread(
-                    cli_service.collect_mac_table_cli,
-                    str(switch.ip_address),
-                    cli_config,
-                    templates
-                )
-                if mac_entries_cli:
-                    mac_entries = mac_entries_cli
-                    collection_method = 'CLI'
-                    switch.mac_collection_success_count += 1
-                    logger.info(f"Collected {len(mac_entries)} MAC entries via CLI from {switch.name}")
-            except Exception as e:
-                logger.warning(f"CLI MAC collection failed for {switch.name}: {str(e)}")
-        else:
-            logger.warning(f"CLI MAC collection skipped for {switch.name}: CLI credentials are not configured")
-
-        if not mac_entries:
-            # 0 entries from a successful CLI run - mark as partial (matching auto path)
-            switch.mac_collection_fail_count += 1
-            now = datetime.now(timezone.utc)
-            switch.last_mac_collection_at = now
-            switch.last_collection_status = 'partial'
-            switch.last_collection_message = "MAC: 0 entries after trying all available methods"
-            db.add(switch)
-            resolved_count = await alarm_service.auto_resolve_alarms(
-                db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
-            )
-            await db.commit()
-            logger.info(
-                f"MAC collection returned 0 entries for {switch.name} (valid result); "
-                f"auto-resolved {resolved_count} alarm(s)"
-            )
-            return {
-                'switch_id': switch_id,
-                'switch_name': switch.name,
-                'switch_ip': str(switch.ip_address),
-                'total_entries': 0,
-                'collection_method': 'CLI',
-                'message': 'MAC table is empty - collection completed successfully',
-                'entries': []
-            }
-
-        # Store in database
-        now = datetime.now(timezone.utc)
-        
-        # Delete old entries for this switch
-        await db.execute(
-            MACTable.__table__.delete().where(MACTable.switch_id == switch_id)
-        )
-
-        # Insert new entries
-        for entry in mac_entries:
-            mac_record = MACTable(
-                switch_id=switch_id,
-                mac_address=entry['mac_address'],
-                port_name=entry['port_name'],
-                vlan_id=entry.get('vlan_id'),
-                is_dynamic=entry.get('is_dynamic', 1),
-                collected_at=now,
-                first_seen=now,
-                last_seen=now
-            )
-            db.add(mac_record)
-
+        mac_entries = await network_data_collector.collect_mac_single_switch(db, switch)
         await db.commit()
-        await db.refresh(switch)
 
-        # Update switch collection status and auto-resolve any failure alarms
-        switch.last_mac_collection_at = now
-        switch.last_collection_status = 'success'
-        switch.last_collection_message = f"MAC: {len(mac_entries)} entries via {collection_method} (manual)"
-        db.add(switch)
-        resolved_count = await alarm_service.auto_resolve_alarms(
-            db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
-        )
-        await db.commit()
-        logger.info(
-            f"✅ Stored {len(mac_entries)} MAC entries for {switch.name}; "
-            f"auto-resolved {resolved_count} alarm(s)"
+        collection_method = switch.mac_collection_method or 'unknown'
+        message = switch.last_collection_message or (
+            f'Successfully collected {len(mac_entries)} MAC entries via {collection_method}'
         )
 
         return {
@@ -1074,9 +885,9 @@ async def collect_switch_mac_table(
             'switch_name': switch.name,
             'switch_ip': str(switch.ip_address),
             'total_entries': len(mac_entries),
-            'collection_method': collection_method,
-            'message': f'Successfully collected {len(mac_entries)} MAC entries via {collection_method}',
-            'entries': mac_entries[:100]  # Return first 100 for preview
+            'collection_method': collection_method.upper(),
+            'message': message,
+            'entries': mac_entries[:100]
         }
 
     except HTTPException:
@@ -1206,7 +1017,7 @@ async def trigger_port_analysis(
     Manually trigger port analysis for a specific switch.
 
     This endpoint:
-    1. Collects MAC table from the switch via the global CLI-only policy
+    1. Collects MAC table from the switch using per-vendor strategy with fallback
     2. Analyzes ports based on MAC count, VLAN distribution, and port naming
     3. Stores port_analysis records in the database
 
@@ -1238,7 +1049,7 @@ async def trigger_port_analysis(
                 'success': False,
                 'message': switch.last_collection_message or 'No MAC entries collected.',
                 'ports_analyzed': 0,
-                'collection_methods_tried': ['CLI'] if switch.cli_enabled else []
+                'collection_methods_tried': [switch.mac_collection_method or 'unknown']
             }
 
         await db.commit()

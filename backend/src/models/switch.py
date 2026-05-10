@@ -55,7 +55,7 @@ class Switch(Base):
     last_optical_collection_message = Column(Text, nullable=True)
     last_optical_modules_count = Column(Integer, nullable=True)
 
-    # Collection method preferences (ARP/MAC are normalized to global CLI-only;
+    # Collection method preferences (ARP/MAC use per-vendor auto-detection with SNMP/CLI fallback;
     # optical modules can still learn per-device SNMP/CLI preference)
     mac_collection_method = Column(String(10), default='auto')
     arp_collection_method = Column(String(10), default='auto')

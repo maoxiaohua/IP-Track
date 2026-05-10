@@ -273,6 +273,19 @@ class IPAMDashboard(BaseModel):
     recent_changes: List[IPScanHistoryResponse]
 
 
+class OSTypeStatItem(BaseModel):
+    """Single OS type statistic"""
+    os_type: str
+    count: int
+    label: str
+
+
+class OSTypeStatisticsResponse(BaseModel):
+    """OS type statistics response"""
+    os_types: List[OSTypeStatItem]
+    total_classified: int
+
+
 # Batch Import Schemas
 class IPSubnetBatchItem(BaseModel):
     """Schema for single subnet in batch import"""

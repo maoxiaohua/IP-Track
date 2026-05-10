@@ -719,6 +719,15 @@ class IPScanService:
         mac = self._get_mac_address(ip)
         if mac:
             result['mac_address'] = mac
+            # Step 7b: OUI vendor lookup (supplementary to SNMP vendor)
+            if not result.get('vendor'):
+                try:
+                    from services.oui_lookup import lookup_vendor
+                    oui_vendor = lookup_vendor(mac)
+                    if oui_vendor:
+                        result['vendor'] = oui_vendor
+                except Exception as e:
+                    logger.debug(f"OUI lookup failed for {ip}/{mac}: {e}")
 
         # Step 8: OS detection merge
         nmap_os_info = baseline_os_info

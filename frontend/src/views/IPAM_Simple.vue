@@ -36,6 +36,40 @@
         </el-col>
       </el-row>
 
+      <!-- OS Type & Vendor Distribution Charts -->
+      <el-row v-if="(osTypeStats && osTypeStats.os_types.length > 0) || (vendorStats && vendorStats.os_types.length > 0)" style="margin-bottom: 20px" :gutter="16">
+        <el-col v-if="osTypeStats && osTypeStats.os_types.length > 0" :span="vendorStats && vendorStats.os_types.length > 0 ? 12 : 24">
+          <el-card shadow="hover">
+            <template #header>
+              <div style="display: flex; justify-content: space-between; align-items: center">
+                <span style="font-weight: 600; font-size: 14px">操作系统类型分布</span>
+                <span style="font-size: 12px; color: #909399">共 {{ osTypeStats.total_classified }} 台 · 点击扇形查看</span>
+              </div>
+            </template>
+            <Chart
+              :option="osTypeChartOption"
+              height="300px"
+              @chart-click="handleOSChartClick"
+            />
+          </el-card>
+        </el-col>
+        <el-col v-if="vendorStats && vendorStats.os_types.length > 0" :span="osTypeStats && osTypeStats.os_types.length > 0 ? 12 : 24">
+          <el-card shadow="hover">
+            <template #header>
+              <div style="display: flex; justify-content: space-between; align-items: center">
+                <span style="font-weight: 600; font-size: 14px">厂商分布（MAC OUI）</span>
+                <span style="font-size: 12px; color: #909399">共 {{ vendorStats.total_classified }} 台 · 点击扇形查看</span>
+              </div>
+            </template>
+            <Chart
+              :option="vendorChartOption"
+              height="300px"
+              @chart-click="handleVendorChartClick"
+            />
+          </el-card>
+        </el-col>
+      </el-row>
+
       <div v-if="shouldShowScanStatus" class="scan-status-panel">
         <div class="scan-status-header">
           <div>
@@ -353,6 +387,7 @@ import { Plus, Upload, Download, Search } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
 import { ipamApi, type IPAMScanStatus } from '@/api/ipam'
 import { useIPAMScanMonitor } from '@/composables/useIPAMScanMonitor'
+import Chart from '@/components/Chart.vue'
 
 interface Subnet {
   subnet_id: number
@@ -386,6 +421,12 @@ const importMethod = ref('excel')
 const excelFile = ref<File | null>(null)
 const uploadRef = ref()
 const searchText = ref('')  // Subnet search
+
+// OS type statistics
+const osTypeStats = ref<{ os_types: { os_type: string; count: number; label: string }[]; total_classified: number } | null>(null)
+
+// Vendor statistics
+const vendorStats = ref<{ os_types: { os_type: string; count: number; label: string }[]; total_classified: number } | null>(null)
 
 const pagination = ref({
   currentPage: 1,
@@ -581,6 +622,75 @@ const paginatedSubnets = computed(() => {
   const start = (pagination.value.currentPage - 1) * pagination.value.pageSize
   const end = start + pagination.value.pageSize
   return filteredSubnets.value.slice(start, end)
+})
+
+const osTypeChartOption = computed(() => {
+  if (!osTypeStats.value || osTypeStats.value.os_types.length === 0) {
+    return {}
+  }
+  const data = osTypeStats.value.os_types.map(item => ({
+    name: item.label,
+    value: item.count
+  }))
+  return {
+    color: ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de', '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#48b8d0'],
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: 'rgba(50,50,50,0.9)',
+      borderColor: '#333',
+      textStyle: { color: '#fff', fontSize: 13 },
+      formatter: '{b}: {c} 台 ({d}%)'
+    },
+    series: [{
+      type: 'pie',
+      radius: ['45%', '72%'],
+      center: ['50%', '50%'],
+      data,
+      label: {
+        color: '#333',
+        formatter: '{b}\n{c} 台',
+        fontSize: 12
+      },
+      emphasis: {
+        label: { fontSize: 16, fontWeight: 'bold' },
+        itemStyle: { shadowBlur: 12, shadowOffsetX: 0, shadowColor: 'rgba(0,0,0,0.4)' }
+      }
+    }]
+  }
+})
+
+const vendorChartOption = computed(() => {
+  if (!vendorStats.value || vendorStats.value.os_types.length === 0) {
+    return {}
+  }
+  const top = vendorStats.value.os_types.slice(0, 20)
+  const data = top.map(item => ({ name: item.label, value: item.count }))
+  return {
+    color: ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de', '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#48b8d0',
+            '#f6c8a3', '#88c8e8', '#d9a9d9', '#a8d8b9', '#f5a6a6', '#c4b0d9', '#8cc7f6', '#e8b88a', '#a0d2a8', '#d9a8a0'],
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: 'rgba(50,50,50,0.9)',
+      borderColor: '#333',
+      textStyle: { color: '#fff', fontSize: 12 },
+      formatter: '{b}: {c} 台 ({d}%)'
+    },
+    series: [{
+      type: 'pie',
+      radius: ['45%', '72%'],
+      center: ['50%', '50%'],
+      data,
+      label: {
+        color: '#333',
+        formatter: '{b}\n{c} 台',
+        fontSize: 10
+      },
+      emphasis: {
+        label: { fontSize: 14, fontWeight: 'bold' },
+        itemStyle: { shadowBlur: 12, shadowOffsetX: 0, shadowColor: 'rgba(0,0,0,0.4)' }
+      }
+    }]
+  }
 })
 
 watch(searchText, () => {
@@ -997,13 +1107,13 @@ const downloadTemplate = async () => {
 }
 
 // Export to Excel
-const exportToExcel = () => {
+const exportToExcel = async () => {
   if (subnets.value.length === 0) {
     ElMessage.warning('没有数据可导出')
     return
   }
 
-  // Prepare data for export
+  const { exportToExcel: exportXlsx } = await import('@/utils/export')
   const exportData = subnets.value.map(subnet => ({
     '子网名称': subnet.subnet_name,
     '网络地址': subnet.network,
@@ -1016,37 +1126,51 @@ const exportToExcel = () => {
     '利用率(%)': subnet.utilization_percent?.toFixed(2) || '0.00',
     '最后扫描': subnet.last_scan_at ? formatDateTime(subnet.last_scan_at) : '从未扫描'
   }))
-
-  // Convert to CSV for simple export
-  const headers = Object.keys(exportData[0])
-  const csvContent = [
-    headers.join(','),
-    ...exportData.map(row => headers.map(header => {
-      const value = row[header as keyof typeof row]
-      // Escape commas and quotes
-      return typeof value === 'string' && value.includes(',')
-        ? `"${value.replace(/"/g, '""')}"`
-        : value
-    }).join(','))
-  ].join('\n')
-
-  // Create blob and download
-  const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' })
-  const url = window.URL.createObjectURL(blob)
-  const link = document.createElement('a')
   const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
-  link.href = url
-  link.setAttribute('download', `IPAM子网列表_${timestamp}.csv`)
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  window.URL.revokeObjectURL(url)
-
+  await exportXlsx(exportData, `IPAM子网列表_${timestamp}`, '子网列表')
   ElMessage.success('数据导出成功')
+}
+
+// OS type chart click handler
+// OS type chart click handler - open new window
+const handleOSChartClick = (params: any) => {
+  if (!params.name) return
+  const osType = osTypeStats.value?.os_types.find(item => item.label === params.name)?.os_type
+  const label = encodeURIComponent(params.name)
+  window.open(`/ipam/os-type?os_type=${osType || params.name}&label=${label}`, '_blank')
+}
+
+// Load OS type statistics
+const loadOSTypeStats = async () => {
+  try {
+    const stats = await ipamApi.getOSTypeStatistics()
+    osTypeStats.value = stats
+  } catch (error: any) {
+    console.error('Failed to load OS type statistics:', error)
+  }
+}
+
+// Vendor chart click handler
+const handleVendorChartClick = (params: any) => {
+  if (!params.name) return
+  const label = encodeURIComponent(params.name)
+  window.open(`/ipam/os-type?vendor=${label}&label=${label}`, '_blank')
+}
+
+// Load vendor statistics
+const loadVendorStats = async () => {
+  try {
+    const stats = await ipamApi.getVendorStatistics()
+    vendorStats.value = stats
+  } catch (error: any) {
+    console.error('Failed to load vendor statistics:', error)
+  }
 }
 
 onMounted(() => {
   loadSubnets()
+  loadOSTypeStats()
+  loadVendorStats()
   void loadInitialStatus().then((supported) => {
     if (supported && monitorSupported.value) {
       connectScanMonitor()

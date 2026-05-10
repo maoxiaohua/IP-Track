@@ -1,7 +1,7 @@
 """
 SNMP helpers for lightweight switch discovery and enrichment.
 
-The live ARP/MAC collection path now uses the global CLI-only policy
+The live ARP/MAC collection path uses per-vendor strategy with automatic SNMP/CLI fallback.
 (SSH/Telnet) because vendor SNMP FDB/ARP implementations vary widely and can
 be expensive on long-running deployments.
 

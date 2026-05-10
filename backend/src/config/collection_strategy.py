@@ -29,85 +29,21 @@ class CollectionStrategy:
     - 这里的 vendor/model 策略主要仍服务于设备信息、光模块等其它采集项。
     """
 
-    GLOBAL_L2_TABLE_METHOD: CollectionMethod = CollectionMethod.CLI_ONLY
+    GLOBAL_L2_TABLE_METHOD: CollectionMethod = CollectionMethod.AUTO
 
-    # 厂商级别的默认策略
+    # 厂商级别的默认策略 — 统一使用 AUTO，运行时自动选择+fallback
     VENDOR_DEFAULTS: Dict[str, CollectionMethod] = {
-        'alcatel': CollectionMethod.CLI_ONLY,
-        'cisco': CollectionMethod.SNMP_PRIMARY,
-        'dell': CollectionMethod.SNMP_PRIMARY,
+        'alcatel': CollectionMethod.AUTO,
+        'cisco': CollectionMethod.AUTO,
+        'dell': CollectionMethod.AUTO,
         'juniper': CollectionMethod.AUTO,
-        'arista': CollectionMethod.CLI_PRIMARY,
-        'hpe': CollectionMethod.CLI_PRIMARY,
-        'huawei': CollectionMethod.CLI_PRIMARY,
+        'arista': CollectionMethod.AUTO,
+        'hpe': CollectionMethod.AUTO,
+        'huawei': CollectionMethod.AUTO,
     }
 
-    # 型号级别的精确策略（覆盖厂商默认策略）
+    # 型号级别的精确策略（保留为空，运行时自动选择）
     MODEL_STRATEGIES: Dict[str, Dict[str, CollectionMethod]] = {
-        'alcatel': {
-            # Nokia 7220系列 - SR Linux OS
-            '7220 IXR': CollectionMethod.CLI_ONLY,
-            '7220 IXR-D1': CollectionMethod.CLI_ONLY,
-            '7220 IXR-D2': CollectionMethod.CLI_ONLY,
-            '7220 IXR-D2L': CollectionMethod.CLI_ONLY,
-
-            # Nokia 7250系列 - SR OS
-            '7250 IXR': CollectionMethod.CLI_ONLY,
-            '7250 IXR-e2': CollectionMethod.CLI_ONLY,
-            '7250 IXR-x': CollectionMethod.CLI_ONLY,
-
-            # WBX系列 - SR OS
-            'WBX220': CollectionMethod.CLI_ONLY,
-        },
-
-        'cisco': {
-            # Nexus 9000系列 - NX-OS (支持SNMP)
-            'N9K': CollectionMethod.SNMP_PRIMARY,
-            'N9K-C9': CollectionMethod.SNMP_PRIMARY,
-
-            # Catalyst 3650系列 - IOS-XE (支持SNMP)
-            'C3650': CollectionMethod.SNMP_PRIMARY,
-
-            # Catalyst 3560系列 - IOS (支持SNMP)
-            'C3560': CollectionMethod.SNMP_PRIMARY,
-            'C3560E': CollectionMethod.SNMP_PRIMARY,
-            'C3560E-UNIVERSALK9-M': CollectionMethod.SNMP_PRIMARY,
-
-            # Catalyst 2960系列 - IOS (支持SNMP)
-            'C2960': CollectionMethod.SNMP_PRIMARY,
-            'C2960S': CollectionMethod.SNMP_PRIMARY,
-            'C2960X': CollectionMethod.SNMP_PRIMARY,
-            'C2960S-UNIVERSALK9-M': CollectionMethod.SNMP_PRIMARY,
-            'C2960X-UNIVERSALK9-M': CollectionMethod.SNMP_PRIMARY,
-
-            # Nexus系列 - NX-OS (支持SNMP) - 通用匹配
-            'NX': CollectionMethod.SNMP_PRIMARY,
-        },
-
-        'dell': {
-            # S3000系列 - DNOS9/Force10 (CLI-only due to SNMP timeout issues)
-            'S3048': CollectionMethod.CLI_ONLY,
-            'S3048-ON': CollectionMethod.CLI_ONLY,
-            'S3148': CollectionMethod.CLI_ONLY,
-
-            # S4000系列 - DNOS9/Force10 (CLI-only due to SNMP timeout issues)
-            'S4048': CollectionMethod.CLI_ONLY,
-            'S4048-ON': CollectionMethod.CLI_ONLY,
-            'S4048T-ON': CollectionMethod.CLI_ONLY,
-            'S4148F-ON': CollectionMethod.CLI_ONLY,
-
-            # S5000系列 - OS10 (支持SNMP)
-            'S5232F-ON': CollectionMethod.SNMP_PRIMARY,
-            # S5232 sub-variants running DNOS9/Force10
-            'S5232-C1': CollectionMethod.CLI_ONLY,
-            'S5232-C2': CollectionMethod.CLI_ONLY,
-            'S5232-S1': CollectionMethod.CLI_ONLY,
-            'S5232-S2': CollectionMethod.CLI_ONLY,
-            'S5232-D1': CollectionMethod.CLI_ONLY,
-
-            # Z9000系列 - DNOS9/Force10 (CLI-only)
-            'Z9100-ON': CollectionMethod.CLI_ONLY,
-        },
     }
 
     @classmethod
@@ -205,7 +141,9 @@ class CollectionStrategy:
 
     @classmethod
     def get_l2_table_primary_method(cls) -> str:
-        """Human-friendly description for the global ARP/MAC policy."""
+        """Human-friendly description for the L2 ARP/MAC policy."""
+        if cls.GLOBAL_L2_TABLE_METHOD == CollectionMethod.AUTO:
+            return "per-vendor strategy (auto)"
         if cls.GLOBAL_L2_TABLE_METHOD == CollectionMethod.CLI_ONLY:
             return "CLI only (global)"
         if cls.GLOBAL_L2_TABLE_METHOD == CollectionMethod.SNMP_ONLY:

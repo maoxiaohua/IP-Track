@@ -102,6 +102,22 @@ export interface IPAMScanStartResponse {
   summary?: IPAMScanSummary
 }
 
+export interface OSTypeStatItem {
+  os_type: string
+  count: number
+  label: string
+}
+
+export interface OSTypeStatisticsResponse {
+  os_types: OSTypeStatItem[]
+  total_classified: number
+}
+
+export interface IPAddressListResponse {
+  items: IPAddressDetail[]
+  total: number
+}
+
 export const ipamApi = {
   // Get IP address detail
   async getIPAddress(ipId: number): Promise<IPAddressDetail> {
@@ -177,5 +193,22 @@ export const ipamApi = {
 
   getScanEventsUrl(): string {
     return `${API_BASE_URL}/api/v1/ipam/scan-events`
+  },
+
+  async getIPAddresses(params?: Record<string, any>): Promise<IPAddressListResponse> {
+    const response = await apiClient.get('/api/v1/ipam/ip-addresses', { params })
+    return response.data
+  },
+
+  async getOSTypeStatistics(subnetId?: number): Promise<OSTypeStatisticsResponse> {
+    const params = subnetId ? { subnet_id: subnetId } : {}
+    const response = await apiClient.get('/api/v1/ipam/statistics/os-type', { params })
+    return response.data
+  },
+
+  async getVendorStatistics(subnetId?: number): Promise<OSTypeStatisticsResponse> {
+    const params = subnetId ? { subnet_id: subnetId } : {}
+    const response = await apiClient.get('/api/v1/ipam/statistics/vendor', { params })
+    return response.data
   }
 }

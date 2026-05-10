@@ -172,7 +172,7 @@ class NetworkDataCollector:
             ""
         )
         return (
-            f"{status_prefix}No usable ARP or MAC data collected under the current global collection policy. "
+            f"{status_prefix}No usable ARP or MAC data collected. "
             f"MAC result: {mac_detail}; ARP result: {arp_detail}."
         )
 
@@ -922,6 +922,100 @@ class NetworkDataCollector:
         finally:
             self.collection_running = False
 
+    # ── ARP/MAC per-table helper methods with SNMP/CLI fallback ──────────────
+
+    async def _try_snmp_arp(
+        self, switch: Switch, arp_entries: list, collected_at: datetime
+    ) -> str:
+        """Try ARP via SNMP. Appends to arp_entries in-place. Returns detail string."""
+        try:
+            snmp_config = self._get_snmp_config(switch)
+            result = await asyncio.wait_for(
+                snmp_service.collect_arp_table(str(switch.ip_address), snmp_config),
+                timeout=60.0,
+            )
+            if result:
+                arp_entries.extend(result)
+                logger.info(f"  ✅ SNMP ARP: {len(result)} entries from {switch.name}")
+                return f"SNMP ARP: {len(result)} entries"
+            else:
+                logger.info(f"  SNMP ARP returned 0 entries for {switch.name}")
+                return "SNMP ARP: 0 entries"
+        except asyncio.TimeoutError:
+            logger.warning(f"  SNMP ARP timeout for {switch.name}")
+            return "SNMP ARP: timeout"
+        except Exception as e:
+            logger.warning(f"  SNMP ARP failed for {switch.name}: {str(e)}")
+            return f"SNMP ARP failed: {str(e)}"
+
+    async def _try_cli_arp(
+        self, switch: Switch, cli_config: dict, templates: list, arp_entries: list
+    ) -> str:
+        """Try ARP via CLI. Appends to arp_entries in-place. Returns detail string."""
+        try:
+            result = await asyncio.to_thread(
+                cli_service.collect_arp_table_cli,
+                str(switch.ip_address),
+                cli_config,
+                templates,
+            )
+            if result:
+                arp_entries.extend(result)
+                logger.info(f"  ✅ CLI ARP: {len(result)} entries from {switch.name}")
+                return f"CLI ARP: {len(result)} entries"
+            else:
+                logger.info(f"  CLI ARP returned 0 entries for {switch.name}")
+                return "CLI ARP: 0 entries"
+        except Exception as e:
+            logger.warning(f"  CLI ARP failed for {switch.name}: {str(e)}")
+            return f"CLI ARP failed: {str(e)}"
+
+    async def _try_snmp_mac(
+        self, switch: Switch, mac_entries: list, collected_at: datetime
+    ) -> str:
+        """Try MAC via SNMP. Appends to mac_entries in-place. Returns detail string."""
+        try:
+            snmp_config = self._get_snmp_config(switch)
+            result = await asyncio.wait_for(
+                snmp_service.collect_mac_table(str(switch.ip_address), snmp_config),
+                timeout=60.0,
+            )
+            if result:
+                mac_entries.extend(result)
+                logger.info(f"  ✅ SNMP MAC: {len(result)} entries from {switch.name}")
+                return f"SNMP MAC: {len(result)} entries"
+            else:
+                logger.info(f"  SNMP MAC returned 0 entries for {switch.name}")
+                return "SNMP MAC: 0 entries"
+        except asyncio.TimeoutError:
+            logger.warning(f"  SNMP MAC timeout for {switch.name}")
+            return "SNMP MAC: timeout"
+        except Exception as e:
+            logger.warning(f"  SNMP MAC failed for {switch.name}: {str(e)}")
+            return f"SNMP MAC failed: {str(e)}"
+
+    async def _try_cli_mac(
+        self, switch: Switch, cli_config: dict, templates: list, mac_entries: list
+    ) -> str:
+        """Try MAC via CLI. Appends to mac_entries in-place. Returns detail string."""
+        try:
+            result = await asyncio.to_thread(
+                cli_service.collect_mac_table_cli,
+                str(switch.ip_address),
+                cli_config,
+                templates,
+            )
+            if result:
+                mac_entries.extend(result)
+                logger.info(f"  ✅ CLI MAC: {len(result)} entries from {switch.name}")
+                return f"CLI MAC: {len(result)} entries"
+            else:
+                logger.info(f"  CLI MAC returned 0 entries for {switch.name}")
+                return "CLI MAC: 0 entries"
+        except Exception as e:
+            logger.warning(f"  CLI MAC failed for {switch.name}: {str(e)}")
+            return f"CLI MAC failed: {str(e)}"
+
     async def _collect_from_switch(
         self,
         db: AsyncSession,
@@ -1022,69 +1116,109 @@ class NetworkDataCollector:
             'enable_password_encrypted': switch.enable_password_encrypted
         }
 
-        from config.collection_strategy import CollectionStrategy
+        from config.collection_strategy import CollectionStrategy, CollectionMethod
 
-        global_l2_method = CollectionStrategy.get_l2_table_primary_method()
+        strategy = CollectionStrategy.get_strategy(switch.vendor, switch.model)
+        primary_label = CollectionStrategy.get_primary_method(switch.vendor, switch.model)
 
-        # Collect ARP table using the global L2 CLI-only policy
+        # ---- ARP collection with per-vendor strategy + fallback ----
         arp_entries = []
-        arp_result_detail = "No ARP method attempted"
+        arp_method_used = None
+        arp_result_detail = ""
 
-        logger.info(f"  Using global ARP/MAC collection strategy for {switch.name}: {global_l2_method}")
-        if switch.cli_enabled and switch.password_encrypted:
-            logger.info(f"  Collecting ARP via CLI (global policy) for {switch.name}")
-            try:
-                arp_entries = await asyncio.to_thread(
-                    cli_service.collect_arp_table_cli,
-                    str(switch.ip_address),
-                    cli_config,
-                    templates
+        logger.info(f"  ARP strategy for {switch.name}: {primary_label}")
+
+        # Determine primary direction
+        try_snmp_first = strategy in (
+            CollectionMethod.SNMP_ONLY,
+            CollectionMethod.SNMP_PRIMARY,
+        )
+        try_cli_first = strategy in (
+            CollectionMethod.CLI_ONLY,
+            CollectionMethod.CLI_PRIMARY,
+        )
+        if strategy == CollectionMethod.AUTO:
+            try_snmp_first = True  # AUTO defaults to SNMP first
+
+        # --- Try primary method ---
+        if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            arp_result_detail = await self._try_snmp_arp(
+                switch, arp_entries, collected_at
+            )
+            if arp_entries:
+                arp_method_used = 'snmp'
+            elif try_cli_first or CollectionStrategy.should_fallback_to_cli(switch.vendor, switch.model):
+                # SNMP returned 0 or failed; fallback to CLI
+                logger.info(f"  ARP: SNMP empty/failed, falling back to CLI for {switch.name}")
+                arp_result_detail += " | " + await self._try_cli_arp(
+                    switch, cli_config, templates, arp_entries
                 )
-                if len(arp_entries) > 0:
-                    logger.info(f"  ✅ CLI ARP collection successful: {len(arp_entries)} entries")
-                    arp_result_detail = f"CLI succeeded with {len(arp_entries)} ARP entries"
-                else:
-                    logger.info(f"  CLI returned 0 ARP entries for {switch.name}")
-                    arp_result_detail = "CLI returned 0 ARP entries"
-            except Exception as e:
-                logger.warning(f"  CLI ARP collection failed for {switch.name}: {str(e)}")
-                arp_result_detail = f"CLI failed for ARP collection: {str(e)}"
+                if arp_entries:
+                    arp_method_used = 'cli'
+
+        elif try_cli_first and switch.cli_enabled and switch.password_encrypted:
+            arp_result_detail = await self._try_cli_arp(
+                switch, cli_config, templates, arp_entries
+            )
+            if arp_entries:
+                arp_method_used = 'cli'
+            elif CollectionStrategy.should_fallback_to_snmp(switch.vendor, switch.model) and \
+                 switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                logger.info(f"  ARP: CLI empty/failed, falling back to SNMP for {switch.name}")
+                arp_result_detail += " | " + await self._try_snmp_arp(
+                    switch, arp_entries, collected_at
+                )
+                if arp_entries:
+                    arp_method_used = 'snmp'
+        elif try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            # Already tried SNMP in the first branch and fell through (no CLI fallback)
+            pass
         else:
-            arp_result_detail = "CLI credentials are not configured"
-            logger.warning(f"  CLI ARP collection skipped for {switch.name}: {arp_result_detail}")
+            arp_result_detail = "No usable method (CLI not configured, SNMP not configured)"
 
-        # Store ARP entries using bulk operations
-        await self._store_arp_entries_bulk(db, switch.id, arp_entries, collected_at)
+        if not arp_result_detail:
+            arp_result_detail = f"{arp_method_used or 'none'} returned 0 ARP entries"
 
-        # Collect MAC table using the same global L2 CLI-only policy
+        # ---- MAC collection with per-vendor strategy + fallback ----
         mac_entries = []
-        mac_result_detail = "No MAC method attempted"
+        mac_method_used = None
+        mac_result_detail = ""
 
-        if switch.cli_enabled and switch.password_encrypted:
-            logger.info(f"  Collecting MAC via CLI (global policy) for {switch.name}")
-            try:
-                mac_entries = await asyncio.to_thread(
-                    cli_service.collect_mac_table_cli,
-                    str(switch.ip_address),
-                    cli_config,
-                    templates
+        if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            mac_result_detail = await self._try_snmp_mac(
+                switch, mac_entries, collected_at
+            )
+            if mac_entries:
+                mac_method_used = 'snmp'
+            elif try_cli_first or CollectionStrategy.should_fallback_to_cli(switch.vendor, switch.model):
+                logger.info(f"  MAC: SNMP empty/failed, falling back to CLI for {switch.name}")
+                mac_result_detail += " | " + await self._try_cli_mac(
+                    switch, cli_config, templates, mac_entries
                 )
-                if len(mac_entries) > 0:
-                    logger.info(f"  ✅ CLI MAC collection successful: {len(mac_entries)} entries")
-                    mac_result_detail = f"CLI succeeded with {len(mac_entries)} MAC entries"
-                else:
-                    logger.info(f"  CLI returned 0 MAC entries for {switch.name}")
-                    mac_result_detail = "CLI returned 0 MAC entries"
-            except Exception as e:
-                logger.warning(f"  CLI MAC collection failed for {switch.name}: {str(e)}")
-                mac_result_detail = f"CLI failed for MAC collection: {str(e)}"
+                if mac_entries:
+                    mac_method_used = 'cli'
+
+        elif try_cli_first and switch.cli_enabled and switch.password_encrypted:
+            mac_result_detail = await self._try_cli_mac(
+                switch, cli_config, templates, mac_entries
+            )
+            if mac_entries:
+                mac_method_used = 'cli'
+            elif CollectionStrategy.should_fallback_to_snmp(switch.vendor, switch.model) and \
+                 switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                logger.info(f"  MAC: CLI empty/failed, falling back to SNMP for {switch.name}")
+                mac_result_detail += " | " + await self._try_snmp_mac(
+                    switch, mac_entries, collected_at
+                )
+                if mac_entries:
+                    mac_method_used = 'snmp'
+        elif try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            pass
         else:
-            mac_result_detail = "CLI credentials are not configured"
-            logger.warning(f"  CLI MAC collection skipped for {switch.name}: {mac_result_detail}")
+            mac_result_detail = "No usable method (CLI not configured, SNMP not configured)"
 
-
-        # Store MAC entries using bulk operations
-        await self._store_mac_entries_bulk(db, switch.id, mac_entries, collected_at)
+        if not mac_result_detail:
+            mac_result_detail = f"{mac_method_used or 'none'} returned 0 MAC entries"
 
         logger.info(f"  Collected {len(arp_entries)} ARP, {len(mac_entries)} MAC entries from {switch.name}")
 
@@ -1115,7 +1249,8 @@ class NetworkDataCollector:
         switch.last_mac_collection_at = collected_at
         switch.last_collection_status = 'success'
         switch.last_collection_message = (
-            f"ARP: {len(arp_entries)} 条, MAC: {len(mac_entries)} 条"
+            f"ARP: {len(arp_entries)} via {arp_method_used or 'none'}, "
+            f"MAC: {len(mac_entries)} via {mac_method_used or 'none'}"
         )
 
         return (len(arp_entries), len(mac_entries))
@@ -1413,48 +1548,49 @@ class NetworkDataCollector:
 
     async def collect_mac_single_switch(self, db: AsyncSession, switch: Switch) -> List[Dict]:
         """
-        Collect MAC table from a single switch using the global CLI-only policy.
+        Collect MAC table from a single switch using per-vendor strategy with fallback.
         """
+        from config.collection_strategy import CollectionStrategy, CollectionMethod
         from services.cli_service import cli_service
 
         collected_at = datetime.utcnow()
-        mac_entries = []
+        mac_entries: list = []
         method_used = None
-        switch.mac_collection_method = 'cli'
-        switch.mac_method_override = False
 
-        if switch.cli_enabled and switch.password_encrypted:
-            cli_start = datetime.utcnow()
-            try:
-                templates = await self._load_command_templates(db)
-                # Close the read transaction before the SSH call blocks on network I/O.
-                await db.commit()
-                cli_config = self._build_cli_config(switch)
+        strategy = CollectionStrategy.get_strategy(switch.vendor, switch.model)
+        try_snmp_first = strategy in (CollectionMethod.SNMP_ONLY, CollectionMethod.SNMP_PRIMARY)
+        try_cli_first = strategy in (CollectionMethod.CLI_ONLY, CollectionMethod.CLI_PRIMARY)
+        if strategy == CollectionMethod.AUTO:
+            try_snmp_first = True
 
-                mac_entries = await asyncio.to_thread(
-                    cli_service.collect_mac_table_cli,
-                    str(switch.ip_address),
-                    cli_config,
-                    templates
-                )
+        templates = await self._load_command_templates(db)
+        await db.commit()
+        cli_config = self._build_cli_config(switch)
 
-                if len(mac_entries) > 0:
+        if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            await self._try_snmp_mac(switch, mac_entries, collected_at)
+            if mac_entries:
+                method_used = 'snmp'
+            elif try_cli_first or CollectionStrategy.should_fallback_to_cli(switch.vendor, switch.model):
+                logger.info(f"  MAC: SNMP empty, falling back to CLI for {switch.name}")
+                await self._try_cli_mac(switch, cli_config, templates, mac_entries)
+                if mac_entries:
                     method_used = 'cli'
-                    logger.info(f"✅ CLI MAC collection successful: {len(mac_entries)} entries from {switch.name}")
-                    switch.mac_collection_success_count += 1
 
-            except Exception as e:
-                elapsed = (datetime.utcnow() - cli_start).total_seconds()
-                logger.error(f"CLI MAC collection failed for {switch.name} after {elapsed:.1f}s: {str(e)}")
-        else:
-            logger.warning(f"CLI MAC collection skipped for {switch.name}: CLI credentials are not configured")
+        elif try_cli_first and switch.cli_enabled and switch.password_encrypted:
+            await self._try_cli_mac(switch, cli_config, templates, mac_entries)
+            if mac_entries:
+                method_used = 'cli'
+            elif CollectionStrategy.should_fallback_to_snmp(switch.vendor, switch.model) and \
+                 switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                logger.info(f"  MAC: CLI empty, falling back to SNMP for {switch.name}")
+                await self._try_snmp_mac(switch, mac_entries, collected_at)
+                if mac_entries:
+                    method_used = 'snmp'
 
-        # Handle failure case
-        if len(mac_entries) == 0:
-            switch.mac_collection_fail_count += 1
-            logger.warning(f"⚠️  Zero MAC entries from {switch.name} under global CLI-only policy")
-        else:
-            # Store collected data
+        if mac_entries:
+            switch.mac_collection_success_count += 1
+            switch.mac_collection_method = method_used
             await self._store_mac_entries_bulk(db, switch.id, mac_entries, collected_at)
             analysis_summary = await self.refresh_port_analysis_for_switch(db, switch)
             switch.last_mac_collection_at = collected_at
@@ -1465,8 +1601,7 @@ class NetworkDataCollector:
             )
             return mac_entries
 
-        # A zero-entry run is still a fresh collection attempt. Refresh the timestamp
-        # so the UI reflects the latest attempt instead of showing stale "1 day ago" data.
+        switch.mac_collection_fail_count += 1
         switch.last_mac_collection_at = collected_at
         switch.last_collection_status = 'partial'
         switch.last_collection_message = "MAC: 0 entries after trying all available methods"
@@ -1474,56 +1609,56 @@ class NetworkDataCollector:
 
     async def collect_arp_single_switch(self, db: AsyncSession, switch: Switch) -> List[Dict]:
         """
-        Collect ARP table from a single switch using the global CLI-only policy.
+        Collect ARP table from a single switch using per-vendor strategy with fallback.
         """
+        from config.collection_strategy import CollectionStrategy, CollectionMethod
         from services.cli_service import cli_service
 
         collected_at = datetime.utcnow()
-        arp_entries = []
+        arp_entries: list = []
         method_used = None
-        switch.arp_collection_method = 'cli'
-        switch.arp_method_override = False
 
-        if switch.cli_enabled and switch.password_encrypted:
-            cli_start = datetime.utcnow()
-            try:
-                templates = await self._load_command_templates(db)
-                # Close the read transaction before the SSH call blocks on network I/O.
-                await db.commit()
-                cli_config = self._build_cli_config(switch)
+        strategy = CollectionStrategy.get_strategy(switch.vendor, switch.model)
+        try_snmp_first = strategy in (CollectionMethod.SNMP_ONLY, CollectionMethod.SNMP_PRIMARY)
+        try_cli_first = strategy in (CollectionMethod.CLI_ONLY, CollectionMethod.CLI_PRIMARY)
+        if strategy == CollectionMethod.AUTO:
+            try_snmp_first = True
 
-                arp_entries = await asyncio.to_thread(
-                    cli_service.collect_arp_table_cli,
-                    str(switch.ip_address),
-                    cli_config,
-                    templates
-                )
+        templates = await self._load_command_templates(db)
+        await db.commit()
+        cli_config = self._build_cli_config(switch)
 
-                if len(arp_entries) > 0:
+        if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            await self._try_snmp_arp(switch, arp_entries, collected_at)
+            if arp_entries:
+                method_used = 'snmp'
+            elif try_cli_first or CollectionStrategy.should_fallback_to_cli(switch.vendor, switch.model):
+                logger.info(f"  ARP: SNMP empty, falling back to CLI for {switch.name}")
+                await self._try_cli_arp(switch, cli_config, templates, arp_entries)
+                if arp_entries:
                     method_used = 'cli'
-                    logger.info(f"✅ CLI ARP collection successful: {len(arp_entries)} entries from {switch.name}")
-                    switch.arp_collection_success_count += 1
 
-            except Exception as e:
-                elapsed = (datetime.utcnow() - cli_start).total_seconds()
-                logger.error(f"CLI ARP collection failed for {switch.name} after {elapsed:.1f}s: {str(e)}")
-        else:
-            logger.warning(f"CLI ARP collection skipped for {switch.name}: CLI credentials are not configured")
+        elif try_cli_first and switch.cli_enabled and switch.password_encrypted:
+            await self._try_cli_arp(switch, cli_config, templates, arp_entries)
+            if arp_entries:
+                method_used = 'cli'
+            elif CollectionStrategy.should_fallback_to_snmp(switch.vendor, switch.model) and \
+                 switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                logger.info(f"  ARP: CLI empty, falling back to SNMP for {switch.name}")
+                await self._try_snmp_arp(switch, arp_entries, collected_at)
+                if arp_entries:
+                    method_used = 'snmp'
 
-        # Handle failure case
-        if len(arp_entries) == 0:
-            switch.arp_collection_fail_count += 1
-            logger.warning(f"⚠️  Zero ARP entries from {switch.name} under global CLI-only policy")
-        else:
-            # Store collected data
+        if arp_entries:
+            switch.arp_collection_success_count += 1
+            switch.arp_collection_method = method_used
             await self._store_arp_entries_bulk(db, switch.id, arp_entries, collected_at)
             switch.last_arp_collection_at = collected_at
             switch.last_collection_status = 'success'
             switch.last_collection_message = f"ARP: {len(arp_entries)} entries via {method_used}"
             return arp_entries
 
-        # A zero-entry run is still a fresh collection attempt. Refresh the timestamp
-        # so the UI reflects the latest attempt instead of showing stale "1 day ago" data.
+        switch.arp_collection_fail_count += 1
         switch.last_arp_collection_at = collected_at
         switch.last_collection_status = 'partial'
         switch.last_collection_message = "ARP: 0 entries after trying all available methods"

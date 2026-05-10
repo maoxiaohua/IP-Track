@@ -17,6 +17,10 @@ const props = withDefaults(defineProps<Props>(), {
   height: '400px'
 })
 
+const emit = defineEmits<{
+  (e: 'chart-click', params: any): void
+}>()
+
 const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
 
@@ -25,6 +29,9 @@ const initChart = () => {
 
   chartInstance = echarts.init(chartRef.value)
   chartInstance.setOption(props.option)
+  chartInstance.on('click', (params: any) => {
+    emit('chart-click', params)
+  })
 
   // Auto resize
   window.addEventListener('resize', handleResize)
