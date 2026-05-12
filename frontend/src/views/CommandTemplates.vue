@@ -82,7 +82,7 @@
         <el-table-column label="内置" width="80">
           <template #default="{ row }">
             <el-tag v-if="row.is_builtin" type="warning" size="small">内置</el-tag>
-            <el-tag v-else type="" size="small">自定义</el-tag>
+            <el-tag v-else type="info" size="small">自定义</el-tag>
           </template>
         </el-table-column>
 
@@ -331,7 +331,7 @@
 
         <el-descriptions-item label="描述" :span="2">{{ currentTemplate.description || '-' }}</el-descriptions-item>
         <el-descriptions-item label="内置模板">
-          <el-tag :type="currentTemplate.is_builtin ? 'warning' : ''" size="small">
+          <el-tag :type="currentTemplate.is_builtin ? 'warning' : 'info'" size="small">
             {{ currentTemplate.is_builtin ? '是' : '否' }}
           </el-tag>
         </el-descriptions-item>

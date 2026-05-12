@@ -11,6 +11,8 @@ export const useIPAMScanMonitor = (options: UseIPAMScanMonitorOptions = {}) => {
 
   let eventSource: EventSource | null = null
   let reconnectTimer: number | null = null
+  let rafId: number | null = null
+  let pendingStatus: IPAMScanStatus | null = null
 
   const applyStatus = (status: IPAMScanStatus) => {
     const previous = scanStatus.value
@@ -39,6 +41,11 @@ export const useIPAMScanMonitor = (options: UseIPAMScanMonitorOptions = {}) => {
       window.clearTimeout(reconnectTimer)
       reconnectTimer = null
     }
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId)
+      rafId = null
+    }
+    pendingStatus = null
     if (eventSource) {
       eventSource.close()
       eventSource = null
@@ -54,8 +61,16 @@ export const useIPAMScanMonitor = (options: UseIPAMScanMonitorOptions = {}) => {
 
     eventSource.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data) as IPAMScanStatus
-        applyStatus(data)
+        pendingStatus = JSON.parse(event.data) as IPAMScanStatus
+        if (rafId === null) {
+          rafId = requestAnimationFrame(() => {
+            rafId = null
+            if (pendingStatus) {
+              applyStatus(pendingStatus)
+              pendingStatus = null
+            }
+          })
+        }
       } catch (error) {
         console.error('Failed to parse IPAM scan event:', error)
       }

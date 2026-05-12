@@ -19,3 +19,4 @@
 ## Context Control
 - Only use provided code
 - Do not assume project structure
+- Do not use Hard-coded

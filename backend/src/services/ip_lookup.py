@@ -8,8 +8,9 @@ from models.mac_table import MACTable
 from models.port_analysis import PortAnalysis
 from models.query_history import QueryHistory
 from models.mac_cache import MACAddressCache
-from services.port_lookup_policy_service import build_lookup_eligible_clause
+from services.port_lookup_policy_service import build_lookup_eligible_clause, resolve_lookup_policy
 from services.data_freshness_service import build_lookup_result_freshness
+from services.port_analysis_service import port_analysis_service
 from services.switch_manager import switch_manager, SwitchConnectionError
 from core.config import settings
 from utils.logger import logger
@@ -192,28 +193,50 @@ class IPLookupService:
 
             mac_query = (
                 select(MACTable)
-                .outerjoin(
-                    PortAnalysis,
-                    and_(
-                        PortAnalysis.switch_id == MACTable.switch_id,
-                        PortAnalysis.port_name == MACTable.port_name
-                    )
-                )
                 .where(
                     and_(
                         cast(MACTable.mac_address, MACADDR) == cast(mac_address, MACADDR),
-                        # MACTable.switch_id == switch.id,  # REMOVED: Allow finding MAC on any switch
                         MACTable.last_seen > datetime.now(timezone.utc) - timedelta(hours=cache_hours)
                     )
                 )
-                .where(build_lookup_eligible_clause(PortAnalysis))
-
                 .order_by(desc(MACTable.last_seen))
-                .limit(1)
+                .limit(5)
             )
 
             mac_result = await db.execute(mac_query)
-            mac_entry = mac_result.scalar_one_or_none()
+            mac_candidates = mac_result.scalars().all()
+
+            mac_entry = None
+            for candidate in (mac_candidates or []):
+                normalized = port_analysis_service.normalize_port_name(candidate.port_name)
+                pa_result = await db.execute(
+                    select(PortAnalysis).where(
+                        and_(
+                            PortAnalysis.switch_id == candidate.switch_id,
+                            PortAnalysis.port_name == normalized
+                        )
+                    )
+                )
+                pa_row = pa_result.scalar_one_or_none()
+                policy = resolve_lookup_policy(
+                    port_type=getattr(pa_row, 'port_type', None),
+                    lookup_policy_override=getattr(pa_row, 'lookup_policy_override', None),
+                    has_analysis=pa_row is not None
+                )
+                if policy.get('included'):
+                    mac_entry = candidate
+                    break
+                else:
+                    logger.info(
+                        f"  Port {candidate.port_name} (normalized: {normalized}) excluded by "
+                        f"lookup policy (reason={policy.get('reason')}, "
+                        f"port_type={getattr(pa_row, 'port_type', None)}, "
+                        f"override={getattr(pa_row, 'lookup_policy_override', None)})"
+                    )
+
+            if mac_entry is None and mac_candidates:
+                # All candidates excluded; fall back to same-switch query
+                logger.info(f"  All {len(mac_candidates)} MAC candidates excluded by lookup policy")
 
             if mac_entry:
                 # Found physical port in MAC table
@@ -245,9 +268,34 @@ class IPLookupService:
                         )
                     )
                     .order_by(desc(MACTable.last_seen))
-                    .limit(1)
+                    .limit(3)
                 )
-                same_switch_mac_entry = same_switch_mac_result.scalar_one_or_none()
+                same_switch_candidates = same_switch_mac_result.scalars().all()
+
+                same_switch_mac_entry = None
+                for candidate in (same_switch_candidates or []):
+                    normalized = port_analysis_service.normalize_port_name(candidate.port_name)
+                    pa_result = await db.execute(
+                        select(PortAnalysis).where(
+                            and_(
+                                PortAnalysis.switch_id == candidate.switch_id,
+                                PortAnalysis.port_name == normalized
+                            )
+                        )
+                    )
+                    pa_row = pa_result.scalar_one_or_none()
+                    policy = resolve_lookup_policy(
+                        port_type=getattr(pa_row, 'port_type', None),
+                        lookup_policy_override=getattr(pa_row, 'lookup_policy_override', None),
+                        has_analysis=pa_row is not None
+                    )
+                    if policy.get('included'):
+                        same_switch_mac_entry = candidate
+                        break
+                    else:
+                        logger.info(
+                            f"  Same-switch port {candidate.port_name} excluded by lookup policy"
+                        )
 
                 if same_switch_mac_entry:
                     port_name = same_switch_mac_entry.port_name

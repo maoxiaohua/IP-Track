@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.v1 import discovery, command_templates
+from api.v1 import discovery, command_templates, snmp_oid_overrides
 from api.routes import network
 from services.network_scheduler import start_collection_scheduler, stop_collection_scheduler
 from services.collection_worker import worker_pool
@@ -55,6 +55,7 @@ from core.config import settings
 app.include_router(network.router, prefix=settings.API_V1_PREFIX)
 app.include_router(discovery.router, prefix=settings.API_V1_PREFIX)
 app.include_router(command_templates.router, prefix=settings.API_V1_PREFIX)
+app.include_router(snmp_oid_overrides.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 async def health():

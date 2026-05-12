@@ -158,12 +158,21 @@ class CollectionWorker:
                     f"Optical: {optical_count} entries"
                 )
 
+                # Determine optical collection status
+                optical_status = getattr(switch, 'last_optical_collection_status', None)
+                optical_failed = (optical_status == 'failed')
+
                 if mac_count == 0 and arp_count == 0:
                     failure_message = self.collector._build_collection_failure_message(
                         switch,
                         mac_result_message or "MAC: 0 entries after trying all available methods",
                         arp_result_message or "ARP: 0 entries after trying all available methods"
                     )
+                    if optical_failed:
+                        failure_message += (
+                            f"; Optical: failed — "
+                            f"{getattr(switch, 'last_optical_collection_message', 'unknown error')}"
+                        )
                     await self.collector._mark_switch_collection_failed(
                         db,
                         switch,
@@ -172,8 +181,20 @@ class CollectionWorker:
                     )
                     raise RuntimeError(failure_message)
 
-                switch.last_collection_status = 'success'
-                switch.last_collection_message = combined_result_message
+                # Unified status: ALL collection types must succeed
+                # Optical 'empty' means no modules physically present — not a failure
+                if optical_failed:
+                    switch.last_collection_status = 'failed'
+                    switch.last_collection_message = (
+                        f"{combined_result_message}; "
+                        f"Optical FAILED: {getattr(switch, 'last_optical_collection_message', 'unknown error')}"
+                    )
+                else:
+                    switch.last_collection_status = 'success'
+                    optical_note = ""
+                    if optical_status == 'empty':
+                        optical_note = " (Optical: no modules detected)"
+                    switch.last_collection_message = combined_result_message + optical_note
 
             # Mark job as successful
             job.status = 'success'

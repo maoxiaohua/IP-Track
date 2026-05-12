@@ -23,6 +23,7 @@ const emit = defineEmits<{
 
 const chartRef = ref<HTMLElement>()
 let chartInstance: echarts.ECharts | null = null
+let resizeObserver: ResizeObserver | null = null
 
 const initChart = () => {
   if (!chartRef.value) return
@@ -33,12 +34,10 @@ const initChart = () => {
     emit('chart-click', params)
   })
 
-  // Auto resize
-  window.addEventListener('resize', handleResize)
-}
-
-const handleResize = () => {
-  chartInstance?.resize()
+  resizeObserver = new ResizeObserver(() => {
+    chartInstance?.resize()
+  })
+  resizeObserver.observe(chartRef.value)
 }
 
 const updateChart = () => {
@@ -54,7 +53,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('resize', handleResize)
+  resizeObserver?.disconnect()
   chartInstance?.dispose()
 })
 </script>

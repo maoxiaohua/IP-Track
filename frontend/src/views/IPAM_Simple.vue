@@ -5,7 +5,7 @@
         <div style="display: flex; justify-content: space-between; align-items: center">
           <h2 style="margin: 0">IP Address Management</h2>
           <div style="display: flex; gap: 10px">
-            <el-button type="info" plain @click="exportToExcel">
+            <el-button type="primary" @click="exportToExcel">
               <el-icon><Download /></el-icon>
               导出 Excel
             </el-button>
@@ -643,13 +643,13 @@ const osTypeChartOption = computed(() => {
     },
     series: [{
       type: 'pie',
-      radius: ['45%', '72%'],
+      radius: ['45%', '70%'],
       center: ['50%', '50%'],
       data,
       label: {
         color: '#333',
         formatter: '{b}\n{c} 台',
-        fontSize: 12
+        fontSize: 12,
       },
       emphasis: {
         label: { fontSize: 16, fontWeight: 'bold' },
@@ -665,6 +665,7 @@ const vendorChartOption = computed(() => {
   }
   const top = vendorStats.value.os_types.slice(0, 20)
   const data = top.map(item => ({ name: item.label, value: item.count }))
+  const truncate = (s: string, max = 14) => s.length > max ? s.slice(0, max) + '...' : s
   return {
     color: ['#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de', '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#48b8d0',
             '#f6c8a3', '#88c8e8', '#d9a9d9', '#a8d8b9', '#f5a6a6', '#c4b0d9', '#8cc7f6', '#e8b88a', '#a0d2a8', '#d9a8a0'],
@@ -677,13 +678,13 @@ const vendorChartOption = computed(() => {
     },
     series: [{
       type: 'pie',
-      radius: ['45%', '72%'],
+      radius: ['45%', '70%'],
       center: ['50%', '50%'],
       data,
       label: {
         color: '#333',
-        formatter: '{b}\n{c} 台',
-        fontSize: 10
+        formatter: (p: any) => `${truncate(p.name)}\n${p.value} 台`,
+        fontSize: 10,
       },
       emphasis: {
         label: { fontSize: 14, fontWeight: 'bold' },

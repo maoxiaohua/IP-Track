@@ -327,7 +327,7 @@
             <el-table-column prop="model" label="型号" />
             <el-table-column prop="cli_transport" label="CLI协议" width="100">
               <template #default="{ row }">
-                <el-tag size="small">{{ (row.cli_transport || 'ssh').toUpperCase() }}</el-tag>
+                <el-tag type="info" size="small">{{ (row.cli_transport || 'ssh').toUpperCase() }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column prop="username" label="CLI用户名" />

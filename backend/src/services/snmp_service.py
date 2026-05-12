@@ -18,6 +18,7 @@ Standard SNMP OIDs used:
 - IF-MIB::ifName (1.3.6.1.2.1.31.1.1.1.1) - Interface names
 """
 
+import fnmatch
 from typing import Dict, List, Optional, Tuple
 from pysnmp.hlapi.v3arch.asyncio import (
     SnmpEngine, UsmUserData, UdpTransportTarget, ContextData,
@@ -90,6 +91,62 @@ class SNMPService:
             engine._close()
         except Exception:
             pass
+
+    @staticmethod
+    def resolve_oid_overrides(
+        overrides: List[Dict],
+        vendor: str,
+        model: str
+    ) -> Dict[str, str]:
+        """
+        Resolve vendor-specific SNMP OID overrides for a given switch.
+
+        Returns a dict mapping oid_role -> oid_value for all matching overrides.
+        Falls back to empty dict when no overrides match, allowing callers to
+        use standard OIDs.
+
+        Matching rules:
+          - vendor case-insensitive exact match
+          - model_pattern NULL/empty = match-all; otherwise glob-match against model
+          - highest priority wins per oid_role; specific model_pattern beats NULL on tie
+        """
+        if not overrides:
+            return {}
+
+        vendor_lower = (vendor or '').lower()
+        model_lower = (model or '').lower()
+
+        candidates = [
+            o for o in overrides
+            if (o.get('vendor', '') or '').lower() == vendor_lower
+            and o.get('enabled', True)
+            and (
+                not o.get('model_pattern')
+                or fnmatch.fnmatch(model_lower, (o.get('model_pattern', '') or '').lower())
+            )
+        ]
+
+        candidates.sort(
+            key=lambda o: (
+                o.get('priority', 100),
+                1 if o.get('model_pattern') else 0,
+            ),
+            reverse=True,
+        )
+
+        resolved: Dict[str, str] = {}
+        for o in candidates:
+            role = o.get('oid_role', '') or ''
+            if role and role not in resolved:
+                resolved[role] = o.get('oid_value', '') or ''
+        return resolved
+
+    @staticmethod
+    def _oid_index_suffix(oid_str: str, base_oid: str) -> str:
+        """Extract the instance-index suffix from an SNMP walk result."""
+        if oid_str.startswith(base_oid + '.'):
+            return oid_str[len(base_oid) + 1:]
+        return oid_str
 
     def _create_snmp_auth(
         self,
@@ -333,7 +390,8 @@ class SNMPService:
     async def collect_arp_table(
         self,
         switch_ip: str,
-        switch_config: Dict
+        switch_config: Dict,
+        oid_overrides: Optional[Dict[str, str]] = None
     ) -> List[Dict]:
         """
         Collect ARP table from a switch using asyncio
@@ -341,18 +399,17 @@ class SNMPService:
         Args:
             switch_ip: IP address of the switch
             switch_config: Dictionary with SNMP credentials
+            oid_overrides: Optional vendor-specific OID overrides
 
         Returns:
             List of ARP entries: [{ip, mac, vlan, interface}, ...]
         """
         try:
-            # Decrypt SNMP passwords
             auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
             priv_password = self._decrypt_optional_password(
                 switch_config.get('snmp_priv_password_encrypted')
             )
 
-            # Create SNMP authentication
             auth_data = self._create_snmp_auth(
                 username=switch_config['snmp_username'],
                 auth_protocol=switch_config['snmp_auth_protocol'],
@@ -362,29 +419,27 @@ class SNMPService:
             )
 
             port = switch_config.get('snmp_port', 161)
+            ov = oid_overrides or {}
+
+            arp_ip_oid = ov.get('arp_ip', self.OID_ARP_IP)
+            arp_mac_oid = ov.get('arp_mac', self.OID_ARP_MAC)
 
             # Walk ARP table
             arp_entries = []
             arp_data = {}
 
             # Get IP addresses from ARP table
-            ip_results = await self._walk_oid(switch_ip, self.OID_ARP_IP, auth_data, port)
+            ip_results = await self._walk_oid(switch_ip, arp_ip_oid, auth_data, port)
             for oid, value in ip_results:
-                # OID format: 1.3.6.1.2.1.4.22.1.3.ifIndex.ipAddress
-                # Extract index (last part of OID)
-                index = oid.split('.')[-5:]  # Get last 5 parts (ifIndex + IP)
-                index_key = '.'.join(index)
-
+                index_key = self._oid_index_suffix(oid, arp_ip_oid)
                 ip_addr = self._format_ip_address(value)
                 if ip_addr:
                     arp_data[index_key] = {'ip': ip_addr}
 
             # Get MAC addresses from ARP table
-            mac_results = await self._walk_oid(switch_ip, self.OID_ARP_MAC, auth_data, port)
+            mac_results = await self._walk_oid(switch_ip, arp_mac_oid, auth_data, port)
             for oid, value in mac_results:
-                index = oid.split('.')[-5:]
-                index_key = '.'.join(index)
-
+                index_key = self._oid_index_suffix(oid, arp_mac_oid)
                 mac_addr = self._format_mac_address(value)
                 if index_key in arp_data:
                     arp_data[index_key]['mac'] = mac_addr
@@ -397,7 +452,7 @@ class SNMPService:
                     arp_entries.append({
                         'ip_address': data['ip'],
                         'mac_address': data['mac'],
-                        'vlan_id': None,  # VLAN can be extracted from index if needed
+                        'vlan_id': None,
                         'interface': None,
                         'age_seconds': None
                     })
@@ -412,7 +467,8 @@ class SNMPService:
     async def collect_mac_table(
         self,
         switch_ip: str,
-        switch_config: Dict
+        switch_config: Dict,
+        oid_overrides: Optional[Dict[str, str]] = None
     ) -> List[Dict]:
         """
         Collect MAC address table from a switch using asyncio
@@ -420,18 +476,17 @@ class SNMPService:
         Args:
             switch_ip: IP address of the switch
             switch_config: Dictionary with SNMP credentials
+            oid_overrides: Optional vendor-specific OID overrides
 
         Returns:
             List of MAC entries: [{mac, port_name, vlan, is_dynamic}, ...]
         """
         try:
-            # Decrypt SNMP passwords
             auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
             priv_password = self._decrypt_optional_password(
                 switch_config.get('snmp_priv_password_encrypted')
             )
 
-            # Create SNMP authentication
             auth_data = self._create_snmp_auth(
                 username=switch_config['snmp_username'],
                 auth_protocol=switch_config['snmp_auth_protocol'],
@@ -441,63 +496,94 @@ class SNMPService:
             )
 
             port = switch_config.get('snmp_port', 161)
+            ov = oid_overrides or {}
 
-            # Step 1: Get bridge port to ifIndex mapping
-            port_map = {}  # bridge_port -> ifIndex
-            bridge_results = await self._walk_oid(switch_ip, self.OID_BRIDGE_PORT_MAP, auth_data, port)
-            for oid, value in bridge_results:
-                bridge_port = int(oid.split('.')[-1])
-                if_index = int(value)
-                port_map[bridge_port] = if_index
+            mac_addr_oid = ov.get('mac_address', self.OID_MAC_ADDRESS)
+            mac_port_oid = ov.get('mac_port', self.OID_MAC_PORT)
+            bridge_map_oid = ov.get('bridge_port_map', self.OID_BRIDGE_PORT_MAP)
+            vlan_oid = ov.get('mac_vlan')
+            has_vendor_oids = bool(ov)
+
+            # Step 1: Get bridge port to ifIndex mapping (skip when using vendor OIDs
+            # that return ifIndex directly, e.g. tmnxFdbPort on Nokia SR OS)
+            port_map: Dict[int, int] = {}
+            if not has_vendor_oids:
+                bridge_results = await self._walk_oid(switch_ip, bridge_map_oid, auth_data, port)
+                for oid, value in bridge_results:
+                    try:
+                        bridge_port = int(str(oid).split('.')[-1])
+                        port_map[bridge_port] = int(value)
+                    except (ValueError, IndexError):
+                        pass
 
             # Step 2: Get interface names
-            if_names = {}  # ifIndex -> interface name
+            if_names: Dict[int, str] = {}
             name_results = await self._walk_oid(switch_ip, self.OID_IF_NAME, auth_data, port)
             for oid, value in name_results:
-                if_index = int(oid.split('.')[-1])
-                if_name = str(value)
-                if_names[if_index] = if_name
-
-            # Step 3: Get MAC addresses and their ports
-            mac_entries = []
-            mac_data = {}
-
-            # Get MAC addresses
-            mac_results = await self._walk_oid(switch_ip, self.OID_MAC_ADDRESS, auth_data, port)
-            for oid, value in mac_results:
-                # OID format: 1.3.6.1.2.1.17.4.3.1.1.vlan.mac
-                mac_addr = self._format_mac_address(value)
-                # Extract VLAN from OID if present
-                vlan_id = None
                 try:
-                    vlan_id = int(oid.split('.')[-7])
-                except:
+                    if_index = int(str(oid).split('.')[-1])
+                    if_names[if_index] = str(value)
+                except (ValueError, IndexError):
                     pass
+
+            # Step 3: Walk VLAN OID separately when a vendor-specific mac_vlan is provided
+            vlan_data: Dict[str, int] = {}
+            if vlan_oid:
+                vlan_results = await self._walk_oid(switch_ip, vlan_oid, auth_data, port)
+                for oid, value in vlan_results:
+                    index_key = self._oid_index_suffix(oid, vlan_oid)
+                    try:
+                        vlan_data[index_key] = int(value)
+                    except (ValueError, TypeError):
+                        pass
+
+            # Step 4: Get MAC addresses and their ports
+            mac_entries = []
+            mac_data: Dict[str, Dict] = {}
+
+            mac_results = await self._walk_oid(switch_ip, mac_addr_oid, auth_data, port)
+            for oid, value in mac_results:
+                mac_addr = self._format_mac_address(value)
+                index_key = self._oid_index_suffix(oid, mac_addr_oid)
+                vlan_id = vlan_data.get(index_key) if vlan_oid else None
+                if vlan_id is None and not has_vendor_oids:
+                    try:
+                        vlan_id = int(str(oid).split('.')[-7])
+                    except (ValueError, IndexError):
+                        pass
 
                 mac_data[oid] = {
                     'mac': mac_addr,
-                    'vlan': vlan_id
+                    'vlan': vlan_id,
+                    'index_key': index_key,
                 }
 
-            # Get port assignments
-            port_results = await self._walk_oid(switch_ip, self.OID_MAC_PORT, auth_data, port)
+            port_results = await self._walk_oid(switch_ip, mac_port_oid, auth_data, port)
             for oid, value in port_results:
-                # Match OID with MAC data
-                mac_oid = oid.replace(self.OID_MAC_PORT, self.OID_MAC_ADDRESS)
+                index_key = self._oid_index_suffix(oid, mac_port_oid)
 
-                if mac_oid in mac_data:
-                    bridge_port = int(value)
+                # Find matching MAC OID entry
+                for mac_oid, data in mac_data.items():
+                    if data.get('index_key') == index_key:
+                        try:
+                            port_value = int(value)
+                        except (ValueError, TypeError):
+                            continue
 
-                    # Map bridge port to interface name
-                    if_index = port_map.get(bridge_port, bridge_port)
-                    port_name = if_names.get(if_index, f"Port{bridge_port}")
+                        if has_vendor_oids:
+                            # Vendor port is typically an ifIndex directly
+                            port_name = if_names.get(port_value, f"Port{port_value}")
+                        else:
+                            if_index = port_map.get(port_value, port_value)
+                            port_name = if_names.get(if_index, f"Port{port_value}")
 
-                    mac_entries.append({
-                        'mac_address': mac_data[mac_oid]['mac'],
-                        'port_name': port_name,
-                        'vlan_id': mac_data[mac_oid]['vlan'],
-                        'is_dynamic': 1
-                    })
+                        mac_entries.append({
+                            'mac_address': data['mac'],
+                            'port_name': port_name,
+                            'vlan_id': data['vlan'],
+                            'is_dynamic': 1
+                        })
+                        break
 
             logger.info(f"Collected {len(mac_entries)} MAC entries from {switch_ip}")
             return mac_entries
@@ -963,18 +1049,20 @@ class SNMPService:
     async def collect_arp_table_async(
         self,
         switch_ip: str,
-        switch_config: Dict
+        switch_config: Dict,
+        oid_overrides: Optional[Dict[str, str]] = None
     ) -> List[Dict]:
         """Async wrapper for ARP table collection - now just calls the async method"""
-        return await self.collect_arp_table(switch_ip, switch_config)
+        return await self.collect_arp_table(switch_ip, switch_config, oid_overrides)
 
     async def collect_mac_table_async(
         self,
         switch_ip: str,
-        switch_config: Dict
+        switch_config: Dict,
+        oid_overrides: Optional[Dict[str, str]] = None
     ) -> List[Dict]:
         """Async wrapper for MAC table collection - now just calls the async method"""
-        return await self.collect_mac_table(switch_ip, switch_config)
+        return await self.collect_mac_table(switch_ip, switch_config, oid_overrides)
 
     async def collect_optical_modules(
         self,

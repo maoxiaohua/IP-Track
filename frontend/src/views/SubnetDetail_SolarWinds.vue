@@ -92,32 +92,34 @@
       <div style="margin-bottom: 10px; color: #909399; font-size: 13px">
         显示全部 {{ totalIPCount }} 个 IP 地址（当前页 {{ ipAddresses.length }} 条）
       </div>
+      <div class="table-scroll-wrapper">
       <el-table
         :data="ipAddresses"
         v-loading="initialLoading"
         element-loading-text="正在加载 IP 地址..."
         stripe
-        style="width: 100%"
+        size="small"
         :default-sort="{ prop: 'ip_address', order: 'ascending' }"
         highlight-current-row
         :current-row-key="selectedIpId || undefined"
         row-key="id"
+        class="subnet-ip-table"
       >
         <!-- Status Icon -->
-        <el-table-column label="Status" width="80" align="center">
+        <el-table-column label="Status" width="60" align="center">
           <template #default="{ row }">
             <el-tooltip :content="getStatusTooltip(row)" placement="top">
               <div style="display: flex; align-items: center; justify-content: center">
-                <el-icon v-if="row.is_reachable" :size="20" style="color: #67c23a">
+                <el-icon v-if="row.is_reachable" :size="18" style="color: #67c23a">
                   <CircleCheckFilled />
                 </el-icon>
-                <el-icon v-else-if="row.status === 'used'" :size="20" style="color: #f56c6c">
+                <el-icon v-else-if="row.status === 'used'" :size="18" style="color: #f56c6c">
                   <CircleCloseFilled />
                 </el-icon>
-                <el-icon v-else-if="row.status === 'reserved'" :size="20" style="color: #e6a23c">
+                <el-icon v-else-if="row.status === 'reserved'" :size="18" style="color: #e6a23c">
                   <WarningFilled />
                 </el-icon>
-                <el-icon v-else :size="20" style="color: #909399">
+                <el-icon v-else :size="18" style="color: #909399">
                   <Remove />
                 </el-icon>
               </div>
@@ -126,7 +128,7 @@
         </el-table-column>
 
         <!-- IP Address -->
-        <el-table-column prop="ip_address" label="IP Address" width="140" sortable :sort-method="sortByIpAddress">
+        <el-table-column prop="ip_address" label="IP Address" width="135" sortable :sort-method="sortByIpAddress">
           <template #default="{ row }">
             <span
               class="ip-address-link"
@@ -136,7 +138,7 @@
         </el-table-column>
 
         <!-- Last Response (IMPORTANT!) -->
-        <el-table-column label="Last Response" width="140" sortable :sort-method="sortByLastResponse">
+        <el-table-column label="Last Response" width="120" sortable :sort-method="sortByLastResponse">
           <template #default="{ row }">
             <span :style="{ color: getLastResponseColor(row) }">
               {{ getLastResponse(row) }}
@@ -145,43 +147,43 @@
         </el-table-column>
 
         <!-- Response Time -->
-        <el-table-column label="Response Time" width="120">
+        <el-table-column label="Response Time" width="100" align="right">
           <template #default="{ row }">
-            <span v-if="row.response_time != null">{{ row.response_time }} ms</span>
+            <span v-if="row.response_time != null" class="response-time-cell">{{ row.response_time }} ms</span>
             <span v-else style="color: #909399">-</span>
           </template>
         </el-table-column>
 
         <!-- DNS Name -->
-        <el-table-column prop="dns_name" label="DNS" min-width="180">
+        <el-table-column prop="dns_name" label="DNS" min-width="140" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.dns_name || row.hostname || '-' }}
           </template>
         </el-table-column>
 
         <!-- System Name -->
-        <el-table-column prop="system_name" label="System Name" min-width="150">
+        <el-table-column prop="system_name" label="System Name" min-width="120" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.system_name || '-' }}
           </template>
         </el-table-column>
 
         <!-- Machine Type -->
-        <el-table-column prop="machine_type" label="Machine Type" min-width="150">
+        <el-table-column prop="machine_type" label="Machine Type" min-width="110" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.machine_type || '-' }}
           </template>
         </el-table-column>
 
         <!-- Vendor -->
-        <el-table-column prop="vendor" label="Vendor" width="120">
+        <el-table-column prop="vendor" label="Vendor" width="100" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.vendor || '-' }}
           </template>
         </el-table-column>
 
         <!-- Switch Name -->
-        <el-table-column prop="switch_name" label="Switch" min-width="200">
+        <el-table-column prop="switch_name" label="Switch" min-width="150" show-overflow-tooltip>
           <template #default="{ row }">
             <router-link
               v-if="row.switch_id"
@@ -195,15 +197,17 @@
         </el-table-column>
 
         <!-- Switch Port -->
-        <el-table-column prop="switch_port" label="Port" width="120">
+        <el-table-column prop="switch_port" label="Port" width="110" show-overflow-tooltip>
           <template #default="{ row }">
-            <el-tag v-if="row.switch_port" type="success" size="small">{{ row.switch_port }}</el-tag>
+            <el-tooltip v-if="row.switch_port" :content="row.switch_port" placement="top" :disabled="(row.switch_port || '').length <= 12">
+              <el-tag type="success" size="small" class="port-tag">{{ row.switch_port }}</el-tag>
+            </el-tooltip>
             <span v-else style="color: #909399">-</span>
           </template>
         </el-table-column>
 
         <!-- OS Type -->
-        <el-table-column prop="os_type" label="OS Type" width="100">
+        <el-table-column prop="os_type" label="OS Type" width="95">
           <template #default="{ row }">
             <el-tag v-if="row.os_type === 'windows'" type="primary" size="small">Windows</el-tag>
             <el-tag v-else-if="row.os_type === 'linux'" type="success" size="small">Linux</el-tag>
@@ -214,26 +218,27 @@
         </el-table-column>
 
         <!-- OS Name -->
-        <el-table-column prop="os_name" label="OS Name" min-width="140">
+        <el-table-column prop="os_name" label="OS Name" min-width="110" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.os_name || '-' }}
           </template>
         </el-table-column>
 
         <!-- OS Version -->
-        <el-table-column prop="os_version" label="OS Version" width="120">
+        <el-table-column prop="os_version" label="OS Version" width="100" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.os_version || '-' }}
           </template>
         </el-table-column>
 
         <!-- Last Boot Time -->
-        <el-table-column label="Last Boot Time" min-width="160">
+        <el-table-column label="Last Boot Time" min-width="130" show-overflow-tooltip>
           <template #default="{ row }">
             {{ row.last_boot_time ? formatDateTime(row.last_boot_time) : '-' }}
           </template>
         </el-table-column>
       </el-table>
+      </div>
 
       <!-- Pagination -->
       <el-pagination
@@ -852,6 +857,64 @@ onMounted(() => {
   color: #1e3a8a;
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+/* Table horizontal scroll — table expands to its natural width, wrapper scrolls when needed */
+.table-scroll-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #c0c4cc transparent;
+  /* sticky scrollbar at bottom of viewport so user always sees it */
+  max-height: 75vh;
+}
+
+.subnet-ip-table {
+  /* Let the table take its natural width based on column definitions.
+     When it exceeds the wrapper, the wrapper's overflow-x handles scrolling. */
+  width: auto !important;
+  min-width: 100%;
+}
+
+/* Tighter, readable cell styling — similar to Excel data density */
+.subnet-ip-table :deep(.el-table__body-wrapper) {
+  overflow-y: auto;
+}
+
+.subnet-ip-table :deep(.cell) {
+  padding: 4px 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.table-scroll-wrapper::-webkit-scrollbar {
+  height: 8px;
+}
+
+.table-scroll-wrapper::-webkit-scrollbar-track {
+  background: #f0f2f5;
+  border-radius: 4px;
+}
+
+.table-scroll-wrapper::-webkit-scrollbar-thumb {
+  background: #c0c4cc;
+  border-radius: 4px;
+}
+
+.table-scroll-wrapper::-webkit-scrollbar-thumb:hover {
+  background: #909399;
+}
+
+.response-time-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.port-tag {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 768px) {

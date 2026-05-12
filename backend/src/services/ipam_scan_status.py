@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -27,6 +28,10 @@ class IPAMScanStatusService:
         self._listeners: set[asyncio.Queue] = set()
         self._status: Dict[str, Any] = self._make_idle_status()
         self._lock = asyncio.Lock()
+        self._last_broadcast_at = 0.0
+        self._throttle_interval = 0.25
+        self._pending_payload: Optional[Dict[str, Any]] = None
+        self._throttle_task: Optional[asyncio.Task] = None
 
     def _make_idle_status(self) -> Dict[str, Any]:
         return {
@@ -77,7 +82,7 @@ class IPAMScanStatusService:
         async with self._lock:
             self._listeners.discard(queue)
 
-    async def _broadcast(self, payload: Dict[str, Any]) -> None:
+    async def _do_broadcast(self, payload: Dict[str, Any]) -> None:
         async with self._lock:
             listeners = list(self._listeners)
 
@@ -92,6 +97,25 @@ class IPAMScanStatusService:
             async with self._lock:
                 for queue in stale_listeners:
                     self._listeners.discard(queue)
+
+    async def _broadcast(self, payload: Dict[str, Any]) -> None:
+        now = time.monotonic()
+        if now - self._last_broadcast_at < self._throttle_interval:
+            self._pending_payload = payload
+            if self._throttle_task is None or self._throttle_task.done():
+                self._throttle_task = asyncio.create_task(self._delayed_broadcast())
+            return
+        self._last_broadcast_at = now
+        await self._do_broadcast(payload)
+
+    async def _delayed_broadcast(self) -> None:
+        await asyncio.sleep(self._throttle_interval)
+        payload = self._pending_payload
+        self._pending_payload = None
+        if payload is None:
+            return
+        self._last_broadcast_at = time.monotonic()
+        await self._do_broadcast(payload)
 
     async def _update(self, event_type: str, **updates: Any) -> Dict[str, Any]:
         async with self._lock:

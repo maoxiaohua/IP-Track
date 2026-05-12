@@ -62,7 +62,7 @@
           {{ switchInfo.ip_address }}
         </el-descriptions-item>
         <el-descriptions-item label="厂商" label-class-name="desc-label">
-          <el-tag size="small">{{ switchInfo.vendor?.toUpperCase() || 'Unknown' }}</el-tag>
+          <el-tag type="info" size="small">{{ switchInfo.vendor?.toUpperCase() || 'Unknown' }}</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="型号" label-class-name="desc-label">
           {{ switchInfo.model || 'Unknown' }}
@@ -515,7 +515,7 @@
             <el-tag type="info">Access {{ portAnalysisSummary.access_ports }}</el-tag>
             <el-tag type="warning">Trunk {{ portAnalysisSummary.trunk_ports }}</el-tag>
             <el-tag type="danger">Uplink {{ portAnalysisSummary.uplink_ports }}</el-tag>
-            <el-tag>Unknown {{ portAnalysisSummary.unknown_ports }}</el-tag>
+            <el-tag type="info">Unknown {{ portAnalysisSummary.unknown_ports }}</el-tag>
             <el-tag type="success">Lookup Included {{ portAnalysisSummary.lookup_included_ports }}</el-tag>
             <el-tag type="danger">Lookup Excluded {{ portAnalysisSummary.lookup_excluded_ports }}</el-tag>
           </div>
@@ -1525,9 +1525,6 @@ onMounted(async () => {
   border-bottom: 1px solid #ebeef5;
 }
 
-:deep(.el-card__header .el-tag) {
-  color: inherit !important;
-}
 
 :deep(.el-card__header .el-button--primary) {
   color: #fff !important;

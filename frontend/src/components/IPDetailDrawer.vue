@@ -393,7 +393,7 @@ const getHostnameSourceTagType = (source?: string) => {
     DNS: 'success',
     NETBIOS: 'primary',
     ARP: 'info',
-    SWITCH: '',
+    SWITCH: 'info',
     MANUAL: 'danger'
   }
   return types[source || ''] || 'info'
@@ -442,12 +442,12 @@ const getFreshnessTagType = (dateString: string) => {
 
 const getStatusType = (status: string) => {
   const types: Record<string, any> = {
-    used: 'success',
-    available: '',
+    used: 'primary',
+    available: 'info',
     reserved: 'warning',
     offline: 'danger'
   }
-  return types[status] || ''
+  return types[status] || 'info'
 }
 
 const getOsTagType = (osType: string) => {
@@ -457,7 +457,7 @@ const getOsTagType = (osType: string) => {
     network: 'warning',
     unix: 'info'
   }
-  return types[osType] || ''
+  return types[osType] || 'info'
 }
 
 const hasChanges = (record: IPScanHistory) => {

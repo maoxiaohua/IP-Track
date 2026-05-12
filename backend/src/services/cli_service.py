@@ -1868,8 +1868,8 @@ class CLIService:
                     logger.info(f"✅ Collected {len(mac_entries)} MAC entries from {switch_ip} via CLI (main command)")
                     return mac_entries
                 else:
-                    logger.warning(f"Main MAC command returned 0 entries from {switch_ip}, trying fallback commands...")
-                    logger.warning(f"First 500 chars of output:\n{output[:500]}")
+                    logger.warning(f"Main MAC command returned 0 entries from {switch_ip} ({vendor} {model}), trying fallback commands...")
+                    logger.warning(f"First 2000 chars of output:\n{output[:2000]}")
             except Exception as e:
                 logger.warning(f"Main MAC command failed on {switch_ip}: {str(e)}, trying fallback commands...")
 
@@ -2270,9 +2270,9 @@ class CLIService:
 
                 arp_entries = parser(output)
 
-                # Debug: Log output if parsing returns 0 results
-                if not arp_entries and device_type in ('dell_force10', 'dell_os10'):
-                    logger.warning(f"Dell {device_type} '{command}' parsing returned 0 entries. Output sample (first 2000 chars):\n{output[:2000]}")
+                # Debug: Log output if parsing returns 0 results (all vendors)
+                if not arp_entries:
+                    logger.warning(f"ARP '{command}' parsing returned 0 entries for {switch_ip} ({vendor} {model}). Output sample (first 2000 chars):\n{output[:2000]}")
 
                 if arp_entries:
                     logger.info(f"✅ Collected {len(arp_entries)} ARP entries from {switch_ip} via CLI (main command)")

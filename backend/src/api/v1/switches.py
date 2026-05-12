@@ -1186,15 +1186,20 @@ async def collect_switch_optical_modules(
 
         modules = await network_data_collector.collect_optical_single_switch(db, switch)
 
-        # Sync main collection status for UI when optical-only collection succeeds
+        # Only auto-resolve alarms when the main ARP/MAC collection is also healthy.
+        # Optical-only success must not mask a failing ARP/MAC collection.
         if switch.last_optical_collection_status in ('success', 'empty'):
-            switch.last_collection_status = 'success'
-            switch.last_collection_message = switch.last_optical_collection_message
-            db.add(switch)
-            resolved_count = await alarm_service.auto_resolve_alarms(
-                db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
-            )
-            logger.info(f"Optical collection succeeded for {switch.name}; auto-resolved {resolved_count} alarm(s)")
+            resolved_count = 0
+            if switch.last_collection_status == 'success':
+                resolved_count = await alarm_service.auto_resolve_alarms(
+                    db=db, source_type=AlarmSourceType.SWITCH, source_id=switch_id
+                )
+                logger.info(f"Optical collection succeeded for {switch.name}; auto-resolved {resolved_count} alarm(s)")
+            else:
+                logger.info(
+                    f"Optical collection succeeded for {switch.name} but ARP/MAC status is "
+                    f"'{switch.last_collection_status}' — not auto-resolving alarms or changing overall status"
+                )
         else:
             resolved_count = 0
 

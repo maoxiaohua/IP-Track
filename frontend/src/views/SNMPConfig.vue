@@ -57,14 +57,14 @@
 
         <el-table-column prop="vendor" label="厂商" width="100">
           <template #default="{ row }">
-            <el-tag size="small">{{ row.vendor }}</el-tag>
+            <el-tag type="info" size="small">{{ row.vendor }}</el-tag>
           </template>
         </el-table-column>
 
         <el-table-column prop="role" label="角色" width="100">
           <template #default="{ row }">
             <el-tag
-              :type="row.role === 'core' ? 'danger' : row.role === 'aggregation' ? 'warning' : ''"
+              :type="row.role === 'core' ? 'danger' : row.role === 'aggregation' ? 'warning' : 'info'"
               size="small"
             >
               {{ roleMap[row.role] || row.role }}
