@@ -374,14 +374,6 @@ class NetworkCollectionScheduler:
             # Get database session
             async for db in get_db():
                 try:
-                    pending_jobs, running_jobs = await self._get_active_job_counts(db, JobType.ALL.value)
-                    if pending_jobs > 0 or running_jobs > 0:
-                        logger.warning(
-                            "Skipping scheduled full collection because queue is still busy "
-                            f"(pending={pending_jobs}, running={running_jobs})"
-                        )
-                        break
-
                     # Get all enabled switches with CLI or SNMP enabled
                     stmt = select(Switch).where(
                         and_(
@@ -604,14 +596,6 @@ class NetworkCollectionScheduler:
             # Get database session
             async for db in get_db():
                 try:
-                    pending_jobs, running_jobs = await self._get_active_job_counts(db, JobType.OPTICAL.value)
-                    if pending_jobs > 0 or running_jobs > 0:
-                        logger.warning(
-                            "Skipping scheduled optical collection because queue is still busy "
-                            f"(pending={pending_jobs}, running={running_jobs})"
-                        )
-                        break
-
                     # Get all enabled switches with CLI or SNMP enabled
                     stmt = select(Switch).where(
                         and_(

@@ -5,18 +5,18 @@
         <div class="header-bar">
           <div>
             <h2 style="margin: 0 0 8px 0">{{ subnet.network || 'Loading...' }}</h2>
-            <div style="color: #909399">
+            <div class="subnet-meta">
               <span v-if="subnet.subnet_name">{{ subnet.subnet_name }} | </span>
               <span>{{ subnet.total_ips || 0 }} addresses | </span>
-              <span style="color: #67c23a">{{ subnet.available_ips || 0 }} available</span>
+              <span class="available-count">{{ subnet.available_ips || 0 }} available</span>
               <span> | </span>
-              <span style="color: #409eff">{{ subnet.used_ips || 0 }} used</span>
+              <span class="used-count">{{ subnet.used_ips || 0 }} used</span>
               <span> | </span>
               <span>Last Scan: {{ subnet.last_scan_at ? formatDateTime(subnet.last_scan_at) : 'Never' }}</span>
             </div>
           </div>
           <div style="display: flex; gap: 10px">
-            <el-button type="primary" plain @click="$router.back()">
+            <el-button type="default" plain @click="$router.back()">
               <el-icon><Back /></el-icon>
               返回
             </el-button>
@@ -24,10 +24,14 @@
               <el-icon><Edit /></el-icon>
               编辑子网
             </el-button>
-            <el-button type="success" @click="scanSubnet" :loading="scanning || isCurrentSubnetScanning" :disabled="Boolean(scanStatus?.running)">
+            <el-button v-if="!scanStatus?.running" type="success" @click="scanSubnet" :loading="scanning || isCurrentSubnetScanning">
               <el-icon><Refresh /></el-icon>
               扫描子网
             </el-button>
+            <el-tag v-else type="warning" size="large">
+              <el-icon class="is-loading" style="margin-right: 4px"><Loading /></el-icon>
+              扫描进行中...
+            </el-tag>
           </div>
         </div>
       </template>
@@ -284,8 +288,8 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="showEditDialog = false">取消</el-button>
-        <el-button type="primary" @click="handleEditSubmit">保存</el-button>
+        <el-button type="info" plain @click="showEditDialog = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="handleEditSubmit">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -303,7 +307,8 @@ import {
   CircleCheckFilled,
   CircleCloseFilled,
   WarningFilled,
-  Remove
+  Remove,
+  Loading
 } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
 import { ipamApi, type IPAMScanStatus } from '@/api/ipam'
@@ -361,6 +366,7 @@ const loading = ref(false)
 const initialLoading = ref(true)
 const refreshing = ref(false)
 const scanning = ref(false)
+const saving = ref(false)
 const showEditDialog = ref(false)
 
 const pagination = ref({
@@ -558,6 +564,7 @@ const loadSubnet = async () => {
 
 // Handle edit submit
 const handleEditSubmit = async () => {
+  saving.value = true
   try {
     await apiClient.put(`/api/v1/ipam/subnets/${subnetId}`, editForm.value)
     ElMessage.success('子网更新成功')
@@ -565,6 +572,8 @@ const handleEditSubmit = async () => {
     await loadSubnet()
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '更新子网失败')
+  } finally {
+    saving.value = false
   }
 }
 
@@ -795,6 +804,18 @@ onMounted(() => {
   align-items: flex-start;
 }
 
+:deep(.el-card__header .subnet-meta) {
+  color: #e5e7eb !important;
+}
+
+:deep(.el-card__header .subnet-meta .available-count) {
+  color: #86efac !important;
+}
+
+:deep(.el-card__header .subnet-meta .used-count) {
+  color: #93c5fd !important;
+}
+
 .detail-scan-status {
   margin-bottom: 20px;
   padding: 16px 18px;
@@ -838,7 +859,11 @@ onMounted(() => {
 
 :deep(.el-table th) {
   background-color: #f5f7fa;
+  color: #1f2937 !important;
   font-weight: 600;
+}
+:deep(.el-table th .cell) {
+  color: #1f2937 !important;
 }
 
 .ip-address-link {

@@ -18,7 +18,7 @@ from models.collection_job import CollectionJob, JobType, JobStatus
 from services.network_data_collector import NetworkDataCollector
 from utils.logger import logger
 from services.alarm_service import alarm_service
-from models.alarm import AlarmSeverity, AlarmSourceType
+from models.alarm import AlarmSeverity, AlarmSourceType, AlarmStatus
 
 
 class CollectionWorker:
@@ -52,7 +52,30 @@ class CollectionWorker:
 
                 if job:
                     self.current_job = job
-                    await self._execute_job(db, job)
+                    try:
+                        await asyncio.wait_for(
+                            self._execute_job(db, job),
+                            timeout=settings.COLLECTION_JOB_HARD_TIMEOUT_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"Worker {self.worker_id} job {job.id} exceeded hard timeout "
+                            f"({settings.COLLECTION_JOB_HARD_TIMEOUT_SECONDS}s), "
+                            f"worker will continue with next job"
+                        )
+                        try:
+                            job.status = 'timeout'
+                            job.error_message = (
+                                f"Hard timeout ({settings.COLLECTION_JOB_HARD_TIMEOUT_SECONDS}s) exceeded"
+                            )
+                            job.completed_at = datetime.utcnow()
+                            await db.commit()
+                        except Exception as cleanup_error:
+                            logger.error(
+                                f"Failed to mark job {job.id} as timeout after hard limit: {cleanup_error}"
+                            )
+                            await db.rollback()
+                        self.jobs_failed += 1
                     self.jobs_processed += 1
                 else:
                     # No jobs available, sleep briefly
@@ -134,10 +157,8 @@ class CollectionWorker:
 
             elif job.job_type == JobType.ALL:
                 mac_entries = await self.collector.collect_mac_single_switch(db, switch)
-                await db.commit()
                 mac_result_message = switch.last_collection_message
                 arp_entries = await self.collector.collect_arp_single_switch(db, switch)
-                await db.commit()
                 arp_result_message = switch.last_collection_message
                 optical_entries = await self.collector.collect_optical_single_switch(db, switch)
                 mac_count = len(mac_entries) if mac_entries else 0
@@ -237,7 +258,7 @@ class CollectionWorker:
                         reason="Collection timeout exceeded",
                         collected_at=start_time
                     )
-                    await alarm_service.create_alarm(
+                    alarm = await alarm_service.create_alarm(
                         db=db,
                         severity=AlarmSeverity.WARNING,
                         title=f"Collection timeout: {switch.name}",
@@ -253,6 +274,15 @@ class CollectionWorker:
                             'vendor': switch.vendor
                         }
                     )
+                    if alarm.occurrence_count >= settings.CONSECUTIVE_FAILURE_AUTO_RESOLVE:
+                        alarm.status = AlarmStatus.AUTO_RESOLVED
+                        alarm.resolved_at = datetime.utcnow()
+                        alarm.resolved_by = "system (consecutive failure threshold)"
+                        await db.commit()
+                        logger.info(
+                            f"Auto-resolved timeout alarm for switch {switch.name} "
+                            f"after {alarm.occurrence_count} consecutive failures"
+                        )
             except Exception as alarm_error:
                 logger.error(f"Failed to create timeout alarm: {alarm_error}")
             
@@ -287,7 +317,7 @@ class CollectionWorker:
                     elif 'connect' in str(e).lower() or 'unreachable' in str(e).lower():
                         severity = AlarmSeverity.WARNING
                     
-                    await alarm_service.create_alarm(
+                    alarm = await alarm_service.create_alarm(
                         db=db,
                         severity=severity,
                         title=f"Collection failed: {switch.name}",
@@ -304,6 +334,15 @@ class CollectionWorker:
                             'model': switch.model
                         }
                     )
+                    if alarm.occurrence_count >= settings.CONSECUTIVE_FAILURE_AUTO_RESOLVE:
+                        alarm.status = AlarmStatus.AUTO_RESOLVED
+                        alarm.resolved_at = datetime.utcnow()
+                        alarm.resolved_by = "system (consecutive failure threshold)"
+                        await db.commit()
+                        logger.info(
+                            f"Auto-resolved failure alarm for switch {switch.name} "
+                            f"after {alarm.occurrence_count} consecutive failures"
+                        )
             except Exception as alarm_error:
                 logger.error(f"Failed to create failure alarm: {alarm_error}")
             
@@ -339,6 +378,10 @@ class CollectionWorkerPool:
 
         async with AsyncSessionLocal() as session:
             await self._reclaim_stale_running_jobs(session)
+
+        # Start periodic stale job reclamation (runs every 5 minutes)
+        reclaim_task = asyncio.create_task(self._periodic_reclaim())
+        self.worker_tasks.append(reclaim_task)
 
         # Create workers
         for i in range(self.max_workers):
@@ -376,6 +419,45 @@ class CollectionWorkerPool:
         else:
             logger.info("No stale running collection jobs found on startup")
         return reclaimed
+
+    async def _periodic_reclaim(self):
+        """Periodically reclaim stale RUNNING jobs during runtime."""
+        while self.is_running:
+            try:
+                await asyncio.sleep(300)
+                if not self.is_running:
+                    break
+
+                from core.database import AsyncSessionLocal
+                async with AsyncSessionLocal() as db:
+                    stale_cutoff = datetime.utcnow() - timedelta(
+                        minutes=settings.STALE_JOB_RECLAIM_MINUTES
+                    )
+                    stmt = (
+                        update(CollectionJob)
+                        .where(
+                            CollectionJob.status == JobStatus.RUNNING,
+                            CollectionJob.started_at.is_not(None),
+                            CollectionJob.started_at < stale_cutoff
+                        )
+                        .values(
+                            status=JobStatus.PENDING,
+                            worker_id=None,
+                            started_at=None
+                        )
+                    )
+                    result = await db.execute(stmt)
+                    await db.commit()
+                    if result.rowcount:
+                        logger.warning(
+                            f"Periodic reclaim: moved {result.rowcount} stale RUNNING "
+                            f"jobs back to PENDING (older than "
+                            f"{settings.STALE_JOB_RECLAIM_MINUTES} min)"
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Periodic stale job reclaim failed: {e}")
 
     async def stop(self):
         """Stop worker pool gracefully"""

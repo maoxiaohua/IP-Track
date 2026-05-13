@@ -732,7 +732,7 @@ const deleteAlarm = async (id: number) => {
       {
         confirmButtonText: '删除',
         cancelButtonText: '取消',
-        type: 'warning'
+        type: 'error'
       }
     )
 

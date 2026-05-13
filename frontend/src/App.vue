@@ -29,7 +29,13 @@
 
           <!-- More dropdown outside el-menu -->
           <el-dropdown trigger="click" @command="handleMoreNav">
-            <div class="more-btn">
+            <div
+            class="more-btn"
+            tabindex="0"
+            role="button"
+            aria-label="More navigation options"
+            @keydown.enter="/* handled by el-dropdown trigger */"
+          >
               <el-icon :size="20"><MoreFilled /></el-icon>
             </div>
             <template #dropdown>

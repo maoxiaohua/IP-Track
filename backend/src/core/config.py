@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     ALARM_RETENTION_DAYS: int = 30
     COLLECTION_JOB_RETENTION_DAYS: int = 30
     COLLECTION_JOB_CLEANUP_BATCH_SIZE: int = 10000
+    COLLECTION_JOB_HARD_TIMEOUT_SECONDS: int = 360  # Per-job hard deadline (6 min)
+    STALE_JOB_RECLAIM_MINUTES: int = 15  # Reclaim RUNNING jobs older than this
+    CONSECUTIVE_FAILURE_AUTO_RESOLVE: int = 10  # Auto-resolve alarm after N failures
 
     # IPAM Settings
     IPAM_OFFLINE_THRESHOLD_HOURS: int = 6  # Hours without response before marking as offline

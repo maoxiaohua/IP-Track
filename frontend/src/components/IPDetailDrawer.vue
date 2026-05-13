@@ -2,7 +2,7 @@
   <el-drawer
     v-model="visible"
     :title="drawerTitle"
-    size="600px"
+    :size="drawerSize"
     direction="rtl"
     append-to-body
     destroy-on-close
@@ -280,6 +280,8 @@ const drawerTitle = computed(() => {
   }
   return 'IP Address Details'
 })
+
+const drawerSize = computed(() => window.innerWidth < 768 ? '100%' : '600px')
 
 const resetDrawerState = () => {
   ipDetail.value = {} as IPAddressDetail
