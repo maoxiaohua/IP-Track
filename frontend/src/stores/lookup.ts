@@ -19,12 +19,10 @@ export const useLookupStore = defineStore('lookup', () => {
         currentResult.value = response.result
       }
 
-      if (response.success && response.result) {
+      if (response.success) {
         error.value = null
-      } else if (!response.result) {
-        error.value = response.error || 'Lookup failed'
       } else {
-        error.value = null
+        error.value = response.error || 'Lookup returned incomplete results'
       }
     } catch (err: any) {
       error.value = err.message || 'An error occurred during lookup'

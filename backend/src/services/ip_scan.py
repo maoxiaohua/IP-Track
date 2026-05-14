@@ -860,6 +860,10 @@ class IPScanService:
             progress_callback=progress_callback
         )
 
+    async def shutdown(self):
+        """Shutdown the thread pool executor."""
+        self.executor.shutdown(wait=True)
+
 
 # Singleton instance
 ip_scan_service = IPScanService()

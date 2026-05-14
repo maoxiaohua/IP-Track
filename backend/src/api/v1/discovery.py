@@ -25,8 +25,17 @@ from sqlalchemy.dialects.postgresql import INET
 router = APIRouter(prefix="/discovery", tags=["discovery"])
 
 # Store discovered switches and progress
-_discovery_cache = {}
+_discovery_cache = {}  # session_id -> (timestamp, data)
 _progress_queues = {}  # session_id -> asyncio.Queue
+_CACHE_TTL = 3600  # 1 hour
+
+
+def _trim_expired():
+    """Remove expired discovery cache entries."""
+    now = time.time()
+    expired = [sid for sid, (ts, _) in _discovery_cache.items() if now - ts > _CACHE_TTL]
+    for sid in expired:
+        del _discovery_cache[sid]
 
 
 def _get_alcatel_model_via_cli(switch) -> str:
@@ -153,8 +162,9 @@ async def discover_switches(
         )
 
         # Store in cache for later batch add (use session ID in production)
+        _trim_expired()
         session_id = f"discovery_{len(_discovery_cache)}"
-        _discovery_cache[session_id] = discovered
+        _discovery_cache[session_id] = (time.time(), discovered)
 
         # Convert to response format (exclude passwords)
         switches_response = [
@@ -271,7 +281,8 @@ async def discover_switches_stream(
                 )
 
                 # Store results in cache (for the REST fallback endpoint)
-                _discovery_cache[session_id] = discovered
+                _trim_expired()
+                _discovery_cache[session_id] = (time.time(), discovered)
 
                 # Embed switch list directly in the 'complete' event so the frontend
                 # doesn't need a separate REST fetch — eliminates the race condition.
@@ -368,8 +379,14 @@ async def get_scan_result(session_id: str):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="扫描结果未找到或已过期"
         )
-    
-    discovered = _discovery_cache[session_id]
+
+    ts, discovered = _discovery_cache[session_id]
+    if time.time() - ts > _CACHE_TTL:
+        del _discovery_cache[session_id]
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="扫描结果未找到或已过期"
+        )
     
     # Convert to response format
     switches_response = [

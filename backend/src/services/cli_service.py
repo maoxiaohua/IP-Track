@@ -1979,7 +1979,7 @@ class CLIService:
                 try:
                     connection.disconnect()
                     logger.debug(f"CLI connection closed to {switch_ip}")
-                except:
+                except Exception:
                     pass
 
     def _match_from_template_list(
@@ -2388,7 +2388,7 @@ class CLIService:
                 try:
                     connection.disconnect()
                     logger.debug(f"CLI connection closed to {switch_ip}")
-                except:
+                except Exception:
                     pass
 
     def get_device_info_cli(
@@ -2496,7 +2496,7 @@ class CLIService:
                 try:
                     connection.disconnect()
                     logger.debug(f"CLI connection closed to {switch_ip}")
-                except:
+                except Exception:
                     pass
 
     def _get_parser(self, parser_type: Optional[str], data_type: str):
@@ -3275,7 +3275,7 @@ class CLIService:
                 return 1
             
             return None
-        except:
+        except Exception:
             return None
 
 

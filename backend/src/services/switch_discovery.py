@@ -917,5 +917,12 @@ class SwitchDiscoveryService:
             raise ValueError(f"解析 IP 范围时发生错误: {str(e)}")
 
 
+    async def shutdown(self):
+        """Shutdown the thread pool executor and clean up caches."""
+        self.executor.shutdown(wait=True)
+        self.progress_queues.clear()
+        self.event_loops.clear()
+
+
 # Singleton instance
 switch_discovery_service = SwitchDiscoveryService()

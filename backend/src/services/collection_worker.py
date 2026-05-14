@@ -139,9 +139,6 @@ class CollectionWorker:
             if not switch:
                 raise Exception(f"Switch {job.switch_id} not found")
 
-            # Close the read transaction before any long-running network I/O begins.
-            await db.commit()
-
             # Execute collection based on job type
             if job.job_type == JobType.MAC:
                 entries = await self.collector.collect_mac_single_switch(db, switch)

@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from api.v1 import switches, lookup, history, alarms, snmp_profiles, command_templates, snmp_oid_overrides, settings as settings_module
 from api.routes import snmp_config
 from services.status_checker import switch_status_checker
+from services.ip_lookup import ip_lookup_service
 from core.config import settings
 
 
@@ -31,6 +32,7 @@ async def lifespan(app: FastAPI):
     print("🛑 Stopping Core API Service...")
     if settings.FEATURE_STATUS_CHECKER:
         switch_status_checker.stop()
+    await ip_lookup_service.shutdown()
 
 
 app = FastAPI(

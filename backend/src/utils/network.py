@@ -51,7 +51,7 @@ async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, An
                     try:
                         avg_line = [line for line in output.split('\n') if 'Average' in line][0]
                         response_time = float(avg_line.split('=')[1].strip().replace('ms', ''))
-                    except:
+                    except Exception:
                         pass
             else:
                 # Linux/macOS format: "min/avg/max/stddev = 0.123/0.456/0.789/0.012 ms"
@@ -60,7 +60,7 @@ async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, An
                         stats_line = [line for line in output.split('\n') if 'min/avg/max' in line or 'rtt min/avg/max' in line][0]
                         avg_time = stats_line.split('=')[1].strip().split('/')[1]
                         response_time = float(avg_time)
-                    except:
+                    except Exception:
                         pass
 
             return {

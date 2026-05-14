@@ -175,7 +175,7 @@ class Settings(BaseSettings):
         if isinstance(self.BACKEND_CORS_ORIGINS, str):
             try:
                 return json.loads(self.BACKEND_CORS_ORIGINS)
-            except:
+            except Exception:
                 return [origin.strip() for origin in self.BACKEND_CORS_ORIGINS.split(',')]
         return self.BACKEND_CORS_ORIGINS
 

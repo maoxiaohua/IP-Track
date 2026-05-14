@@ -447,5 +447,10 @@ class IPLookupService:
 
 
 
+    async def shutdown(self):
+        """Shutdown the thread pool executor."""
+        self.executor.shutdown(wait=True)
+
+
 # Singleton instance
 ip_lookup_service = IPLookupService()

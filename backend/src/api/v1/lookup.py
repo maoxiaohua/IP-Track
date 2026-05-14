@@ -4,6 +4,7 @@ from api.deps import get_db
 from schemas.lookup import IPLookupRequest, IPLookupResponse, IPLookupResult
 from services.ip_lookup import ip_lookup_service
 from utils.logger import logger
+import ipaddress
 
 router = APIRouter(prefix="/lookup", tags=["lookup"])
 
@@ -25,10 +26,19 @@ async def lookup_ip_address(
     2. Returns switch name, port, VLAN, and data freshness information
     """
     try:
-        logger.info(f"Received IP lookup request for {request.ip_address}")
+        ip_str = str(request.ip_address).strip()
+        try:
+            ipaddress.ip_address(ip_str)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid IP address format: {ip_str}"
+            )
+
+        logger.info(f"Received IP lookup request for {ip_str}")
 
         # Perform the lookup
-        result = await ip_lookup_service.lookup_ip(db, str(request.ip_address))
+        result = await ip_lookup_service.lookup_ip(db, ip_str)
 
         # Convert to response format
         if result['found']:

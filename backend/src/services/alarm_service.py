@@ -98,7 +98,7 @@ class AlarmService:
                 f"(occurrence #{existing_active_alarm.occurrence_count})"
             )
 
-            await db.commit()
+            await db.flush()
             await db.refresh(existing_active_alarm)
             return existing_active_alarm
 
@@ -130,7 +130,7 @@ class AlarmService:
                 f"(was resolved at {existing_resolved_alarm.resolved_at})"
             )
 
-            await db.commit()
+            await db.flush()
             await db.refresh(existing_resolved_alarm)
             return existing_resolved_alarm
 
@@ -149,7 +149,7 @@ class AlarmService:
         )
 
         db.add(alarm)
-        await db.commit()
+        await db.flush()
         await db.refresh(alarm)
 
         logger.info(

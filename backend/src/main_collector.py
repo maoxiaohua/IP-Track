@@ -10,6 +10,7 @@ from api.v1 import discovery, command_templates, snmp_oid_overrides
 from api.routes import network
 from services.network_scheduler import start_collection_scheduler, stop_collection_scheduler
 from services.collection_worker import worker_pool
+from services.switch_discovery import switch_discovery_service
 
 
 @asynccontextmanager
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
     print("🛑 Stopping Collection Service...")
     await stop_collection_scheduler()
     await worker_pool.stop()
+    await switch_discovery_service.shutdown()
 
 
 app = FastAPI(
