@@ -143,6 +143,11 @@ class SwitchResponse(SwitchBase):
     trunk_review_completed_at: Optional[datetime] = None
     trunk_review_note: Optional[str] = None
 
+    # Collection method per data type
+    mac_collection_method: Optional[str] = None
+    arp_collection_method: Optional[str] = None
+    optical_collection_method: Optional[str] = None
+
     class Config:
         from_attributes = True
 

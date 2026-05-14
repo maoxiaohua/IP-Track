@@ -39,6 +39,13 @@ class PortAnalysisService:
         if not cleaned:
             return ''
 
+        # Filter non-physical interfaces (CPU, VLAN/SVI, loopback, null)
+        cleaned_lower = cleaned.lower()
+        if cleaned_lower == 'cpu':
+            return ''
+        if re.match(r'^(vl|vlan|lo|loopback|null|mgmt)\d', cleaned_lower):
+            return ''
+
         for pattern, canonical_prefix in self._PORT_NAME_PATTERNS:
             match = re.match(pattern, cleaned, re.IGNORECASE)
             if match:

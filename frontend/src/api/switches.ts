@@ -45,6 +45,11 @@ export interface Switch {
   snmp_priv_protocol?: string
   has_snmp_credentials?: boolean
 
+  // Collection method per data type
+  mac_collection_method?: string
+  arp_collection_method?: string
+  optical_collection_method?: string
+
   created_at: string
   updated_at: string
 }

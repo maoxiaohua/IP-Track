@@ -41,15 +41,25 @@
         </template>
       </el-table-column>
 
-      <!-- 认证配置: CLI + SNMP status -->
-      <el-table-column label="认证配置" width="130">
+      <!-- 采集媒介: SSH/SNMP method tags -->
+      <el-table-column label="采集媒介" width="145">
         <template #default="{ row }">
           <div style="display: flex; gap: 4px; flex-wrap: wrap;">
-            <el-tooltip :content="row.cli_enabled ? `CLI 已启用 (${(row.cli_transport || 'ssh').toUpperCase()})` : 'CLI 未启用'" placement="top">
-              <el-tag :type="row.cli_enabled ? 'success' : 'info'" size="small">CLI</el-tag>
+            <el-tooltip :content="getCliTooltip(row)" placement="top">
+              <el-tag
+                :type="row.cli_enabled && (row.mac_collection_method === 'cli' || row.arp_collection_method === 'cli') ? 'success' : 'info'"
+                size="small"
+              >
+                {{ (row.cli_transport || 'ssh').toUpperCase() }}
+              </el-tag>
             </el-tooltip>
-            <el-tooltip :content="row.has_snmp_credentials ? 'SNMP 已配置' : 'SNMP 未配置'" placement="top">
-              <el-tag :type="row.has_snmp_credentials ? 'success' : 'warning'" size="small">SNMP</el-tag>
+            <el-tooltip :content="getSnmpTooltip(row)" placement="top">
+              <el-tag
+                :type="row.snmp_enabled && (row.mac_collection_method === 'snmp' || row.arp_collection_method === 'snmp') ? 'warning' : 'info'"
+                size="small"
+              >
+                SNMP
+              </el-tag>
             </el-tooltip>
           </div>
         </template>
@@ -247,6 +257,21 @@ const formatRelativeTime = (time: string) => {
   if (diffMins < 60) return `${diffMins}分钟前`
   if (diffMins < 1440) return `${Math.floor(diffMins / 60)}小时前`
   return `${Math.floor(diffMins / 1440)}天前`
+}
+
+const getCliTooltip = (row: Switch) => {
+  const transport = (row.cli_transport || 'ssh').toUpperCase()
+  if (!row.cli_enabled) return `CLI 未启用`
+  const mac = row.mac_collection_method === 'cli' ? `MAC: ${transport}` : `MAC: ${row.mac_collection_method || 'auto'}`
+  const arp = row.arp_collection_method === 'cli' ? `ARP: ${transport}` : `ARP: ${row.arp_collection_method || 'auto'}`
+  return `${mac}, ${arp}`
+}
+
+const getSnmpTooltip = (row: Switch) => {
+  if (!row.snmp_enabled && !row.has_snmp_credentials) return 'SNMP 未配置'
+  const mac = row.mac_collection_method === 'snmp' ? 'MAC: SNMP' : `MAC: ${row.mac_collection_method || 'auto'}`
+  const arp = row.arp_collection_method === 'snmp' ? 'ARP: SNMP' : `ARP: ${row.arp_collection_method || 'auto'}`
+  return `${mac}, ${arp}`
 }
 
 // Handle dropdown menu actions
