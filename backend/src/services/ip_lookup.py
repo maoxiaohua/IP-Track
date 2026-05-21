@@ -272,30 +272,9 @@ class IPLookupService:
                 )
                 same_switch_candidates = same_switch_mac_result.scalars().all()
 
-                same_switch_mac_entry = None
-                for candidate in (same_switch_candidates or []):
-                    normalized = port_analysis_service.normalize_port_name(candidate.port_name)
-                    pa_result = await db.execute(
-                        select(PortAnalysis).where(
-                            and_(
-                                PortAnalysis.switch_id == candidate.switch_id,
-                                PortAnalysis.port_name == normalized
-                            )
-                        )
-                    )
-                    pa_row = pa_result.scalar_one_or_none()
-                    policy = resolve_lookup_policy(
-                        port_type=getattr(pa_row, 'port_type', None),
-                        lookup_policy_override=getattr(pa_row, 'lookup_policy_override', None),
-                        has_analysis=pa_row is not None
-                    )
-                    if policy.get('included'):
-                        same_switch_mac_entry = candidate
-                        break
-                    else:
-                        logger.info(
-                            f"  Same-switch port {candidate.port_name} excluded by lookup policy"
-                        )
+                # Same-switch fallback: use first MAC entry without policy filtering
+                # (aligns with IPAM behavior — any port is better than "not found")
+                same_switch_mac_entry = same_switch_candidates[0] if same_switch_candidates else None
 
                 if same_switch_mac_entry:
                     port_name = same_switch_mac_entry.port_name

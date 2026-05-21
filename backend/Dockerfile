@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y \
     iputils-ping \
     arp-scan \
     net-tools \
+    ipmitool \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements

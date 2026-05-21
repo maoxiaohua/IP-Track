@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     CONNECTION_TIMEOUT: int = 30
     COLLECTION_JOB_TIMEOUT: int = 300
 
+    # BMC Reset
+    BMC_RESET_TIMEOUT_SECONDS: int = 30
+
     # Port Analysis Thresholds
     PORT_SINGLE_MAC_CONFIDENCE: int = 95
     PORT_TRUNK_THRESHOLD: int = 10

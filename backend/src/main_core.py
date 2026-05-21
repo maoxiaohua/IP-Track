@@ -6,10 +6,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.v1 import switches, lookup, history, alarms, snmp_profiles, command_templates, snmp_oid_overrides, settings as settings_module
+from api.v1 import switches, lookup, history, alarms, snmp_profiles, command_templates, snmp_oid_overrides, settings as settings_module, bmc
 from api.routes import snmp_config
 from services.status_checker import switch_status_checker
 from services.ip_lookup import ip_lookup_service
+from services.bmc_reset_scheduler import start_bmc_scheduler, stop_bmc_scheduler
 from core.config import settings
 
 
@@ -26,12 +27,20 @@ async def lifespan(app: FastAPI):
     else:
         print("ℹ️ Status checker disabled by configuration")
 
+    # Start BMC reset scheduler
+    try:
+        start_bmc_scheduler()
+        print("✅ BMC reset scheduler started")
+    except Exception as e:
+        print(f"⚠️ BMC reset scheduler failed to start: {e}")
+
     yield
 
     # Shutdown
     print("🛑 Stopping Core API Service...")
     if settings.FEATURE_STATUS_CHECKER:
         switch_status_checker.stop()
+    stop_bmc_scheduler()
     await ip_lookup_service.shutdown()
 
 
@@ -61,6 +70,7 @@ app.include_router(snmp_config.router, prefix=settings.API_V1_PREFIX)
 app.include_router(command_templates.router, prefix=settings.API_V1_PREFIX)
 app.include_router(snmp_oid_overrides.router, prefix=settings.API_V1_PREFIX)
 app.include_router(settings_module.router, prefix=settings.API_V1_PREFIX)
+app.include_router(bmc.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 async def health():

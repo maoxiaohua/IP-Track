@@ -14,6 +14,7 @@ const OSTypeIPList = () => import('@/views/OSTypeIPList.vue')
 const SNMPProfiles = () => import('@/views/SNMPProfiles.vue')
 const SNMPConfig = () => import('@/views/SNMPConfig.vue')
 const Settings = () => import('@/views/Settings.vue')
+const BMCReset = () => import('@/views/BMCReset.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -104,6 +105,12 @@ const router = createRouter({
       name: 'History',
       component: History,
       meta: { title: 'Query History' }
+    },
+    {
+      path: '/bmc-reset',
+      name: 'BMCReset',
+      component: BMCReset,
+      meta: { title: 'BMC Reset', icon: 'Cpu' }
     }
   ]
 })

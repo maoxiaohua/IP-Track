@@ -34,7 +34,7 @@
             tabindex="0"
             role="button"
             aria-label="More navigation options"
-            @keydown.enter="/* handled by el-dropdown trigger */"
+            @keydown.enter="() => {}"
           >
               <el-icon :size="20"><MoreFilled /></el-icon>
             </div>
@@ -57,6 +57,9 @@
                 </el-dropdown-item>
                 <el-dropdown-item command="/settings">
                   <el-icon><Tools /></el-icon> Settings
+                </el-dropdown-item>
+                <el-dropdown-item command="/bmc-reset">
+                  <el-icon><Connection /></el-icon> BMC Reset
                 </el-dropdown-item>
               </el-dropdown-menu>
             </template>

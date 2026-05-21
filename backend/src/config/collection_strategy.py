@@ -29,7 +29,7 @@ class CollectionStrategy:
     - 这里的 vendor/model 策略主要仍服务于设备信息、光模块等其它采集项。
     """
 
-    GLOBAL_L2_TABLE_METHOD: CollectionMethod = CollectionMethod.AUTO
+    GLOBAL_L2_TABLE_METHOD: CollectionMethod = CollectionMethod.CLI_PRIMARY
 
     # 厂商级别的默认策略 — 统一使用 AUTO，运行时自动选择+fallback
     VENDOR_DEFAULTS: Dict[str, CollectionMethod] = {
@@ -73,12 +73,12 @@ class CollectionStrategy:
                 if model and model.startswith(model_pattern):
                     return strategy
 
-        # 2. 使用厂商级别的默认策略
+        # 2. 使用厂商级别的默认策略（受全局 L2 策略约束）
         if vendor_lower in cls.VENDOR_DEFAULTS:
-            return cls.VENDOR_DEFAULTS[vendor_lower]
+            return cls.GLOBAL_L2_TABLE_METHOD
 
         # 3. 最终默认策略
-        return CollectionMethod.AUTO
+        return cls.GLOBAL_L2_TABLE_METHOD
 
     @classmethod
     def should_try_cli(cls, vendor: str, model: str) -> bool:
@@ -122,6 +122,7 @@ class CollectionStrategy:
         strategy = cls.get_strategy(vendor, model)
         return strategy in [
             CollectionMethod.SNMP_PRIMARY,
+            CollectionMethod.CLI_PRIMARY,
             CollectionMethod.AUTO
         ]
 
