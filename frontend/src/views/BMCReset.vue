@@ -944,6 +944,8 @@ onMounted(async () => {
   margin-bottom: 16px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .setting-card {
@@ -990,7 +992,7 @@ onMounted(async () => {
 }
 
 .text-muted {
-  color: #c0c4cc;
+  color: #6b7280;
 }
 
 .pagination {

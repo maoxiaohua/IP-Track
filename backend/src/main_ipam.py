@@ -38,17 +38,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+from core.config import settings
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8001", "http://127.0.0.1:8001"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Register routers
-from core.config import settings
 app.include_router(ipam.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")

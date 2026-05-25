@@ -126,7 +126,7 @@
           <template #default="{ row }">
             <router-link
               :to="`/ipam/subnets/${row.subnet_id}`"
-              style="color: #409eff; text-decoration: none; font-weight: 500"
+              style="color: var(--primary-color); text-decoration: none; font-weight: 500"
               @click.stop
             >
               {{ row.network }}
@@ -166,7 +166,7 @@
 
         <el-table-column label="Used Addresses" width="150" align="right">
           <template #default="{ row }">
-            <span style="color: #409eff; font-weight: 500">{{ row.used_ips || 0 }}</span>
+            <span style="color: var(--primary-color); font-weight: 500">{{ row.used_ips || 0 }}</span>
           </template>
         </el-table-column>
 

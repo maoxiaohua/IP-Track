@@ -28,7 +28,7 @@
   --el-text-color-regular: var(--text-regular);
   --el-text-color-secondary: var(--text-secondary);
   --el-text-color-placeholder: var(--text-placeholder);
-  --el-text-color-disabled: #98a2b3;
+  --el-text-color-disabled: #7c8a9a;
 
   --shadow-light: 0 2px 12px 0 rgba(37, 99, 235, 0.1);
   --shadow-base: 0 2px 12px 0 rgba(37, 99, 235, 0.15);
@@ -124,7 +124,6 @@ b {
 
 .el-card:hover {
   box-shadow: var(--shadow-base);
-  transform: translateY(-2px);
 }
 
 .el-card__header {
@@ -140,8 +139,16 @@ b {
   margin: 0;
 }
 
-.el-card__header * {
+.el-card__header h2,
+.el-card__header h3,
+.el-card__header p {
   color: white !important;
+}
+
+/* Focus Visible */
+:focus-visible {
+  outline: 2px solid #2563EB;
+  outline-offset: 2px;
 }
 
 /* Button Enhancements */
@@ -169,7 +176,6 @@ b {
 /* Table Enhancements */
 .el-table {
   border-radius: var(--border-radius);
-  overflow: visible;
   box-shadow: var(--shadow-light);
 }
 

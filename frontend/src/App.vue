@@ -9,22 +9,30 @@
             :default-active="activeRoute"
             router
           >
-            <el-menu-item index="/">
-              <el-icon><Search /></el-icon>
-              <span>IP Lookup</span>
-            </el-menu-item>
-            <el-menu-item index="/switches">
-              <el-icon><Setting /></el-icon>
-              <span>Switches</span>
-            </el-menu-item>
-            <el-menu-item index="/ipam">
-              <el-icon><Grid /></el-icon>
-              <span>IPAM</span>
-            </el-menu-item>
-            <el-menu-item index="/optical-modules">
-              <el-icon><Connection /></el-icon>
-              <span>Optical Modules</span>
-            </el-menu-item>
+            <el-tooltip content="IP Lookup" placement="bottom" :show-after="300" :disabled="!isMobile">
+              <el-menu-item index="/">
+                <el-icon><Search /></el-icon>
+                <span>IP Lookup</span>
+              </el-menu-item>
+            </el-tooltip>
+            <el-tooltip content="Switches" placement="bottom" :show-after="300" :disabled="!isMobile">
+              <el-menu-item index="/switches">
+                <el-icon><Setting /></el-icon>
+                <span>Switches</span>
+              </el-menu-item>
+            </el-tooltip>
+            <el-tooltip content="IPAM" placement="bottom" :show-after="300" :disabled="!isMobile">
+              <el-menu-item index="/ipam">
+                <el-icon><Grid /></el-icon>
+                <span>IPAM</span>
+              </el-menu-item>
+            </el-tooltip>
+            <el-tooltip content="Optical Modules" placement="bottom" :show-after="300" :disabled="!isMobile">
+              <el-menu-item index="/optical-modules">
+                <el-icon><Connection /></el-icon>
+                <span>Optical Modules</span>
+              </el-menu-item>
+            </el-tooltip>
           </el-menu>
 
           <!-- More dropdown outside el-menu -->
@@ -74,13 +82,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { MoreFilled } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
 const activeRoute = computed(() => route.path)
+
+const isMobile = ref(false)
+const mq = typeof window !== 'undefined' ? window.matchMedia('(max-width: 768px)') : null
+const updateMobile = (e: MediaQueryListEvent | MediaQueryList) => { isMobile.value = e.matches }
+onMounted(() => { if (mq) { updateMobile(mq); mq.addEventListener('change', updateMobile) } })
+onUnmounted(() => { if (mq) mq.removeEventListener('change', updateMobile) })
 
 const handleMoreNav = (path: string) => {
   router.push(path)

@@ -924,7 +924,7 @@ onMounted(async () => {
 }
 
 .log-ip {
-  color: #409eff;
+  color: var(--primary-color);
   min-width: 120px;
   font-weight: 500;
 }

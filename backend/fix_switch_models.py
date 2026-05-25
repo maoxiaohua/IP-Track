@@ -7,6 +7,7 @@
 """
 import sys
 import re
+import os
 import asyncio
 sys.path.insert(0, '/app/src')
 
@@ -184,7 +185,7 @@ async def fix_cisco_dell_models(db: AsyncSession):
         # 通过SNMP获取sysDescr
         sysdescr = get_snmp_sysdescr(
             str(sw.ip_address),
-            sw.snmp_username or 'NSBsct',
+            sw.snmp_username or os.environ.get('SNMP_USERNAME', ''),
             auth_pass,
             priv_pass
         )
@@ -224,8 +225,9 @@ async def main():
     print("=" * 100)
 
     # 连接数据库
+    db_url = os.environ.get('DATABASE_URL', 'postgresql+asyncpg://iptrack:iptrack123@localhost:5432/iptrack')
     engine = create_async_engine(
-        'postgresql+asyncpg://iptrack:iptrack@database:5432/iptrack',
+        db_url,
         echo=False
     )
 

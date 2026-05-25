@@ -208,7 +208,7 @@
             <div style="font-size: 12px;">
               {{ formatDateTime(row.created_at) }}
             </div>
-            <div v-if="row.occurrence_count > 1" style="font-size: 11px; color: #909399;">
+            <div v-if="row.occurrence_count > 1" style="font-size: 12px; color: #909399;">
               最近: {{ formatRelativeTime(row.last_occurrence_at) }}
             </div>
           </template>
@@ -966,7 +966,7 @@ onUnmounted(() => {
 }
 
 .summary-value.info {
-  color: #409eff;
+  color: var(--primary-color);
 }
 
 .card-header h2 {
@@ -1016,7 +1016,7 @@ onUnmounted(() => {
 }
 
 .switch-state-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: #909399;
   white-space: nowrap;
   overflow: hidden;
@@ -1034,7 +1034,7 @@ onUnmounted(() => {
 }
 
 .group-switch-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: #909399;
 }
 

@@ -539,6 +539,6 @@ onMounted(() => {
 
 :deep(.el-divider__text) {
   font-weight: 600;
-  color: #409eff;
+  color: var(--primary-color);
 }
 </style>

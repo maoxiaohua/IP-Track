@@ -638,7 +638,7 @@ class SwitchDiscoveryService:
                         authProtocol=auth_map.get(auth_protocol, usmHMACSHAAuthProtocol)
                     )
             else:
-                community = snmp_config.get('snmp_community', 'public')
+                community = snmp_config.get('snmp_community', settings.SNMP_COMMUNITY)
                 auth_data = CommunityData(community)
 
             transport = await UdpTransportTarget.create((ip, port), timeout=5, retries=1)

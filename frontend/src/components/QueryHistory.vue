@@ -190,7 +190,7 @@ const handleCurrentChange = (page: number) => {
 }
 
 .state-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: #909399;
   white-space: nowrap;
   overflow: hidden;

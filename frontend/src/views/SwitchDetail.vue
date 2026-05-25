@@ -1523,6 +1523,12 @@ onMounted(async () => {
 :deep(.el-card__header) {
   background-color: #fafafa;
   border-bottom: 1px solid #ebeef5;
+  color: #1f2937 !important;
+}
+
+:deep(.el-card__header),
+:deep(.el-card__header *) {
+  color: #1f2937 !important;
 }
 
 

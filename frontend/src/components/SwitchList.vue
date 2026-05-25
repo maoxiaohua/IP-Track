@@ -87,7 +87,7 @@
             </el-tag>
             <div
               v-if="row.trunk_review_completed_at"
-              style="color: #909399; margin-top: 2px; font-size: 11px;"
+              style="color: #909399; margin-top: 2px; font-size: 12px;"
             >
               {{ formatRelativeTime(row.trunk_review_completed_at) }}
             </div>
@@ -105,7 +105,7 @@
             >
               {{ row.last_collection_status }}
             </el-tag>
-            <div v-if="row.last_arp_collection_at || row.last_mac_collection_at" style="color: #909399; margin-top: 2px; font-size: 11px;">
+            <div v-if="row.last_arp_collection_at || row.last_mac_collection_at" style="color: #909399; margin-top: 2px; font-size: 12px;">
               {{ formatCollectionTime(row) }}
             </div>
           </div>
@@ -120,7 +120,7 @@
             <el-tag type="success" size="small" effect="dark">
               <el-icon><CircleCheck /></el-icon> 在线
             </el-tag>
-            <div v-if="row.response_time_ms" style="color: #67c23a; font-size: 11px; margin-top: 2px; font-weight: 500;">
+            <div v-if="row.response_time_ms" style="color: #67c23a; font-size: 12px; margin-top: 2px; font-weight: 500;">
               {{ row.response_time_ms.toFixed(1) }}ms
             </div>
           </div>

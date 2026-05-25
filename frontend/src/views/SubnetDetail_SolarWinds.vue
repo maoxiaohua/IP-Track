@@ -192,7 +192,7 @@
             <router-link
               v-if="row.switch_id"
               :to="`/switches/${row.switch_id}`"
-              style="color: #409eff; text-decoration: none"
+              style="color: var(--primary-color); text-decoration: none"
             >
               {{ row.switch_name || '-' }}
             </router-link>

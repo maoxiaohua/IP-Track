@@ -65,7 +65,7 @@
             <router-link
               v-if="row.subnet_id"
               :to="`/ipam/subnets/${row.subnet_id}`"
-              style="color: #409eff; text-decoration: none"
+              style="color: var(--primary-color); text-decoration: none"
               @click.stop
             >
               {{ row.subnet_name || row.subnet_id }}
@@ -78,7 +78,7 @@
             <router-link
               v-if="row.switch_id"
               :to="`/switches/${row.switch_id}`"
-              style="color: #409eff; text-decoration: none"
+              style="color: var(--primary-color); text-decoration: none"
               @click.stop
             >
               {{ row.switch_name || row.switch_id }}

@@ -14,7 +14,7 @@
         <template #header>
           <div class="card-header">
             <h3>Basic Information</h3>
-            <el-tag :type="getStatusType(ipDetail.status)" size="large">
+            <el-tag :type="getStatusType(ipDetail.status)" size="large" effect="dark">
               {{ ipDetail.status?.toUpperCase() }}
             </el-tag>
           </div>
@@ -97,7 +97,7 @@
               <router-link
                 v-if="ipDetail.switch_id"
                 :to="`/switches/${ipDetail.switch_id}`"
-                style="color: #409eff; text-decoration: none"
+                style="color: var(--primary-color); text-decoration: none"
               >
                 {{ ipDetail.switch_name || `Switch #${ipDetail.switch_id}` }}
               </router-link>
