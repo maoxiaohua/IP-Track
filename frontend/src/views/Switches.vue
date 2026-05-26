@@ -57,7 +57,7 @@
             placeholder="默认顺序"
             clearable
             class="sort-field-select"
-            @change="applySortControls"
+            @change="handleSortFieldChange"
             @clear="clearSort"
           >
             <el-option
@@ -67,7 +67,7 @@
               :value="option.value"
             />
           </el-select>
-          <el-radio-group v-if="selectedSortField" v-model="sortOrder" @change="applySortControls">
+          <el-radio-group v-if="selectedSortField && !selectedSortField.startsWith('collection_status_')" v-model="sortOrder" @change="handleSortOrderChange">
             <el-radio-button
               v-for="option in sortDirectionOptions"
               :key="option.value"
@@ -391,22 +391,30 @@ const currentPage = ref(1)
 const pageSize = ref(100)
 const totalSwitches = ref(0)
 const showPendingTrunkOnly = ref(false)
+const collectionStatusFilter = ref('')
 type SortField = 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'connection_status'
+type SortOption = SortField | 'collection_status_success' | 'collection_status_failed' | 'collection_status_partial'
 
 const sortBy = ref<SortField | null>(null)
-const selectedSortField = ref<SortField | null>(null)
+const selectedSortField = ref<SortOption | null>(null)
 const sortOrder = ref<'asc' | 'desc'>('asc')
 
-const sortFieldOptions: Array<{ label: string; value: SortField }> = [
+const sortFieldOptions: Array<{ label: string; value: SortOption }> = [
   { label: '名称', value: 'name' },
   { label: 'IP 地址', value: 'ip_address' },
   { label: '厂商 / 型号', value: 'model' },
-  { label: '上次采集', value: 'last_collection_time' },
+  { label: '采集成功', value: 'collection_status_success' },
+  { label: '采集失败', value: 'collection_status_failed' },
+  { label: '采集部分成功', value: 'collection_status_partial' },
   { label: '连接状态', value: 'connection_status' }
 ]
 
 const sortDirectionOptions = computed(() => {
-  if (selectedSortField.value === 'last_collection_time') {
+  if (selectedSortField.value?.startsWith('collection_status_')) {
+    return []
+  }
+
+  if (selectedSortField.value?.startsWith('last_collection_time')) {
     return [
       { label: '旧到新', value: 'asc' },
       { label: '新到旧', value: 'desc' }
@@ -528,6 +536,7 @@ const loadSwitches = async () => {
       limit: pageSize.value,
       search: searchQuery.value.trim() || undefined,
       trunk_review_completed: showPendingTrunkOnly.value ? false : undefined,
+      collection_status: collectionStatusFilter.value || undefined,
       sort_by: sortBy.value || undefined,
       sort_order: sortBy.value ? sortOrder.value : undefined
     }
@@ -564,8 +573,25 @@ const togglePendingTrunkFilter = () => {
   loadSwitches()
 }
 
-const applySortControls = () => {
-  sortBy.value = selectedSortField.value
+const handleSortFieldChange = (newVal: SortOption) => {
+  if (newVal?.startsWith('collection_status_')) {
+    sortBy.value = null
+    const statusMap: Record<string, string> = {
+      collection_status_success: 'success',
+      collection_status_failed: 'failed',
+      collection_status_partial: 'partial'
+    }
+    collectionStatusFilter.value = statusMap[newVal] || ''
+  } else {
+    sortBy.value = newVal as SortField | null
+    collectionStatusFilter.value = ''
+  }
+  currentPage.value = 1
+  loadSwitches()
+}
+
+const handleSortOrderChange = (newOrder: 'asc' | 'desc') => {
+  sortOrder.value = newOrder
   currentPage.value = 1
   loadSwitches()
 }
@@ -574,6 +600,7 @@ const clearSort = () => {
   selectedSortField.value = null
   sortBy.value = null
   sortOrder.value = 'asc'
+  collectionStatusFilter.value = ''
   currentPage.value = 1
   loadSwitches()
 }
@@ -581,10 +608,11 @@ const clearSort = () => {
 const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc' | null) => {
   const allowedSortFields = ['name', 'ip_address', 'model', 'last_collection_time', 'connection_status']
   selectedSortField.value = newSortOrder && allowedSortFields.includes(newSortBy)
-    ? newSortBy as SortField
+    ? newSortBy as SortOption
     : null
-  sortBy.value = selectedSortField.value
+  sortBy.value = selectedSortField.value as SortField | null
   sortOrder.value = newSortOrder || 'asc'
+  collectionStatusFilter.value = ''
   currentPage.value = 1
   loadSwitches()
 }
@@ -1312,6 +1340,7 @@ onMounted(() => {
 .search-input {
   max-width: 420px;
 }
+
 
 .sort-controls {
   display: flex;

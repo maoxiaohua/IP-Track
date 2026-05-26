@@ -1,13 +1,13 @@
 {
     "env": {
-        "ANTHROPIC_AUTH_TOKEN": "sk-7e7037d1c08241a6a93e5af538f4d462",
-        "ANTHROPIC_BASE_URL": "https://dashscope.aliyuncs.com/apps/anthropic",
-        "ANTHROPIC_MODEL": "qwen3.7-max",
-        "ANTHROPIC_SMALL_FAST_MODEL": "qwen3.7-max",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen3.6-flash",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen3.7-max",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen3.7-max",
-        "CLAUDE_CODE_SUBAGENT_MODEL": "qwen3.7-max",
+        "ANTHROPIC_AUTH_TOKEN": "sk-RYjW1hIMiw1CrKBis3QCtf6RVrM1rF7o8oAH3OrjaCj11q3o",
+        "ANTHROPIC_BASE_URL": "https://dsapi.online",
+        "ANTHROPIC_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_SMALL_FAST_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-v4-pro",
         "HTTP_PROXY": "http://10.158.100.3:8080",
         "HTTPS_PROXY": "http://10.158.100.3:8080",
         "NO_PROXY": "localhost,127.0.0.1,.internal.local"

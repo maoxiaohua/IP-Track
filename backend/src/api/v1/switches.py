@@ -176,6 +176,7 @@ async def list_switches(
     limit: int = 100,
     search: str = None,
     trunk_review_completed: bool | None = Query(None),
+    collection_status: str | None = Query(None),
     sort_by: str = Query("id"),
     sort_order: str = Query("asc", pattern="^(asc|desc)$"),
     db: AsyncSession = Depends(get_db)
@@ -196,12 +197,17 @@ async def list_switches(
         if trunk_review_completed is not None:
             query = query.where(Switch.trunk_review_completed == trunk_review_completed)
 
+        if collection_status:
+            query = query.where(Switch.last_collection_status == collection_status)
+
         # Get total count
         count_query = select(Switch.id)
         if search:
             count_query = count_query.where(search_filter)
         if trunk_review_completed is not None:
             count_query = count_query.where(Switch.trunk_review_completed == trunk_review_completed)
+        if collection_status:
+            count_query = count_query.where(Switch.last_collection_status == collection_status)
         count_result = await db.execute(count_query)
         total = len(count_result.all())
 

@@ -129,6 +129,7 @@ export interface SwitchListParams {
   limit?: number
   search?: string
   trunk_review_completed?: boolean
+  collection_status?: string
   sort_by?: 'id' | 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'connection_status'
   sort_order?: 'asc' | 'desc'
 }
@@ -229,6 +230,7 @@ export const switchesApi = {
     if (params?.limit !== undefined) queryParams.append('limit', params.limit.toString())
     if (params?.search) queryParams.append('search', params.search)
     if (params?.trunk_review_completed !== undefined) queryParams.append('trunk_review_completed', String(params.trunk_review_completed))
+    if (params?.collection_status) queryParams.append('collection_status', params.collection_status)
     if (params?.sort_by) queryParams.append('sort_by', params.sort_by)
     if (params?.sort_order) queryParams.append('sort_order', params.sort_order)
 
