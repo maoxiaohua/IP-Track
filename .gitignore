@@ -88,4 +88,4 @@ test_data/
 
 
 # Claude settings
-.claude/settings.json
+.claude/settings.json*
