@@ -163,13 +163,13 @@ b {
   box-shadow: 0 4px 12px rgba(37, 99, 235, 0.15);
 }
 
-.el-button--primary {
+.el-button--primary:not(.is-link) {
   background: linear-gradient(135deg, #3B82F6 0%, #60A5FA 100%);
   border: none;
   color: white !important;
 }
 
-.el-button--primary:hover {
+.el-button--primary:not(.is-link):hover {
   background: linear-gradient(135deg, #2563EB 0%, #3B82F6 100%);
 }
 

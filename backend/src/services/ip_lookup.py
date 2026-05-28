@@ -243,7 +243,6 @@ class IPLookupService:
                 # IMPORTANT: Use the switch from MAC table (physical location), not from ARP (gateway)
                 # This handles L2/L3 topology where ARP is on gateway but MAC is on access switch
                 port_name = mac_entry.port_name
-                vlan_id = mac_entry.vlan_id or vlan_id
                 
                 # Get the actual switch where MAC was found (physical connection)
                 actual_switch_result = await db.execute(
@@ -278,7 +277,6 @@ class IPLookupService:
 
                 if same_switch_mac_entry:
                     port_name = same_switch_mac_entry.port_name
-                    vlan_id = same_switch_mac_entry.vlan_id or vlan_id
                     mac_age_seconds = int((datetime.now(timezone.utc) - same_switch_mac_entry.last_seen).total_seconds())
                     data_age_seconds = max(data_age_seconds, mac_age_seconds)
                     logger.info(
