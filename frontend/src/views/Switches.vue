@@ -16,13 +16,26 @@
               <el-icon><Monitor /></el-icon>
               刷新设备信息
             </el-button>
-            <el-button type="primary" @click="showAddDialog = true">
+            <el-button type="primary" @click="openAddDialog">
               <el-icon><Plus /></el-icon>
               Add Switch
             </el-button>
           </div>
         </div>
       </template>
+
+      <!-- Duplicate Switch Warning -->
+      <el-alert
+        v-if="duplicateCount > 0"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px;"
+      >
+        <template #title>
+          发现 <strong>{{ duplicateCount }}</strong> 组可能的重复交换机（相同序列号或主机名）
+        </template>
+      </el-alert>
 
       <!-- Search Bar -->
       <div class="search-bar">
@@ -112,6 +125,7 @@
         :switches="switches"
         :loading="loading"
         @refresh="loadSwitches"
+        @add="openAddDialog"
         @edit="handleEdit"
         @delete="handleDelete"
         @test="handleTest"
@@ -383,6 +397,7 @@ const refreshingHostnames = ref(false)
 const refreshingDeviceInfo = ref(false)
 const showAddDialog = ref(false)
 const editingSwitch = ref<Switch | null>(null)
+const duplicateCount = ref(0)
 const switchFormRef = ref<FormInstance>()
 
 // Pagination and search states
@@ -550,6 +565,15 @@ const loadSwitches = async () => {
   }
 }
 
+const checkDuplicates = async () => {
+  try {
+    const result = await switchesApi.duplicates()
+    duplicateCount.value = result.total_duplicate_groups
+  } catch {
+    // Ignore errors - duplicate check is non-critical
+  }
+}
+
 const handleSearch = () => {
   currentPage.value = 1 // Reset to first page when searching
   loadSwitches()
@@ -615,6 +639,11 @@ const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc' | null
   collectionStatusFilter.value = ''
   currentPage.value = 1
   loadSwitches()
+}
+
+const openAddDialog = () => {
+  resetForm()
+  showAddDialog.value = true
 }
 
 const resetForm = () => {
@@ -708,8 +737,8 @@ const handleSave = async () => {
       showAddDialog.value = false
       resetForm()
       await loadSwitches()
-    } catch (error) {
-      ElMessage.error('Failed to save switch')
+    } catch (error: any) {
+      // Error toast is shown by global response interceptor (index.ts)
     } finally {
       saving.value = false
     }
@@ -1295,6 +1324,7 @@ const handleBatchSnmpConfig = async () => {
 
 onMounted(() => {
   loadSwitches()
+  checkDuplicates()
 })
 </script>
 

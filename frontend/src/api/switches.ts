@@ -6,6 +6,7 @@ export interface Switch {
   ip_address: string
   vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper'
   model?: string
+  serial_number?: string | null
   enabled: boolean
 
   // CLI fields
@@ -260,6 +261,12 @@ export const switchesApi = {
   // Delete a switch
   delete: async (id: number): Promise<void> => {
     await apiClient.delete(`/api/v1/switches/${id}`)
+  },
+
+  // List duplicate switches
+  duplicates: async (): Promise<{ serial_duplicates: any[][]; hostname_duplicates: any[][]; total_duplicate_groups: number }> => {
+    const response = await apiClient.get('/api/v1/switches/duplicates')
+    return response.data
   },
 
   // Test switch connection

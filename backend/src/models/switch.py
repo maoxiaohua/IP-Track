@@ -10,10 +10,11 @@ class Switch(Base):
     __tablename__ = "switches"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(100), nullable=False)
+    name = Column(String(100), nullable=False, unique=True, index=True)
     ip_address = Column(INET, nullable=False, unique=True, index=True)
     vendor = Column(String(50), nullable=False)  # 'cisco', 'dell', 'alcatel'
     model = Column(String(100), nullable=True)
+    serial_number = Column(String(200), nullable=True)  # Chassis serial from SNMP ENTITY-MIB
 
     # SSH/CLI fields
     cli_enabled = Column(Boolean, default=False, nullable=False)  # Enable CLI/SSH authentication

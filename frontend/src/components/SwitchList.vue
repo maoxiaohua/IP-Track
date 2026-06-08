@@ -41,6 +41,16 @@
         </template>
       </el-table-column>
 
+      <!-- Serial Number -->
+      <el-table-column prop="serial_number" label="序列号" width="160">
+        <template #default="{ row }">
+          <span v-if="row.serial_number" style="font-size: 12px; font-family: monospace;">
+            {{ row.serial_number }}
+          </span>
+          <span v-else style="color: #909399; font-size: 12px;">-</span>
+        </template>
+      </el-table-column>
+
       <!-- 采集媒介: SSH/SNMP method tags -->
       <el-table-column label="采集媒介" width="145">
         <template #default="{ row }">
@@ -177,7 +187,7 @@
     </el-table>
 
     <el-empty v-if="!loading && switches.length === 0" description="暂无交换机">
-      <el-button type="primary" @click="$emit('refresh')">添加第一台交换机</el-button>
+      <el-button type="primary" @click="$emit('add')">添加第一台交换机</el-button>
     </el-empty>
   </div>
 </template>
@@ -196,6 +206,7 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{
+  add: []
   refresh: []
   edit: [switchItem: Switch]
   delete: [switchItem: Switch]

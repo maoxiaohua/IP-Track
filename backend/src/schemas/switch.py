@@ -9,6 +9,7 @@ class SwitchBase(BaseModel):
     ip_address: IPvAnyAddress
     vendor: str = Field(..., pattern="^(cisco|dell|alcatel|juniper|arista|hpe|huawei)$")
     model: Optional[str] = Field(None, max_length=100)
+    serial_number: Optional[str] = Field(None, max_length=200)
     enabled: bool = True
 
     # CLI/SSH fields
@@ -112,6 +113,9 @@ class SwitchResponse(SwitchBase):
 
     # CLI status
     cli_enabled: bool = False
+
+    # Identifiers
+    serial_number: Optional[str] = None
 
     # SNMP status
     snmp_enabled: bool = False

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, or_, and_, cast, String, case, delete
+from sqlalchemy.dialects.postgresql import INET
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 import asyncio
@@ -66,6 +67,37 @@ def _normalize_cli_transport_and_port(
     )
 
 
+async def _check_switch_duplicates(
+    db: AsyncSession,
+    ip_address: str,
+    name: str,
+    exclude_id: int | None = None,
+) -> list[str]:
+    """Check for duplicate switch by IP address or name.
+
+    Returns a list of conflict messages (empty list means no conflicts).
+    """
+    conflicts: list[str] = []
+
+    # Check IP (cast string to INET for PostgreSQL comparison)
+    ip_query = select(Switch).where(Switch.ip_address == cast(ip_address, INET))
+    if exclude_id is not None:
+        ip_query = ip_query.where(Switch.id != exclude_id)
+    ip_result = await db.execute(ip_query)
+    if ip_result.scalar_one_or_none():
+        conflicts.append(f"Switch with IP {ip_address} already exists")
+
+    # Check name
+    name_query = select(Switch).where(Switch.name == name)
+    if exclude_id is not None:
+        name_query = name_query.where(Switch.id != exclude_id)
+    name_result = await db.execute(name_query)
+    if name_result.scalar_one_or_none():
+        conflicts.append(f"Switch with name '{name}' already exists")
+
+    return conflicts
+
+
 @router.get("/status-checker", response_model=Dict[str, Any])
 async def get_status_checker_status():
     """Get lightweight switch reachability checker runtime status."""
@@ -91,15 +123,12 @@ async def create_switch(
             port_was_explicit='ssh_port' in switch_data.model_fields_set
         )
 
-        # Check if switch with same IP already exists
-        result = await db.execute(
-            select(Switch).where(Switch.ip_address == switch_data.ip_address)
-        )
-        existing = result.scalar_one_or_none()
-        if existing:
+        # Check for duplicate switch by IP or name
+        conflicts = await _check_switch_duplicates(db, str(switch_data.ip_address), switch_data.name)
+        if conflicts:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Switch with IP {switch_data.ip_address} already exists"
+                status_code=status.HTTP_409_CONFLICT,
+                detail="; ".join(conflicts),
             )
 
         # Encrypt SSH credentials (optional)
@@ -253,6 +282,83 @@ async def list_switches(
         )
 
 
+@router.get("/duplicates", response_model=Dict[str, Any])
+async def list_duplicate_switches(
+    db: AsyncSession = Depends(get_db)
+):
+    """List switches that share hostname or serial number with other switches."""
+    # Find duplicate groups by serial_number
+    serial_sub = (
+        select(
+            Switch.serial_number,
+            func.count(Switch.id).label('cnt')
+        )
+        .where(Switch.serial_number.isnot(None))
+        .group_by(Switch.serial_number)
+        .having(func.count(Switch.id) > 1)
+    ).subquery()
+
+    serial_dup_result = await db.execute(
+        select(Switch)
+        .join(serial_sub, Switch.serial_number == serial_sub.c.serial_number)
+        .order_by(Switch.serial_number)
+    )
+    serial_dups = serial_dup_result.scalars().all()
+
+    groups_by_serial: Dict[str, list] = {}
+    for sw in serial_dups:
+        key = sw.serial_number
+        if key not in groups_by_serial:
+            groups_by_serial[key] = []
+        groups_by_serial[key].append({
+            'id': sw.id,
+            'name': sw.name,
+            'ip_address': str(sw.ip_address),
+            'vendor': sw.vendor,
+            'model': sw.model,
+            'serial_number': sw.serial_number,
+        })
+
+    # Find duplicate groups by name (hostname)
+    name_sub = (
+        select(
+            Switch.name,
+            func.count(Switch.id).label('cnt')
+        )
+        .group_by(Switch.name)
+        .having(func.count(Switch.id) > 1)
+    ).subquery()
+
+    name_dup_result = await db.execute(
+        select(Switch)
+        .join(name_sub, Switch.name == name_sub.c.name)
+        .order_by(Switch.name)
+    )
+    name_dups = name_dup_result.scalars().all()
+
+    groups_by_name: Dict[str, list] = {}
+    for sw in name_dups:
+        key = sw.name
+        if key not in groups_by_name:
+            groups_by_name[key] = []
+        groups_by_name[key].append({
+            'id': sw.id,
+            'name': sw.name,
+            'ip_address': str(sw.ip_address),
+            'vendor': sw.vendor,
+            'model': sw.model,
+            'serial_number': sw.serial_number,
+        })
+
+    total_groups = len(groups_by_serial) + len(groups_by_name)
+
+    return {
+        'serial_duplicates': list(groups_by_serial.values()),
+        'hostname_duplicates': list(groups_by_name.values()),
+        'total_duplicate_groups': total_groups,
+    }
+
+
 @router.get("/{switch_id}", response_model=SwitchResponse)
 async def get_switch(
     switch_id: int,
@@ -299,6 +405,16 @@ async def update_switch(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Switch with ID {switch_id} not found"
+            )
+
+        # Check for duplicate if IP or name is being changed
+        new_ip = str(switch_data.ip_address) if switch_data.ip_address else str(switch.ip_address)
+        new_name = switch_data.name if switch_data.name else switch.name
+        conflicts = await _check_switch_duplicates(db, new_ip, new_name, exclude_id=switch_id)
+        if conflicts:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="; ".join(conflicts),
             )
 
         # Update fields
@@ -578,13 +694,10 @@ async def bulk_create_switches(
                 port_was_explicit='ssh_port' in switch_data.model_fields_set
             )
 
-            # Check if switch with same IP already exists
-            result = await db.execute(
-                select(Switch).where(Switch.ip_address == switch_data.ip_address)
-            )
-            existing = result.scalar_one_or_none()
-            if existing:
-                errors.append(f"Row {idx + 1}: Switch with IP {switch_data.ip_address} already exists")
+            # Check if switch with same IP or name already exists
+            conflicts = await _check_switch_duplicates(db, str(switch_data.ip_address), switch_data.name)
+            if conflicts:
+                errors.append(f"Row {idx + 1}: {'; '.join(conflicts)}")
                 continue
 
             # Encrypt credentials
@@ -977,9 +1090,67 @@ async def collect_switch_device_info(
 
         if updated_fields:
             db.add(switch)
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                error_str = str(e).lower()
+                if 'unique constraint' in error_str or 'duplicate key' in error_str:
+                    logger.warning(
+                        f"Name update conflict for {switch.ip_address}: "
+                        f"discovered name already used by another switch"
+                    )
+                    # Revert name change, keep model update if any
+                    if 'name' in updated_fields:
+                        updated_fields.remove('name')
+                        old_values.pop('name', None)
+                    if not updated_fields:
+                        # Nothing left to update
+                        pass
+                    else:
+                        # Retry without the name change
+                        db.add(switch)
+                        await db.commit()
+                else:
+                    raise
             await db.refresh(switch)
             logger.info(f"✅ Updated device info for {switch.ip_address}: {updated_fields}")
+
+        # Collect chassis serial via SNMP for duplicate detection
+        if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            try:
+                from services.snmp_service import snmp_service as _snmp_svc
+                snmp_config = {
+                    'snmp_username': switch.snmp_username,
+                    'snmp_auth_protocol': switch.snmp_auth_protocol,
+                    'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
+                    'snmp_priv_protocol': switch.snmp_priv_protocol,
+                    'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
+                    'snmp_port': switch.snmp_port or 161,
+                }
+                serial = await _snmp_svc.get_chassis_serial(
+                    str(switch.ip_address), snmp_config
+                )
+                if serial and serial != switch.serial_number:
+                    switch.serial_number = serial
+                    db.add(switch)
+                    await db.commit()
+                    await db.refresh(switch)
+                    updated_fields.append('serial_number')
+                    logger.info(f"Serial number for {switch.name}: {serial}")
+            except Exception as e:
+                logger.debug(f"Serial collection failed for {switch.name}: {e}")
+
+        # Detect duplicate switches based on hostname/serial
+        try:
+            from services.duplicate_detector import detect_duplicate_switches
+            duplicates = await detect_duplicate_switches(db, switch)
+            if duplicates:
+                logger.warning(
+                    f"Found {len(duplicates)} potential duplicate(s) for {switch.name}"
+                )
+        except Exception as e:
+            logger.debug(f"Duplicate detection skipped for {switch.name}: {e}")
 
         # Auto-resolve any failure alarms now that we successfully collected device info
         resolved_count = await alarm_service.auto_resolve_alarms(

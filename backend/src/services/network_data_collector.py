@@ -683,14 +683,14 @@ class NetworkDataCollector:
             entries: List of ARP entry dicts
             collected_at: Collection timestamp
         """
-        # Step 1: Delete all existing ARP entries for this switch
-        delete_result = await db.execute(
-            delete(ARPTable).where(ARPTable.switch_id == switch_id)
-        )
-        deleted_count = delete_result.rowcount
-
+        # Step 1: Delete all existing ARP entries for this switch (only if we have new data)
         # Step 2: Bulk insert new entries
         if entries:
+            delete_result = await db.execute(
+                delete(ARPTable).where(ARPTable.switch_id == switch_id)
+            )
+            deleted_count = delete_result.rowcount
+
             to_insert = []
             for entry in entries:
                 to_insert.append({
@@ -709,9 +709,13 @@ class NetworkDataCollector:
                 to_insert
             )
 
-        logger.debug(
-            f"  ARP REPLACE: deleted {deleted_count} old entries, inserted {len(entries)} new entries"
-        )
+            logger.debug(
+                f"  ARP REPLACE: deleted {deleted_count} old entries, inserted {len(entries)} new entries"
+            )
+        else:
+            logger.debug(
+                f"  ARP SKIP: no entries for switch {switch_id}, preserving existing data"
+            )
 
     async def _store_mac_entries_bulk(
         self,
@@ -730,14 +734,14 @@ class NetworkDataCollector:
             entries: List of MAC entry dicts
             collected_at: Collection timestamp
         """
-        # Step 1: Delete all existing MAC entries for this switch
-        delete_result = await db.execute(
-            delete(MACTable).where(MACTable.switch_id == switch_id)
-        )
-        deleted_count = delete_result.rowcount
-
+        # Step 1: Delete all existing MAC entries for this switch (only if we have new data)
         # Step 2: Bulk insert new entries
         if entries:
+            delete_result = await db.execute(
+                delete(MACTable).where(MACTable.switch_id == switch_id)
+            )
+            deleted_count = delete_result.rowcount
+
             to_insert = []
             for entry in entries:
                 to_insert.append({
@@ -755,9 +759,13 @@ class NetworkDataCollector:
                 to_insert
             )
 
-        logger.debug(
-            f"  MAC REPLACE: deleted {deleted_count} old entries, inserted {len(entries)} new entries"
-        )
+            logger.debug(
+                f"  MAC REPLACE: deleted {deleted_count} old entries, inserted {len(entries)} new entries"
+            )
+        else:
+            logger.debug(
+                f"  MAC SKIP: no entries for switch {switch_id}, preserving existing data"
+            )
 
     async def collect_from_all_switches(
         self,
@@ -1014,11 +1022,14 @@ class NetworkDataCollector:
     ) -> str:
         """Try ARP via CLI. Appends to arp_entries in-place. Returns detail string."""
         try:
-            result = await asyncio.to_thread(
-                cli_service.collect_arp_table_cli,
-                str(switch.ip_address),
-                cli_config,
-                templates,
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    cli_service.collect_arp_table_cli,
+                    str(switch.ip_address),
+                    cli_config,
+                    templates,
+                ),
+                timeout=30.0,
             )
             if result:
                 arp_entries.extend(result)
@@ -1027,6 +1038,9 @@ class NetworkDataCollector:
             else:
                 logger.info(f"  CLI ARP returned 0 entries for {switch.name}")
                 return "CLI ARP: 0 entries"
+        except asyncio.TimeoutError:
+            logger.warning(f"  CLI ARP timeout (30s) for {switch.name}, will try SNMP fallback")
+            return "CLI ARP: timeout"
         except Exception as e:
             logger.warning(f"  CLI ARP failed for {switch.name}: {str(e)}")
             return f"CLI ARP failed: {str(e)}"
@@ -1040,7 +1054,7 @@ class NetworkDataCollector:
             snmp_config = self._get_snmp_config(switch)
             result = await asyncio.wait_for(
                 snmp_service.collect_mac_table(str(switch.ip_address), snmp_config, oid_overrides),
-                timeout=60.0,
+                timeout=90.0,
             )
             if result:
                 mac_entries.extend(result)
@@ -1061,11 +1075,14 @@ class NetworkDataCollector:
     ) -> str:
         """Try MAC via CLI. Appends to mac_entries in-place. Returns detail string."""
         try:
-            result = await asyncio.to_thread(
-                cli_service.collect_mac_table_cli,
-                str(switch.ip_address),
-                cli_config,
-                templates,
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    cli_service.collect_mac_table_cli,
+                    str(switch.ip_address),
+                    cli_config,
+                    templates,
+                ),
+                timeout=30.0,
             )
             if result:
                 mac_entries.extend(result)
@@ -1074,6 +1091,9 @@ class NetworkDataCollector:
             else:
                 logger.info(f"  CLI MAC returned 0 entries for {switch.name}")
                 return "CLI MAC: 0 entries"
+        except asyncio.TimeoutError:
+            logger.warning(f"  CLI MAC timeout (30s) for {switch.name}, will try SNMP fallback")
+            return "CLI MAC: timeout"
         except Exception as e:
             logger.warning(f"  CLI MAC failed for {switch.name}: {str(e)}")
             return f"CLI MAC failed: {str(e)}"
@@ -1165,6 +1185,28 @@ class NetworkDataCollector:
 
             except Exception as e:
                 logger.warning(f"  Failed to get device info for {switch.name}: {str(e)}")
+
+            # Collect chassis serial via SNMP for duplicate detection
+            if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                try:
+                    from services.snmp_service import snmp_service as _snmp_svc
+                    snmp_config = {
+                        'snmp_username': switch.snmp_username,
+                        'snmp_auth_protocol': switch.snmp_auth_protocol,
+                        'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
+                        'snmp_priv_protocol': switch.snmp_priv_protocol,
+                        'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
+                        'snmp_port': switch.snmp_port or 161,
+                    }
+                    serial = await _snmp_svc.get_chassis_serial(
+                        str(switch.ip_address), snmp_config
+                    )
+                    if serial and serial != switch.serial_number:
+                        switch.serial_number = serial
+                        db.add(switch)
+                        logger.info(f"  Serial number for {switch.name}: {serial}")
+                except Exception as serial_err:
+                    logger.debug(f"  Serial collection failed for {switch.name}: {serial_err}")
 
         cli_config = {
             'username': switch.username,
@@ -1262,6 +1304,11 @@ class NetworkDataCollector:
                 )
                 if arp_entries:
                     arp_method_used = 'snmp'
+        elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            logger.info(f"  ARP: CLI not available for {switch.name}, using SNMP directly")
+            arp_result_detail = await self._try_snmp_arp(switch, arp_entries, collected_at)
+            if arp_entries:
+                arp_method_used = 'snmp'
         elif try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
             # Already tried SNMP in the first branch and fell through (no CLI fallback)
             pass
@@ -1319,6 +1366,11 @@ class NetworkDataCollector:
                 )
                 if mac_entries:
                     mac_method_used = 'snmp'
+        elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            logger.info(f"  MAC: CLI not available for {switch.name}, using SNMP directly")
+            mac_result_detail = await self._try_snmp_mac(switch, mac_entries, collected_at)
+            if mac_entries:
+                mac_method_used = 'snmp'
         elif try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
             pass
         else:
@@ -1727,6 +1779,12 @@ class NetworkDataCollector:
                 if mac_entries:
                     method_used = 'snmp'
 
+        elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            logger.info(f"  MAC: CLI not available for {switch.name}, using SNMP directly")
+            await self._try_snmp_mac(switch, mac_entries, collected_at, oid_overrides)
+            if mac_entries:
+                method_used = 'snmp'
+
         if mac_entries:
             switch.mac_collection_success_count += 1
             switch.mac_collection_method = method_used
@@ -1809,6 +1867,12 @@ class NetworkDataCollector:
                 await self._try_snmp_arp(switch, arp_entries, collected_at, oid_overrides)
                 if arp_entries:
                     method_used = 'snmp'
+
+        elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            logger.info(f"  ARP: CLI not available for {switch.name}, using SNMP directly")
+            await self._try_snmp_arp(switch, arp_entries, collected_at, oid_overrides)
+            if arp_entries:
+                method_used = 'snmp'
 
         if arp_entries:
             switch.arp_collection_success_count += 1

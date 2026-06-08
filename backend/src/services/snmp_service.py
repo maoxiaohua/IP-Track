@@ -53,6 +53,10 @@ class SNMPService:
     OID_IF_INDEX = '1.3.6.1.2.1.2.2.1.1'  # ifIndex
     OID_BRIDGE_PORT_MAP = '1.3.6.1.2.1.17.1.4.1.2'  # dot1dBasePortIfIndex
 
+    # Q-BRIDGE-MIB MAC table OIDs (fallback for switches not supporting BRIDGE-MIB)
+    OID_Q_BRIDGE_MAC_ADDRESS = '1.3.6.1.2.1.17.7.1.2.1.1.1'  # dot1qTpFdbAddress
+    OID_Q_BRIDGE_MAC_PORT = '1.3.6.1.2.1.17.7.1.2.2.1.2'  # dot1qTpFdbPort
+
     # ENTITY-MIB OIDs for optical module information
     OID_ENTITY_PHYS_DESCR_TABLE = '1.3.6.1.2.1.47.1.1.1.1.2'  # entPhysicalDescr
     OID_ENTITY_PHYS_NAME = '1.3.6.1.2.1.47.1.1.1.1.7'  # entPhysicalName
@@ -504,32 +508,10 @@ class SNMPService:
             vlan_oid = ov.get('mac_vlan')
             has_vendor_oids = bool(ov)
 
-            # Step 1: Get bridge port to ifIndex mapping (skip when using vendor OIDs
-            # that return ifIndex directly, e.g. tmnxFdbPort on Nokia SR OS)
-            port_map: Dict[int, int] = {}
-            if not has_vendor_oids:
-                bridge_results = await self._walk_oid(switch_ip, bridge_map_oid, auth_data, port)
-                for oid, value in bridge_results:
-                    try:
-                        bridge_port = int(str(oid).split('.')[-1])
-                        port_map[bridge_port] = int(value)
-                    except (ValueError, IndexError):
-                        pass
-
-            # Step 2: Get interface names
-            if_names: Dict[int, str] = {}
-            name_results = await self._walk_oid(switch_ip, self.OID_IF_NAME, auth_data, port)
-            for oid, value in name_results:
-                try:
-                    if_index = int(str(oid).split('.')[-1])
-                    if_names[if_index] = str(value)
-                except (ValueError, IndexError):
-                    pass
-
-            # Step 3: Walk VLAN OID separately when a vendor-specific mac_vlan is provided
+            # Collect VLAN data if vendor-specific mac_vlan OID is provided
             vlan_data: Dict[str, int] = {}
             if vlan_oid:
-                vlan_results = await self._walk_oid(switch_ip, vlan_oid, auth_data, port)
+                vlan_results = await self._walk_oid(switch_ip, vlan_oid, auth_data, port, retries=0)
                 for oid, value in vlan_results:
                     index_key = self._oid_index_suffix(oid, vlan_oid)
                     try:
@@ -537,46 +519,111 @@ class SNMPService:
                     except (ValueError, TypeError):
                         pass
 
-            # Step 4: Get MAC addresses and their ports
+            # Step 1: Try MAC address walks FIRST (fast failure if MIB not supported)
+            # Only collect port_map and ifName when MAC data actually exists.
             mac_entries = []
             mac_data: Dict[str, Dict] = {}
+            found_qbridge = False
+            found_bridge = False
 
-            mac_results = await self._walk_oid(switch_ip, mac_addr_oid, auth_data, port)
-            for oid, value in mac_results:
-                mac_addr = self._format_mac_address(value)
-                index_key = self._oid_index_suffix(oid, mac_addr_oid)
-                vlan_id = vlan_data.get(index_key) if vlan_oid else None
-                if vlan_id is None and not has_vendor_oids:
+            if not has_vendor_oids:
+                # Try Q-BRIDGE-MIB (modern standard) first
+                q_mac_results = await self._walk_oid(
+                    switch_ip, self.OID_Q_BRIDGE_MAC_ADDRESS, auth_data, port, retries=0
+                )
+                if q_mac_results:
+                    found_qbridge = True
+                    logger.info(f"Using Q-BRIDGE-MIB for {switch_ip}")
+                    for oid, value in q_mac_results:
+                        mac_addr = self._format_mac_address(value)
+                        index_key = self._oid_index_suffix(oid, self.OID_Q_BRIDGE_MAC_ADDRESS)
+                        try:
+                            vlan_id = int(index_key.split('.')[0])
+                        except (ValueError, IndexError):
+                            vlan_id = None
+                        mac_data[oid] = {
+                            'mac': mac_addr, 'vlan': vlan_id, 'index_key': index_key,
+                        }
+                else:
+                    # Fall back to BRIDGE-MIB
+                    logger.info(f"No Q-BRIDGE-MIB data on {switch_ip}, trying BRIDGE-MIB")
+                    b_mac_results = await self._walk_oid(
+                        switch_ip, mac_addr_oid, auth_data, port, retries=0
+                    )
+                    if b_mac_results:
+                        found_bridge = True
+                        for oid, value in b_mac_results:
+                            mac_addr = self._format_mac_address(value)
+                            index_key = self._oid_index_suffix(oid, mac_addr_oid)
+                            vlan_id = vlan_data.get(index_key) if vlan_oid else None
+                            if vlan_id is None:
+                                try:
+                                    vlan_id = int(str(oid).split('.')[-7])
+                                except (ValueError, IndexError):
+                                    pass
+                            mac_data[oid] = {
+                                'mac': mac_addr, 'vlan': vlan_id, 'index_key': index_key,
+                            }
+
+            if not mac_data and not has_vendor_oids:
+                # Neither MIB is supported – return empty immediately, skip expensive walks
+                logger.info(f"No MAC table via Q-BRIDGE-MIB or BRIDGE-MIB on {switch_ip}")
+                return []
+
+            if has_vendor_oids:
+                # Vendor OIDs: use original BRIDGE-MIB path
+                b_mac_results = await self._walk_oid(switch_ip, mac_addr_oid, auth_data, port, retries=0)
+                for oid, value in b_mac_results:
+                    mac_addr = self._format_mac_address(value)
+                    index_key = self._oid_index_suffix(oid, mac_addr_oid)
+                    vlan_id = vlan_data.get(index_key) if vlan_oid else None
+                    mac_data[oid] = {
+                        'mac': mac_addr, 'vlan': vlan_id, 'index_key': index_key,
+                    }
+                if not mac_data:
+                    logger.info(f"No MAC table via vendor OIDs on {switch_ip}")
+                    return []
+
+            # Step 2: Only now collect port mapping and interface names (needed for MAC→port resolution)
+            port_map: Dict[int, int] = {}
+            if not has_vendor_oids:
+                bridge_results = await self._walk_oid(switch_ip, bridge_map_oid, auth_data, port, retries=0)
+                for oid, value in bridge_results:
                     try:
-                        vlan_id = int(str(oid).split('.')[-7])
+                        bridge_port = int(str(oid).split('.')[-1])
+                        port_map[bridge_port] = int(value)
                     except (ValueError, IndexError):
                         pass
 
-                mac_data[oid] = {
-                    'mac': mac_addr,
-                    'vlan': vlan_id,
-                    'index_key': index_key,
-                }
+            if_names: Dict[int, str] = {}
+            name_results = await self._walk_oid(switch_ip, self.OID_IF_NAME, auth_data, port, retries=0)
+            for oid, value in name_results:
+                try:
+                    if_index = int(str(oid).split('.')[-1])
+                    if_names[if_index] = str(value)
+                except (ValueError, IndexError):
+                    pass
 
-            port_results = await self._walk_oid(switch_ip, mac_port_oid, auth_data, port)
+            # Step 3: Walk port OID and match with MAC addresses
+            if found_qbridge:
+                port_oid = self.OID_Q_BRIDGE_MAC_PORT
+            else:
+                port_oid = mac_port_oid
+
+            port_results = await self._walk_oid(switch_ip, port_oid, auth_data, port, retries=0)
             for oid, value in port_results:
-                index_key = self._oid_index_suffix(oid, mac_port_oid)
-
-                # Find matching MAC OID entry
+                index_key = self._oid_index_suffix(oid, port_oid)
                 for mac_oid, data in mac_data.items():
                     if data.get('index_key') == index_key:
                         try:
                             port_value = int(value)
                         except (ValueError, TypeError):
                             continue
-
                         if has_vendor_oids:
-                            # Vendor port is typically an ifIndex directly
                             port_name = if_names.get(port_value, f"Port{port_value}")
                         else:
                             if_index = port_map.get(port_value, port_value)
                             port_name = if_names.get(if_index, f"Port{port_value}")
-
                         mac_entries.append({
                             'mac_address': data['mac'],
                             'port_name': port_name,
@@ -725,6 +772,67 @@ class SNMPService:
         except Exception as e:
             logger.error(f"Failed to get device info from {switch_ip}: {str(e)}")
             return None
+
+    async def get_chassis_serial(
+        self,
+        switch_ip: str,
+        switch_config: Dict
+    ) -> Optional[str]:
+        """
+        Collect chassis serial number via SNMP ENTITY-MIB.
+
+        Walks entPhysicalClass to find the chassis entity (class=3),
+        then GETs entPhysicalSerialNum at that index.
+        Falls back to entPhysicalSerialNum.1 if the walk returns nothing.
+        """
+        try:
+            auth_data = self._create_snmp_auth(switch_config)
+            if not auth_data:
+                return None
+
+            port = switch_config.get('snmp_port', 161)
+
+            # Walk entPhysicalClass to find chassis index
+            class_oid = self.OID_ENTITY_PHYS_CLASS
+            chassis_index = None
+
+            try:
+                entries = await asyncio.wait_for(
+                    self._walk_oid(switch_ip, class_oid, auth_data, port, timeout=5),
+                    timeout=7.0
+                )
+                if entries:
+                    for oid_str, value in entries:
+                        if value == 3:  # chassis
+                            chassis_index = oid_str.split('.')[-1]
+                            break
+            except asyncio.TimeoutError:
+                logger.debug(f"ENTITY-MIB walk timed out for {switch_ip}, trying fallback")
+            except Exception as e:
+                logger.debug(f"ENTITY-MIB walk failed for {switch_ip}: {e}")
+
+            # Fallback: try index 1
+            if chassis_index is None:
+                chassis_index = '1'
+
+            serial_oid = f'{self.OID_ENTITY_PHYS_SERIAL}.{chassis_index}'
+            serial = await self._get_oid(
+                switch_ip, serial_oid, auth_data, port,
+                timeout=5, retries=1, log_errors=False
+            )
+
+            if serial is not None:
+                serial_str = str(serial).strip()
+                if serial_str and serial_str.lower() not in ('', 'null', 'none'):
+                    logger.info(f"Chassis serial for {switch_ip}: {serial_str}")
+                    return serial_str
+
+            return None
+
+        except Exception as e:
+            logger.debug(f"Serial collection failed for {switch_ip}: {e}")
+            return None
+
 
     def _extract_os_from_sysdescr(self, sys_descr: str) -> Dict[str, Optional[str]]:
         """

@@ -67,6 +67,9 @@
         <el-descriptions-item label="型号" label-class-name="desc-label">
           {{ switchInfo.model || 'Unknown' }}
         </el-descriptions-item>
+        <el-descriptions-item label="序列号" label-class-name="desc-label">
+          {{ switchInfo.serial_number || '-' }}
+        </el-descriptions-item>
         <el-descriptions-item label="角色" label-class-name="desc-label">
           <el-tag size="small" :type="getRoleType(switchInfo.role)">
             {{ getRoleLabel(switchInfo.role) }}

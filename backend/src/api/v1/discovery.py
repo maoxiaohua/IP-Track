@@ -709,6 +709,23 @@ async def refresh_all_device_info(db: AsyncSession = Depends(get_db)):
                             except Exception as cli_err:
                                 logger.debug(f"CLI model fallback failed for {switch.ip_address}: {cli_err}")
 
+                        # Collect chassis serial number for duplicate detection
+                        try:
+                            serial = await snmp_service.get_chassis_serial(
+                                str(switch.ip_address), snmp_config
+                            )
+                            if serial and serial != switch.serial_number:
+                                switch.serial_number = serial
+                                if 'serial_number' not in changes:
+                                    changes['serial_number'] = (switch.serial_number, serial)
+                                logger.info(
+                                    f"Serial number for {switch.ip_address}: {serial}"
+                                )
+                        except Exception as serial_err:
+                            logger.debug(
+                                f"Serial collection failed for {switch.ip_address}: {serial_err}"
+                            )
+
                         if changes:
                             updated_count += 1
                             results.append({
@@ -745,6 +762,19 @@ async def refresh_all_device_info(db: AsyncSession = Depends(get_db)):
 
             await db.commit()
             logger.info(f"Device info refresh complete: {updated_count} updated, {failed_count} failed")
+
+            # Run duplicate detection after all switches updated
+            try:
+                from services.duplicate_detector import detect_duplicate_switches
+                dup_count = 0
+                for switch in switches:
+                    duplicates = await detect_duplicate_switches(db, switch)
+                    if duplicates:
+                        dup_count += 1
+                if dup_count > 0:
+                    logger.warning(f"Found {dup_count} switch(es) with potential duplicates")
+            except Exception as dup_err:
+                logger.debug(f"Duplicate detection skipped: {dup_err}")
 
             final_data = {
                 'type': 'complete',

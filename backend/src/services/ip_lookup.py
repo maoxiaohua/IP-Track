@@ -271,9 +271,37 @@ class IPLookupService:
                 )
                 same_switch_candidates = same_switch_mac_result.scalars().all()
 
-                # Same-switch fallback: use first MAC entry without policy filtering
-                # (aligns with IPAM behavior — any port is better than "not found")
-                same_switch_mac_entry = same_switch_candidates[0] if same_switch_candidates else None
+                # Same-switch fallback: apply lookup policy to filter out uplinks etc.
+                same_switch_mac_entry = None
+                for candidate in (same_switch_candidates or []):
+                    normalized = port_analysis_service.normalize_port_name(candidate.port_name)
+                    pa_result = await db.execute(
+                        select(PortAnalysis).where(
+                            and_(
+                                PortAnalysis.switch_id == candidate.switch_id,
+                                PortAnalysis.port_name == normalized
+                            )
+                        )
+                    )
+                    pa_row = pa_result.scalar_one_or_none()
+                    policy = resolve_lookup_policy(
+                        port_type=getattr(pa_row, 'port_type', None),
+                        lookup_policy_override=getattr(pa_row, 'lookup_policy_override', None),
+                        has_analysis=pa_row is not None
+                    )
+                    if policy.get('included'):
+                        same_switch_mac_entry = candidate
+                        break
+                    else:
+                        logger.info(
+                            f"  Same-switch port {candidate.port_name} (normalized: {normalized}) excluded by "
+                            f"lookup policy (reason={policy.get('reason')}, "
+                            f"port_type={getattr(pa_row, 'port_type', None)}, "
+                            f"override={getattr(pa_row, 'lookup_policy_override', None)})"
+                        )
+
+                if same_switch_mac_entry is None and same_switch_candidates:
+                    logger.info(f"  All {len(same_switch_candidates)} same-switch MAC candidates excluded by lookup policy")
 
                 if same_switch_mac_entry:
                     port_name = same_switch_mac_entry.port_name
