@@ -1801,6 +1801,7 @@ class NetworkDataCollector:
         switch.mac_collection_fail_count += 1
         switch.last_mac_collection_at = collected_at
         switch.last_collection_status = 'partial'
+        switch.mac_collection_method = None
         switch.last_collection_message = "MAC: 0 entries after trying all available methods"
         return mac_entries
 
@@ -1886,6 +1887,7 @@ class NetworkDataCollector:
         switch.arp_collection_fail_count += 1
         switch.last_arp_collection_at = collected_at
         switch.last_collection_status = 'partial'
+        switch.arp_collection_method = None
         switch.last_collection_message = "ARP: 0 entries after trying all available methods"
         return arp_entries
 

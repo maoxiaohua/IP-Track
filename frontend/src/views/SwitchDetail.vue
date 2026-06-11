@@ -1226,7 +1226,7 @@ const loadMacData = async () => {
 const collectArpData = async () => {
   arpLoading.value = true
   try {
-    ElMessage.info('正在通过 CLI 实时收集 ARP 表数据，请稍候...')
+    ElMessage.info('正在实时收集 ARP 表数据，请稍候...')
     const response = await switchesApi.collectArp(switchId.value)
     console.log('ARP collection response:', response)
 
@@ -1248,7 +1248,7 @@ const collectArpData = async () => {
 const collectMacData = async () => {
   macLoading.value = true
   try {
-    ElMessage.info('正在通过 CLI 实时收集 MAC 地址表数据，请稍候...')
+    ElMessage.info('正在实时收集 MAC 地址表数据，请稍候...')
     const response = await switchesApi.collectMac(switchId.value)
     console.log('MAC collection response:', response)
 
@@ -1310,7 +1310,7 @@ const loadPortAnalysis = async () => {
 const analyzePorts = async () => {
   portAnalyzing.value = true
   try {
-    ElMessage.info('正在通过 CLI 采集最新 MAC 表并分析端口，请稍候...')
+    ElMessage.info('正在采集最新 MAC 表并分析端口，请稍候...')
     const response = await switchesApi.analyzePorts(switchId.value)
     if (response.success) {
       ElMessage.success(response.message || '端口分析完成')
@@ -1382,7 +1382,7 @@ const collectOpticalData = async () => {
 const refreshDeviceInfo = async () => {
   deviceInfoLoading.value = true
   try {
-    ElMessage.info('正在通过 CLI 实时获取设备信息，请稍候...')
+    ElMessage.info('正在实时获取设备信息，请稍候...')
     const response = await switchesApi.collectDeviceInfo(switchId.value)
     console.log('Device info collection response:', response)
 

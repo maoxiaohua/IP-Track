@@ -145,6 +145,11 @@ class BMCBatchImportResult(BaseModel):
 
 # ── Credential Profile Schemas ──────────────────────────────────
 
+class BMCBatchToggleRequest(BaseModel):
+    server_ids: List[int] = Field(..., min_length=1, description="Server IDs to toggle")
+    enabled: bool = Field(..., description="Target enabled state")
+
+
 class BMCCredentialProfileCreate(BaseModel):
     """Create a named credential profile."""
     name: str = Field(..., min_length=1, max_length=100)

@@ -27,6 +27,12 @@
           >
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
+          <el-button v-if="tableSelection.length > 0" type="success" @click="batchToggleEnabled(true)" :loading="batchToggling">
+            Enable ({{ tableSelection.length }})
+          </el-button>
+          <el-button v-if="tableSelection.length > 0" type="info" @click="batchToggleEnabled(false)" :loading="batchToggling">
+            Disable ({{ tableSelection.length }})
+          </el-button>
           <el-button v-if="tableSelection.length > 0" type="warning" @click="bulkQueryInfo" :loading="bulkQuerying">
             Info ({{ tableSelection.length }})
           </el-button>
@@ -122,13 +128,6 @@
           <el-table :data="store.credentialProfiles" v-loading="store.profilesLoading" size="small" stripe>
             <el-table-column prop="name" label="Profile Name" min-width="140" />
             <el-table-column prop="username" label="Username" min-width="100" />
-            <el-table-column label="Password" width="100">
-              <template #default="{ row }">
-                <el-tag :type="row.password_set ? 'success' : 'warning'" size="small">
-                  {{ row.password_set ? 'Set' : 'None' }}
-                </el-tag>
-              </template>
-            </el-table-column>
             <el-table-column prop="server_count" label="# Servers" width="80" />
             <el-table-column label="Actions" width="170" fixed="right">
               <template #default="{ row }">
@@ -483,6 +482,7 @@ const verifiedFilter = ref<boolean | null>(null)
 const inventorySearch = ref('')
 const tableSelection = ref<BMCServer[]>([])
 const bulkQuerying = ref(false)
+const batchToggling = ref(false)
 
 // Reset Execution tab — load ALL verified servers (not paginated)
 const resetServers = ref<BMCServer[]>([])
@@ -740,6 +740,31 @@ async function bulkDelete() {
   tableSelection.value = []
   await refreshServers()
   bulkDeleting.value = false
+}
+
+async function batchToggleEnabled(enabled: boolean) {
+  const count = tableSelection.value.length
+  const label = enabled ? 'Enable' : 'Disable'
+  try {
+    await ElMessageBox.confirm(
+      `Set ${count} server(s) to Enabled = ${label}?`,
+      `Batch ${label}`,
+      { confirmButtonText: label, cancelButtonText: 'Cancel', type: 'info' }
+    )
+  } catch { return }
+
+  batchToggling.value = true
+  try {
+    const ids = tableSelection.value.map(s => s.id)
+    const result = await bmcApi.batchToggleEnabled(ids, enabled)
+    ElMessage.success(result.message)
+    tableSelection.value = []
+    await refreshServers()
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail || e.message || 'Failed')
+  } finally {
+    batchToggling.value = false
+  }
 }
 
 function exportCSV(verified: boolean) {

@@ -565,6 +565,23 @@ class BMCService:
         logger.info(f"BMC server updated: {server.name} ({server.host})")
         return server
 
+    async def batch_toggle_enabled(
+        self, db: AsyncSession, server_ids: list, enabled: bool
+    ) -> dict:
+        """Batch enable or disable BMC servers."""
+        updated = 0
+        not_found = 0
+        for sid in server_ids:
+            server = await self.get_server(db, sid)
+            if not server:
+                not_found += 1
+                continue
+            server.enabled = enabled
+            updated += 1
+        await db.commit()
+        logger.info(f"BMC batch toggle: set enabled={enabled} for {updated} servers ({not_found} not found)")
+        return {"updated": updated, "not_found": not_found}
+
     async def delete_server(self, db: AsyncSession, server_id: int) -> bool:
         server = await self.get_server(db, server_id)
         if not server:

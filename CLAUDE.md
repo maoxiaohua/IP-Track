@@ -152,6 +152,41 @@ docker exec -it iptrack-postgres psql -U iptrack -d iptrack
 
 **重要**：源码通过 volume 挂载 (`./backend/src:/app/src`)，修改 Python 文件后 uvicorn 会自动 reload。如果没生效，手动 `docker compose restart <服务名>`。
 
+## Docker 端口与网络规则（critical - 已发生事故）
+
+### 核心规则：所有后端容器内部均监听 8100 端口
+
+```
+容器内部端口          主机映射端口       用途
+iptrack-backend-core:8100     → 8101   核心 API
+iptrack-backend-ipam:8100     → 8102   IPAM
+iptrack-backend-collector:8100 → 8103  采集服务
+```
+
+**主机映射端口 (8101/8102/8103) 只能在宿主机访问 Docker 容器时使用，容器之间（包括前端 Vite 代理）必须使用内部端口 8100。**
+
+### Vite 代理配置必须用 8100
+
+- `vite.config.ts` 的 proxy target 和**默认值**必须使用 8100，因为 Vite dev server 运行在 Docker 网络内部
+- `docker-compose.yml` 的 `VITE_PROXY_*` 环境变量也必须使用 8100
+- `.env.example` 里的 `localhost:8101/8102/8103` 仅适用于本地 `npm run dev`，不适用于 Docker 部署
+
+### 事故案例（2026-06-09）
+
+commit `77159cc` 把 `vite.config.ts` 的 proxy 默认值从 8100 改成了 8102/8103：
+```typescript
+// 错误：Docker 内部无法访问 8102/8103
+const backendIpam = env.VITE_PROXY_IPAM || 'http://iptrack-backend-ipam:8102'
+const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-collector:8103'
+```
+导致 IPAM 页面和光模块页面所有 API 请求 500 错误。正确值应该是 8100。
+
+### docker compose restart ≠ docker compose up -d
+
+- `docker compose restart` 只重启容器进程，**不会**重新读取 docker-compose.yml 的环境变量变更
+- 修改了环境变量（`.env` 或 `docker-compose.yml` 的 `environment`）后，必须用 `docker compose up -d <服务名>` 重建容器
+- 修改了 `vite.config.ts` 后也必须重建前端容器
+
 ## 目录结构
 
 ```

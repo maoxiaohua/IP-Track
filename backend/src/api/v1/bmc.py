@@ -30,6 +30,7 @@ from schemas.bmc import (
     BMCInfoResponse,
     BMCBatchImportRequest,
     BMCBatchImportResult,
+    BMCBatchToggleRequest,
     BMCCredentialProfileCreate,
     BMCCredentialProfileUpdate,
     BMCCredentialProfileResponse,
@@ -84,6 +85,19 @@ async def get_server(
     if not server:
         raise HTTPException(status_code=404, detail="BMC server not found")
     return BMCServerResponse.model_validate(server)
+
+
+@router.put("/servers/batch-toggle")
+async def batch_toggle_enabled(
+    data: BMCBatchToggleRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Batch enable or disable BMC servers."""
+    result = await bmc_service.batch_toggle_enabled(db, data.server_ids, data.enabled)
+    return {
+        "message": f"Set enabled={data.enabled} for {result['updated']} server(s)",
+        **result,
+    }
 
 
 @router.put("/servers/{server_id}", response_model=BMCServerResponse)

@@ -197,6 +197,11 @@ export const bmcApi = {
     const { data } = await apiClient.post('/api/v1/bmc/servers/batch-import', req)
     return data as BMCBatchImportResult
   },
+
+  async batchToggleEnabled(serverIds: number[], enabled: boolean) {
+    const { data } = await apiClient.put('/api/v1/bmc/servers/batch-toggle', { server_ids: serverIds, enabled })
+    return data as { message: string; updated: number; not_found: number }
+  },
 }
 
 export interface BMCInfo {

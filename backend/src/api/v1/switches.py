@@ -946,7 +946,7 @@ async def collect_switch_arp_table(
         arp_entries = await network_data_collector.collect_arp_single_switch(db, switch)
         await db.commit()
 
-        collection_method = switch.arp_collection_method or 'unknown'
+        collection_method = (switch.arp_collection_method or 'none') if arp_entries else 'none'
         message = switch.last_collection_message or (
             f'Successfully collected {len(arp_entries)} ARP entries via {collection_method}'
         )
@@ -994,7 +994,7 @@ async def collect_switch_mac_table(
         mac_entries = await network_data_collector.collect_mac_single_switch(db, switch)
         await db.commit()
 
-        collection_method = switch.mac_collection_method or 'unknown'
+        collection_method = (switch.mac_collection_method or 'none') if mac_entries else 'none'
         message = switch.last_collection_message or (
             f'Successfully collected {len(mac_entries)} MAC entries via {collection_method}'
         )
