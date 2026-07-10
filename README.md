@@ -342,6 +342,52 @@ pytest --cov=src --cov-report=html
 
 ## 🐛 Troubleshooting
 
+### ⚠️ 开发调试必读：双入口部署架构
+
+本项目有两套前端访问方式，**修改代码后必须确认你在哪个入口验证**。这是实际开发中反复踩坑的血泪教训。
+
+| 入口 | 地址 | 技术 | 用途 |
+|------|------|------|------|
+| **Vite 开发服务器** | `http://<host>:8001` | Vite HMR + Docker volume 挂载 | 开发调试，修改代码后自动热更新 |
+| **Nginx 生产部署** | `http://<host>` 或域名（如 `ipam.hz.nsn-rdnet.net`） | Nginx 反向代理 + 静态文件 | 用户实际使用的生产环境 |
+
+**关键区别**：
+
+```
+用户浏览器 → http://ipam.hz.nsn-rdnet.net → Nginx:80 → /opt/IP-Track/frontend/dist/index.html（静态构建文件）
+                                                    → /api/* → proxy_pass 到后端容器
+
+开发者调试 → http://10.56.4.137:8001 → Docker port mapping → Vite Dev Server:5173 → 源码实时编译
+```
+
+**每次修改前端代码后，必须执行以下步骤才能在生产环境生效**：
+
+```bash
+# 1. 构建生产版本（必须！仅改源码不改 dist 用户看不到）
+cd /opt/IP-Track/frontend
+npx vite build          # 输出到 frontend/dist/
+
+# 2. 重载 Nginx（如果 Nginx 配置有变更）
+sudo nginx -s reload
+
+# 3. 验证生产部署
+curl -s http://127.0.0.1/ | head -5
+```
+
+**踩坑记录（2026-06-29）**：
+- 添加了 ARP/MAC 导出功能，在 Vite 开发服务器 (`:8001`) 上一切正常
+- 但用户通过域名访问时始终看不到导出按钮，F12 也看不到新代码，无报错
+- 耗时数小时排查，最终发现用户在 Nginx 生产入口，而我们一直在 Vite 开发服务器上验证
+- **教训**：修改前端代码后，必须 `npx vite build` 构建到 `dist/`，生产环境才会生效
+
+**快速判断当前在看哪个入口**：
+```bash
+# 查看 Nginx 配置中 dist 目录的时间戳
+ls -la /opt/IP-Track/frontend/dist/index.html
+
+# 如果 dist 文件时间早于你的代码修改时间，说明生产环境未更新
+```
+
 ### Backend Won't Start
 
 **Symptom**: Container restarts, logs show `ModuleNotFoundError`
@@ -463,6 +509,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **⭐ Star this repository if you find it useful!**
 
-**Last Updated**: 2026-03-15
+**Last Updated**: 2026-06-30
 **Version**: 2.2.0
 **Maintained By**: IP-Track Contributors

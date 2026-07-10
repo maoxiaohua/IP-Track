@@ -766,6 +766,94 @@ async def bulk_create_switches(
     return created_switches
 
 
+# IMPORTANT: /export/arp and /export/mac must be defined BEFORE /{switch_id}/arp
+# and /{switch_id}/mac to prevent FastAPI from matching "export" as a switch_id.
+
+
+@router.get("/export/arp")
+async def export_all_arp(
+    db: AsyncSession = Depends(get_db)
+):
+    """Export all ARP entries across all switches as flat JSON for client-side Excel/CSV export."""
+    try:
+        result = await db.execute(
+            select(
+                ARPTable.ip_address,
+                ARPTable.mac_address,
+                ARPTable.vlan_id,
+                ARPTable.interface,
+                ARPTable.age_seconds,
+                ARPTable.last_seen,
+                Switch.name.label("switch_name"),
+                Switch.ip_address.label("switch_ip"),
+            )
+            .join(Switch, ARPTable.switch_id == Switch.id)
+            .order_by(Switch.name, desc(ARPTable.last_seen))
+        )
+        rows = result.all()
+        entries = [
+            {
+                "switch_name": row.switch_name,
+                "switch_ip": str(row.switch_ip),
+                "ip_address": str(row.ip_address),
+                "mac_address": str(row.mac_address),
+                "vlan_id": row.vlan_id,
+                "interface": row.interface,
+                "age_seconds": row.age_seconds,
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None,
+            }
+            for row in rows
+        ]
+        return entries
+    except Exception as e:
+        logger.error(f"Error exporting ARP table: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export ARP table: {str(e)}"
+        )
+
+
+@router.get("/export/mac")
+async def export_all_mac(
+    db: AsyncSession = Depends(get_db)
+):
+    """Export all MAC entries across all switches as flat JSON for client-side Excel/CSV export."""
+    try:
+        result = await db.execute(
+            select(
+                MACTable.mac_address,
+                MACTable.port_name,
+                MACTable.vlan_id,
+                MACTable.is_dynamic,
+                MACTable.last_seen,
+                Switch.name.label("switch_name"),
+                Switch.ip_address.label("switch_ip"),
+            )
+            .join(Switch, MACTable.switch_id == Switch.id)
+            .order_by(Switch.name, desc(MACTable.last_seen))
+        )
+        rows = result.all()
+        entries = [
+            {
+                "switch_name": row.switch_name,
+                "switch_ip": str(row.switch_ip),
+                "mac_address": str(row.mac_address),
+                "port_name": row.port_name,
+                "vlan_id": row.vlan_id,
+                "type": "dynamic" if row.is_dynamic else "static",
+                "last_seen": row.last_seen.isoformat() if row.last_seen else None,
+            }
+            for row in rows
+        ]
+        return entries
+    except Exception as e:
+        logger.error(f"Error exporting MAC table: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export MAC table: {str(e)}"
+        )
+
+
 @router.get("/{switch_id}/arp", response_model=Dict[str, Any])
 async def get_switch_arp_table(
     switch_id: int,

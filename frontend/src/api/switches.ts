@@ -326,5 +326,17 @@ export const switchesApi = {
   ): Promise<PortAnalysisEntry> => {
     const response = await apiClient.put(`/api/v1/network/port-analysis/${id}/lookup-policy`, data)
     return response.data
+  },
+
+  // Export all switches ARP table
+  exportArp: async (): Promise<any[]> => {
+    const response = await apiClient.get('/api/v1/switches/export/arp')
+    return response.data
+  },
+
+  // Export all switches MAC table
+  exportMac: async (): Promise<any[]> => {
+    const response = await apiClient.get('/api/v1/switches/export/mac')
+    return response.data
   }
 }

@@ -22,8 +22,8 @@
       </template>
 
       <!-- Search Bar -->
-      <el-row style="margin-bottom: 20px">
-        <el-col :span="12">
+      <el-row style="margin-bottom: 20px" :gutter="12">
+        <el-col :span="8">
           <el-input
             v-model="searchText"
             placeholder="搜索子网（网络地址或子网名称）..."
@@ -33,6 +33,28 @@
               <el-icon><Search /></el-icon>
             </template>
           </el-input>
+        </el-col>
+        <el-col :span="10">
+          <el-input
+            v-model="globalSearchText"
+            placeholder="全局搜索 IP / 主机名 / DNS..."
+            clearable
+            @keyup.enter="handleGlobalSearch"
+          >
+            <template #prefix>
+              <el-icon><Search /></el-icon>
+            </template>
+          </el-input>
+        </el-col>
+        <el-col :span="6">
+          <el-button
+            type="primary"
+            :loading="globalSearchLoading"
+            @click="handleGlobalSearch"
+          >
+            <el-icon><Search /></el-icon>
+            搜索主机名
+          </el-button>
         </el-col>
       </el-row>
 
@@ -376,6 +398,88 @@
         </el-button>
       </template>
     </el-dialog>
+    <!-- Global Search Results Dialog -->
+    <el-dialog
+      v-model="showGlobalSearchDialog"
+      title="全局搜索结果"
+      width="90%"
+      :close-on-click-modal="false"
+    >
+      <div v-if="globalSearchResults.length > 0">
+        <p style="margin-bottom: 12px; color: #909399">
+          搜索 "<strong>{{ globalSearchText }}</strong>" ，共找到 <strong>{{ globalSearchTotal }}</strong> 条记录
+        </p>
+        <el-table
+          :data="globalSearchResults"
+          stripe
+          max-height="500"
+          style="width: 100%"
+        >
+          <el-table-column prop="ip_address" label="IP 地址" width="150" />
+          <el-table-column label="主机名 (DNS)" min-width="180">
+            <template #default="{ row }">
+              <span v-if="row.hostname" style="font-weight: 500">{{ row.hostname }}</span>
+              <span v-else style="color: #c0c4cc">-</span>
+              <span v-if="row.hostname_source" style="font-size: 11px; color: #909399; margin-left: 6px">
+                ({{ row.hostname_source }})
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="dns_name" label="DNS 名称" min-width="180">
+            <template #default="{ row }">
+              <span v-if="row.dns_name">{{ row.dns_name }}</span>
+              <span v-else style="color: #c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="system_name" label="系统名称" min-width="150">
+            <template #default="{ row }">
+              <span v-if="row.system_name">{{ row.system_name }}</span>
+              <span v-else style="color: #c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="os_type" label="OS 类型" width="100">
+            <template #default="{ row }">
+              <el-tag v-if="row.os_type" size="small" type="info">{{ row.os_type }}</el-tag>
+              <span v-else style="color: #c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="vendor" label="厂商" width="120">
+            <template #default="{ row }">
+              <span v-if="row.vendor">{{ row.vendor }}</span>
+              <span v-else style="color: #c0c4cc">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="status" label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag v-if="row.status === 'used'" size="small" type="success">使用中</el-tag>
+              <el-tag v-else-if="row.status === 'available'" size="small" type="info">可用</el-tag>
+              <el-tag v-else-if="row.status === 'reserved'" size="small" type="warning">保留</el-tag>
+              <el-tag v-else-if="row.status === 'offline'" size="small" type="danger">离线</el-tag>
+              <el-tag v-else size="small">{{ row.status }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="last_seen_at" label="最后在线" width="160">
+            <template #default="{ row }">
+              {{ row.last_seen_at ? formatDateTime(row.last_seen_at) : '-' }}
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-pagination
+          v-if="globalSearchTotal > globalSearchPageSize"
+          v-model:current-page="globalSearchPage"
+          v-model:page-size="globalSearchPageSize"
+          :page-sizes="[20, 50, 100]"
+          :total="globalSearchTotal"
+          layout="total, sizes, prev, pager, next"
+          style="margin-top: 16px; justify-content: center"
+          @current-change="handleGlobalSearchPageChange"
+          @size-change="handleGlobalSearchPageChange"
+        />
+      </div>
+      <div v-else-if="globalSearchSearched" style="text-align: center; padding: 40px; color: #909399">
+        <p>未找到匹配的结果</p>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -385,7 +489,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Upload, Download, Search } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
-import { ipamApi, type IPAMScanStatus } from '@/api/ipam'
+import { ipamApi, type IPAMScanStatus, type IPAddressDetail } from '@/api/ipam'
 import { useIPAMScanMonitor } from '@/composables/useIPAMScanMonitor'
 import Chart from '@/components/Chart.vue'
 
@@ -421,6 +525,16 @@ const importMethod = ref('excel')
 const excelFile = ref<File | null>(null)
 const uploadRef = ref()
 const searchText = ref('')  // Subnet search
+
+// Global IP/hostname search
+const globalSearchText = ref('')
+const globalSearchLoading = ref(false)
+const globalSearchSearched = ref(false)
+const showGlobalSearchDialog = ref(false)
+const globalSearchResults = ref<IPAddressDetail[]>([])
+const globalSearchTotal = ref(0)
+const globalSearchPage = ref(1)
+const globalSearchPageSize = ref(50)
 
 // OS type statistics
 const osTypeStats = ref<{ os_types: { os_type: string; count: number; label: string }[]; total_classified: number } | null>(null)
@@ -697,6 +811,55 @@ const vendorChartOption = computed(() => {
 watch(searchText, () => {
   pagination.value.currentPage = 1
 })
+
+// Global search handlers
+const handleGlobalSearch = async () => {
+  const query = globalSearchText.value.trim()
+  if (!query) {
+    ElMessage.warning('请输入搜索关键词（IP / 主机名 / DNS）')
+    return
+  }
+
+  globalSearchLoading.value = true
+  globalSearchSearched.value = false
+  globalSearchPage.value = 1
+
+  try {
+    const result = await ipamApi.getIPAddresses({
+      search: query,
+      skip: 0,
+      limit: globalSearchPageSize.value
+    })
+    globalSearchResults.value = result.items
+    globalSearchTotal.value = result.total
+    globalSearchSearched.value = true
+    showGlobalSearchDialog.value = true
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '搜索失败')
+  } finally {
+    globalSearchLoading.value = false
+  }
+}
+
+const handleGlobalSearchPageChange = async () => {
+  const query = globalSearchText.value.trim()
+  if (!query) return
+
+  globalSearchLoading.value = true
+  try {
+    const result = await ipamApi.getIPAddresses({
+      search: query,
+      skip: (globalSearchPage.value - 1) * globalSearchPageSize.value,
+      limit: globalSearchPageSize.value
+    })
+    globalSearchResults.value = result.items
+    globalSearchTotal.value = result.total
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '搜索失败')
+  } finally {
+    globalSearchLoading.value = false
+  }
+}
 
 // Load subnets (initial load - shows loading overlay)
 const loadSubnets = async () => {

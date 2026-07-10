@@ -5,8 +5,8 @@ import { fileURLToPath, URL } from 'node:url'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const backendCore = env.VITE_PROXY_CORE || 'http://iptrack-backend-core:8100'
-  const backendIpam = env.VITE_PROXY_IPAM || 'http://iptrack-backend-ipam:8102'
-  const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-collector:8103'
+  const backendIpam = env.VITE_PROXY_IPAM || 'http://iptrack-backend-ipam:8100'
+  const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-collector:8100'
 
   return {
     plugins: [vue()],

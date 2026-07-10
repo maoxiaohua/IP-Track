@@ -321,10 +321,18 @@
           <template #header>
             <div class="card-header">
               <span class="section-title">ARP 表 ({{ arpData.length }} 条记录)</span>
-              <el-button type="primary" size="small" class="detail-action-button" @click="collectArpData" :loading="arpLoading">
-                <template #icon><el-icon><Refresh /></el-icon></template>
-                立即收集
-              </el-button>
+              <div class="card-header-actions">
+                <el-button type="success" size="small" @click="exportArpData('excel')" :loading="arpExportLoading">
+                  导出Excel
+                </el-button>
+                <el-button type="info" size="small" @click="exportArpData('csv')" :loading="arpExportLoading">
+                  导出CSV
+                </el-button>
+                <el-button type="primary" size="small" class="detail-action-button" @click="collectArpData" :loading="arpLoading">
+                  <template #icon><el-icon><Refresh /></el-icon></template>
+                  立即收集
+                </el-button>
+              </div>
             </div>
           </template>
 
@@ -380,10 +388,18 @@
           <template #header>
             <div class="card-header">
               <span class="section-title">MAC 地址表 ({{ macData.length }} 条记录)</span>
-              <el-button type="primary" size="small" class="detail-action-button" @click="collectMacData" :loading="macLoading">
-                <template #icon><el-icon><Refresh /></el-icon></template>
-                立即收集
-              </el-button>
+              <div class="card-header-actions">
+                <el-button type="success" size="small" @click="exportMacData('excel')" :loading="macExportLoading">
+                  导出Excel
+                </el-button>
+                <el-button type="info" size="small" @click="exportMacData('csv')" :loading="macExportLoading">
+                  导出CSV
+                </el-button>
+                <el-button type="primary" size="small" class="detail-action-button" @click="collectMacData" :loading="macLoading">
+                  <template #icon><el-icon><Refresh /></el-icon></template>
+                  立即收集
+                </el-button>
+              </div>
             </div>
           </template>
 
@@ -737,6 +753,8 @@ const portAnalysisSummary = ref<PortAnalysisResponse['summary'] | null>(null)
 const portAnalysisFreshness = ref<PortAnalysisResponse['freshness'] | null>(null)
 const arpLoading = ref(false)
 const macLoading = ref(false)
+const arpExportLoading = ref(false)
+const macExportLoading = ref(false)
 const opticalLoading = ref(false)
 const portPolicyLoading = ref(false)
 const portAnalyzing = ref(false)
@@ -1267,6 +1285,59 @@ const collectMacData = async () => {
   }
 }
 
+// Export functions
+const exportArpData = async (format: 'excel' | 'csv') => {
+  if (arpExportLoading.value) return
+  arpExportLoading.value = true
+  try {
+    ElMessage.info('正在导出 ARP 表...')
+    const { exportToExcel, exportToCSV } = await import('@/utils/export')
+    const data = await switchesApi.exportArp()
+    if (!data || data.length === 0) {
+      ElMessage.warning('没有 ARP 数据可导出')
+      return
+    }
+    const filename = `ARP表_所有交换机_${new Date().toISOString().slice(0, 10)}`
+    if (format === 'excel') {
+      await exportToExcel(data, filename, 'ARP表')
+    } else {
+      exportToCSV(data, filename)
+    }
+    ElMessage.success(`成功导出 ${data.length} 条 ARP 记录`)
+  } catch (error: any) {
+    console.error('Failed to export ARP data:', error)
+    ElMessage.error(error.response?.data?.detail || '导出 ARP 表失败')
+  } finally {
+    arpExportLoading.value = false
+  }
+}
+
+const exportMacData = async (format: 'excel' | 'csv') => {
+  if (macExportLoading.value) return
+  macExportLoading.value = true
+  try {
+    ElMessage.info('正在导出 MAC 表...')
+    const { exportToExcel, exportToCSV } = await import('@/utils/export')
+    const data = await switchesApi.exportMac()
+    if (!data || data.length === 0) {
+      ElMessage.warning('没有 MAC 数据可导出')
+      return
+    }
+    const filename = `MAC表_所有交换机_${new Date().toISOString().slice(0, 10)}`
+    if (format === 'excel') {
+      await exportToExcel(data, filename, 'MAC表')
+    } else {
+      exportToCSV(data, filename)
+    }
+    ElMessage.success(`成功导出 ${data.length} 条 MAC 记录`)
+  } catch (error: any) {
+    console.error('Failed to export MAC data:', error)
+    ElMessage.error(error.response?.data?.detail || '导出 MAC 表失败')
+  } finally {
+    macExportLoading.value = false
+  }
+}
+
 const loadOpticalData = async () => {
   opticalLoading.value = true
   try {
@@ -1464,6 +1535,13 @@ onMounted(async () => {
   flex-wrap: wrap;
 }
 
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .port-policy-header {
   display: flex;
   align-items: center;
@@ -1524,13 +1602,12 @@ onMounted(async () => {
 }
 
 :deep(.el-card__header) {
-  background-color: #fafafa;
+  background: #fafafa;
   border-bottom: 1px solid #ebeef5;
   color: #1f2937 !important;
 }
 
-:deep(.el-card__header),
-:deep(.el-card__header *) {
+:deep(.el-card__header *:not(.el-button)) {
   color: #1f2937 !important;
 }
 
