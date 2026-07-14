@@ -28,8 +28,8 @@ class IPScanService:
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=settings.IPAM_SCAN_WORKERS)
         # Semaphore to limit concurrent scan operations (prevent resource exhaustion)
-        # Limit to 20 concurrent scans to prevent ping failures due to network congestion
-        self.semaphore = asyncio.Semaphore(20)
+        # Configurable via IPAM_CONCURRENT_IPS_PER_SUBNET (default 20)
+        self.semaphore = asyncio.Semaphore(settings.IPAM_CONCURRENT_IPS_PER_SUBNET)
         # Find ping command path at initialization
         # Always use absolute paths to avoid PATH issues
         import os
@@ -37,7 +37,7 @@ class IPScanService:
         self.arp_cmd = '/usr/sbin/arp' if os.path.exists('/usr/sbin/arp') else '/sbin/arp'
         self.nmap_cmd = shutil.which('nmap')
 
-        logger.info(f"IP scan service initialized: ping={self.ping_cmd}, arp={self.arp_cmd}, nmap={self.nmap_cmd}, concurrency_limit=20")
+        logger.info(f"IP scan service initialized: ping={self.ping_cmd}, arp={self.arp_cmd}, nmap={self.nmap_cmd}, concurrency_limit={settings.IPAM_CONCURRENT_IPS_PER_SUBNET}")
 
     @staticmethod
     def _build_result(ip: str) -> Dict[str, Any]:
@@ -166,7 +166,7 @@ class IPScanService:
 
         return cleaned
 
-    def _get_netbios_hostname(self, ip: str, timeout: float = 1.5) -> Optional[str]:
+    def _get_netbios_hostname(self, ip: str, timeout: float = None) -> Optional[str]:
         """
         Query Windows NetBIOS node status (UDP/137) and return the best hostname.
 
@@ -175,6 +175,8 @@ class IPScanService:
         """
         sock = None
         try:
+            if timeout is None:
+                timeout = settings.IP_SCAN_NETBIOS_TIMEOUT
             transaction_id = random.randint(0, 0xFFFF)
             header = struct.pack('>HHHHHH', transaction_id, 0x0000, 1, 0, 0, 0)
             question = self._encode_netbios_name('*') + struct.pack('>HH', 0x0021, 0x0001)
@@ -255,7 +257,7 @@ class IPScanService:
                 except Exception:
                     pass
 
-    def _dns_ptr_lookup(self, ip: str, timeout: int = 5, dns_servers: Optional[List[str]] = None) -> Optional[str]:
+    def _dns_ptr_lookup(self, ip: str, timeout: int = None, dns_servers: Optional[List[str]] = None) -> Optional[str]:
         """
         DNS PTR (reverse DNS) lookup to get hostname
         Uses dnspython for more reliable PTR lookups
@@ -270,6 +272,9 @@ class IPScanService:
         if not DNS_AVAILABLE:
             logger.debug("DNS PTR lookup skipped - dnspython not available")
             return None
+
+        if timeout is None:
+            timeout = settings.IP_SCAN_DNS_TIMEOUT
 
         try:
             # Create reverse DNS name (e.g., 1.0.168.192.in-addr.arpa)
@@ -325,7 +330,7 @@ class IPScanService:
                 [self.arp_cmd, '-n', ip],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=2,
+                timeout=settings.IP_SCAN_ARP_TIMEOUT,
                 env=env
             )
 
@@ -365,7 +370,7 @@ class IPScanService:
                 [self.nmap_cmd, '-O', '--osscan-guess', ip],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=30,
+                timeout=settings.NMAP_OS_TIMEOUT,
                 env=env
             )
 
@@ -397,7 +402,7 @@ class IPScanService:
                 [self.ping_cmd, '-c', '1', ip],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=3,
+                timeout=settings.STATUS_CHECK_PING_TIMEOUT_SECONDS + 1,
                 env=env
             )
 

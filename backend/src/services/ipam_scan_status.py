@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from core.config import settings
+
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -22,6 +24,7 @@ class IPAMScanStatusService:
         "enrichment": "识别主机信息",
         "completed": "已完成",
         "error": "异常结束",
+        "cancelled": "已取消",
     }
 
     def __init__(self) -> None:
@@ -29,9 +32,10 @@ class IPAMScanStatusService:
         self._status: Dict[str, Any] = self._make_idle_status()
         self._lock = asyncio.Lock()
         self._last_broadcast_at = 0.0
-        self._throttle_interval = 0.25
+        self._throttle_interval = settings.IPAM_SSE_THROTTLE_MS / 1000.0
         self._pending_payload: Optional[Dict[str, Any]] = None
         self._throttle_task: Optional[asyncio.Task] = None
+        self._cancelled = False
 
     def _make_idle_status(self) -> Dict[str, Any]:
         return {
@@ -139,6 +143,7 @@ class IPAMScanStatusService:
         total_subnets: int,
         message: str,
     ) -> str:
+        self._cancelled = False
         session_id = str(uuid.uuid4())
         previous_completed_at = self._status.get("last_completed_at")
         await self._update(
@@ -357,6 +362,19 @@ class IPAMScanStatusService:
             error=error,
             last_completed_at=_utcnow_iso(),
         )
+
+    def cancel_scan(self) -> None:
+        """Request cancellation of the running scan.
+
+        The scan loop checks is_cancelled() between subnets and stops after
+        the current subnet completes.  Callers must still release the global
+        scan lock.
+        """
+        self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        """Check whether scan cancellation has been requested."""
+        return self._cancelled
 
 
 ipam_scan_status_service = IPAMScanStatusService()

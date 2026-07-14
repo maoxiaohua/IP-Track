@@ -495,13 +495,17 @@ class NetworkCollectionScheduler:
             logger.warning("Skipping IPAM auto-scan because another IPAM scan is already running")
             return
 
+        # Use settings default if not explicitly passed (scheduled job has no args)
+        if max_subnets is None and not startup_catchup:
+            max_subnets = settings.IPAM_MAX_SUBNETS_PER_PASS
+
         try:
             await asyncio.wait_for(
                 self._do_ipam_scan(startup_catchup=startup_catchup, max_subnets=max_subnets),
-                timeout=7200  # 2 hour hard timeout
+                timeout=settings.IPAM_SCAN_HARD_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError:
-            logger.error("IPAM auto-scan timed out after 2 hours")
+            logger.error(f"IPAM auto-scan timed out after {settings.IPAM_SCAN_HARD_TIMEOUT_SECONDS}s")
             self.clear_ipam_scan_context()
 
     async def _do_ipam_scan(self, *, startup_catchup: bool = False, max_subnets: int | None = None):

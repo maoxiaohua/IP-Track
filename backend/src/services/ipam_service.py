@@ -1,6 +1,6 @@
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_, cast, Text, String, Integer, delete
+from sqlalchemy import select, func, and_, or_, cast, Text, String, Integer, delete, insert
 from models.ipam import IPSubnet, IPAddress, IPScanHistory, IPStatus
 from models.switch import Switch
 from models.arp_table import ARPTable
@@ -833,6 +833,7 @@ class IPAMService:
             new_devices = 0
             changed_devices = 0
             ordered_scan_results = []
+            history_rows = []  # bulk insert accumulator
 
             for ip_str in ip_list:
                 scan_result = final_results_by_ip.get(ip_str)
@@ -948,26 +949,41 @@ class IPAMService:
                 if status_changed or hostname_changed or os_changed or mac_changed or switch_changed or port_changed:
                     changed_devices += 1
 
-                # Create history record with network location tracking
-                history = IPScanHistory(
-                    ip_address_id=ip_addr.id,
-                    is_reachable=scan_result['is_reachable'],
-                    response_time=scan_result['response_time'],
-                    hostname=ip_addr.hostname,
-                    mac_address=new_mac,
-                    os_type=ip_addr.os_type,
-                    os_name=ip_addr.os_name,
-                    switch_id=ip_addr.switch_id,
-                    switch_port=ip_addr.switch_port,
-                    vlan_id=ip_addr.vlan_id,
-                    status_changed=status_changed,
-                    hostname_changed=hostname_changed,
-                    os_changed=os_changed,
-                    mac_changed=mac_changed,
-                    switch_changed=switch_changed,
-                    port_changed=port_changed
-                )
-                db.add(history)
+                # Determine if history should be recorded for this IP
+                has_change = any([
+                    status_changed, hostname_changed, os_changed,
+                    mac_changed, switch_changed, port_changed
+                ])
+                record_history = settings.IP_SCAN_HISTORY_RECORD_ALL or has_change
+
+                if record_history:
+                    history_rows.append({
+                        'ip_address_id': ip_addr.id,
+                        'is_reachable': scan_result['is_reachable'],
+                        'response_time': scan_result['response_time'],
+                        'hostname': ip_addr.hostname,
+                        'mac_address': new_mac,
+                        'os_type': ip_addr.os_type,
+                        'os_name': ip_addr.os_name,
+                        'switch_id': ip_addr.switch_id,
+                        'switch_port': ip_addr.switch_port,
+                        'vlan_id': ip_addr.vlan_id,
+                        'status_changed': status_changed,
+                        'hostname_changed': hostname_changed,
+                        'os_changed': os_changed,
+                        'mac_changed': mac_changed,
+                        'switch_changed': switch_changed,
+                        'port_changed': port_changed
+                    })
+
+            # Bulk insert history records
+            if history_rows:
+                chunk_size = settings.IP_SCAN_HISTORY_BULK_INSERT_BATCH
+                for i in range(0, len(history_rows), chunk_size):
+                    chunk = history_rows[i:i + chunk_size]
+                    stmt = insert(IPScanHistory).values(chunk)
+                    await db.execute(stmt)
+                logger.info(f"Bulk inserted {len(history_rows)} history records for subnet {subnet_id}")
 
             await db.commit()
 
@@ -1279,7 +1295,7 @@ class IPAMService:
                         dns_servers=subnet_data.get('dns_servers'),
                         enabled=subnet_data.get('enabled', True),
                         auto_scan=subnet_data.get('auto_scan', True),
-                        scan_interval=subnet_data.get('scan_interval', 3600)
+                        scan_interval=subnet_data.get('scan_interval', settings.IPAM_DEFAULT_SCAN_INTERVAL)
                     )
 
                     db.add(subnet)
@@ -1407,38 +1423,70 @@ class IPAMService:
             )
         )
 
-        for index, (subnet_id, subnet_name, subnet_network) in enumerate(selected_due_subnets, start=1):
-            subnet_db = None
+        # Concurrent subnet scanning with semaphore to limit parallelism
+        concurrent_limit = settings.IPAM_CONCURRENT_SUBNETS
+        sem = asyncio.Semaphore(concurrent_limit)
+        scan_results_lock = asyncio.Lock()
 
+        async def _scan_one_subnet(
+            index: int,
+            subnet_id: int,
+            subnet_name: str,
+            subnet_network,
+        ) -> Dict[str, Any]:
+            subnet_db = None
             try:
-                logger.info(f"Scanning subnet: {subnet_name} ({subnet_network})")
-                subnet_db = AsyncSessionLocal()
-                scan_result = await self.scan_subnet(
-                    subnet_db,
-                    subnet_id,
-                    scan_type=scan_type,
-                    include_results=False,
-                    progress_callback=progress_callback,
-                    subnet_index=index,
-                    total_subnets=len(selected_due_subnets)
-                )
-                scanned_count += 1
-                total_ips += scan_result.get('total_scanned', 0)
-                logger.info(
-                    f"Completed scan for {subnet_name}: "
-                    f"{scan_result.get('reachable', 0)}/{scan_result.get('total_scanned', 0)} reachable"
-                )
+                async with sem:
+                    # Check for cancellation before starting this subnet
+                    from services.ipam_scan_status import ipam_scan_status_service
+                    if ipam_scan_status_service.is_cancelled():
+                        logger.info(f"Skipping subnet {subnet_name} - scan cancelled")
+                        return None
+
+                    logger.info(f"Scanning subnet: {subnet_name} ({subnet_network})")
+                    subnet_db = AsyncSessionLocal()
+                    scan_result = await self.scan_subnet(
+                        subnet_db,
+                        subnet_id,
+                        scan_type=scan_type,
+                        include_results=False,
+                        progress_callback=progress_callback,
+                        subnet_index=index,
+                        total_subnets=len(selected_due_subnets)
+                    )
+                    logger.info(
+                        f"Completed scan for {subnet_name}: "
+                        f"{scan_result.get('reachable', 0)}/{scan_result.get('total_scanned', 0)} reachable"
+                    )
+                    return scan_result
             except Exception as e:
                 logger.error(f"Failed to scan subnet {subnet_name}: {str(e)}")
-                failed_subnets.append({
-                    'subnet_id': subnet_id,
-                    'subnet_name': subnet_name,
-                    'error': str(e)
-                })
+                async with scan_results_lock:
+                    failed_subnets.append({
+                        'subnet_id': subnet_id,
+                        'subnet_name': subnet_name,
+                        'error': str(e)
+                    })
+                return None
             finally:
                 if subnet_db is not None:
                     await subnet_db.close()
-                self._release_scan_memory(f"auto-scan subnet {subnet_id}")
+
+        tasks = [
+            _scan_one_subnet(idx, sid, sname, snet)
+            for idx, (sid, sname, snet) in enumerate(selected_due_subnets, start=1)
+        ]
+
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+
+            for result in results:
+                if result is not None:
+                    scanned_count += 1
+                    total_ips += result.get('total_scanned', 0)
+
+        # Release memory once after all concurrent scans complete
+        self._release_scan_memory("auto-scan batch")
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 

@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     DATABASE_HOST: str = "localhost"
     DATABASE_PORT: int = 5432
     DATABASE_NAME: str = "iptrack"
-    DATABASE_POOL_SIZE: int = 20
-    DATABASE_MAX_OVERFLOW: int = 10
+    DATABASE_POOL_SIZE: int = 40
+    DATABASE_MAX_OVERFLOW: int = 20
     DATABASE_POOL_TIMEOUT: int = 30
     DATABASE_ECHO_SQL: bool = False
 
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     # Collection Scheduler
     COLLECTION_ENABLED: bool = True
     COLLECTION_INTERVAL_MINUTES: int = 120
-    IPAM_SCAN_INTERVAL_MINUTES: int = 60
+    IPAM_SCAN_INTERVAL_MINUTES: int = 30
     OPTICAL_MODULE_INTERVAL_MINUTES: int = 720
     ALARM_CLEANUP_HOUR: int = 3
     ALARM_RETENTION_DAYS: int = 30
@@ -65,8 +65,14 @@ class Settings(BaseSettings):
 
     # IPAM Settings
     IPAM_OFFLINE_THRESHOLD_HOURS: int = 6  # Hours without response before marking as offline
-    IP_SCAN_HISTORY_RETENTION_DAYS: int = 30
+    IP_SCAN_HISTORY_RETENTION_DAYS: int = 14
     IP_SCAN_HISTORY_CLEANUP_BATCH_SIZE: int = 50000
+    IPAM_DEFAULT_SCAN_INTERVAL: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Default scan interval in seconds for imported subnets without explicit interval"
+    )
     IPAM_STARTUP_CATCHUP_DELAY_SECONDS: int = Field(
         default=300,
         ge=0,
@@ -74,10 +80,74 @@ class Settings(BaseSettings):
         description="Delay before the IPAM service runs its startup catch-up scan"
     )
     IPAM_STARTUP_CATCHUP_MAX_SUBNETS: int = Field(
-        default=5,
+        default=50,
         ge=0,
         le=500,
         description="Maximum overdue subnets to scan during startup catch-up; 0 disables startup catch-up"
+    )
+
+    # IPAM Scale Configuration (1000+ subnets)
+    IPAM_CONCURRENT_SUBNETS: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Maximum subnets scanned concurrently in a single auto-scan pass"
+    )
+    IPAM_MAX_SUBNETS_PER_PASS: int = Field(
+        default=200,
+        ge=0,
+        le=2000,
+        description="Cap on subnets per auto-scan pass; 0 = unlimited"
+    )
+    IPAM_CONCURRENT_IPS_PER_SUBNET: int = Field(
+        default=20,
+        ge=5,
+        le=100,
+        description="Concurrent ping/scan operations within a single subnet scan"
+    )
+    IPAM_SCAN_HARD_TIMEOUT_SECONDS: int = Field(
+        default=3600,
+        ge=600,
+        le=14400,
+        description="Hard timeout for the entire auto-scan pass"
+    )
+    IP_SCAN_HISTORY_RECORD_ALL: bool = Field(
+        default=True,
+        description="Record history for all IPs (True) or only changed IPs (False)"
+    )
+    IP_SCAN_HISTORY_BULK_INSERT_BATCH: int = Field(
+        default=1000,
+        ge=100,
+        le=10000,
+        description="Number of history rows per bulk INSERT statement"
+    )
+
+    # IP Scan Timeouts (seconds)
+    IP_SCAN_DNS_TIMEOUT: int = Field(
+        default=5,
+        ge=1,
+        le=30,
+        description="DNS PTR lookup timeout in seconds"
+    )
+    IP_SCAN_NETBIOS_TIMEOUT: float = Field(
+        default=1.5,
+        ge=0.5,
+        le=10.0,
+        description="NetBIOS node status query timeout in seconds"
+    )
+    IP_SCAN_ARP_TIMEOUT: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="ARP cache lookup subprocess timeout in seconds"
+    )
+
+    # SSE Progress
+    IPAM_SSE_THROTTLE_MS: int = Field(
+        default=250,
+        ge=50,
+        le=2000,
+        description="Min interval between SSE progress broadcasts (milliseconds)"
     )
 
     # IP Lookup Settings

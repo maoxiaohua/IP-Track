@@ -93,6 +93,14 @@ services:
       - iptrack-network
     restart: unless-stopped
     command: ["uvicorn", "main_ipam:app", "--host", "0.0.0.0", "--port", "8100"]
+    deploy:
+      resources:
+        limits:
+          cpus: '${IPAM_CPU_LIMIT:-4.0}'
+          memory: ${IPAM_MEMORY_LIMIT:-4G}
+        reservations:
+          cpus: '${IPAM_CPU_RESERVE:-2.0}'
+          memory: ${IPAM_MEMORY_RESERVE:-2G}
 
   # Backend Collection Service (Network Data Collection, Discovery)
   backend-collector:

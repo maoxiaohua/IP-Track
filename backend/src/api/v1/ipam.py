@@ -35,6 +35,7 @@ from schemas.ipam import (
 from services.ipam_service import ipam_service
 from services.ipam_scan_status import ipam_scan_status_service
 from services.network_scheduler import network_scheduler
+from core.config import settings
 from models.ipam import IPAddress
 from utils.logger import logger
 
@@ -279,7 +280,7 @@ async def import_subnets_from_excel(
                     'dns_servers': str(dns_servers).strip() if dns_servers else None,
                     'enabled': True,
                     'auto_scan': True,
-                    'scan_interval': 3600
+                    'scan_interval': settings.IPAM_DEFAULT_SCAN_INTERVAL
                 }
 
                 subnets_data.append(subnet_data)
@@ -850,6 +851,29 @@ async def start_scan_stream(
     return {
         "session_id": session_id,
         "message": f"已启动后台扫描：{subnet_label}",
+        "status": ipam_scan_status_service.get_status()
+    }
+
+
+@router.delete("/scan/current", status_code=status.HTTP_200_OK)
+async def cancel_current_scan():
+    """
+    Cancel the currently running IPAM scan (manual or auto).
+
+    Sets a cancellation flag that the running scan task checks between subnets.
+    The scan will stop after the current subnet completes.
+    """
+    if not network_scheduler.is_ipam_scan_running():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="当前没有正在运行的扫描任务"
+        )
+
+    ipam_scan_status_service.cancel_scan()
+    logger.info("IPAM scan cancellation requested via API")
+
+    return {
+        "message": "已请求取消当前扫描，将在当前子网完成后停止",
         "status": ipam_scan_status_service.get_status()
     }
 
