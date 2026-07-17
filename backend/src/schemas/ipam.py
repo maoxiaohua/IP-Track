@@ -47,6 +47,7 @@ class IPSubnetResponse(IPSubnetBase):
     """Schema for IP subnet response"""
     id: int
     last_scan_at: Optional[datetime]
+    last_enrichment_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     total_ips: Optional[int] = None
@@ -259,6 +260,7 @@ class IPSubnetStatistics(BaseModel):
     utilization_percent: float
     reachable_count: int
     last_scan_at: Optional[datetime]
+    last_enrichment_at: Optional[datetime] = None
 
 
 class IPAMDashboard(BaseModel):

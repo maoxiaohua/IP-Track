@@ -88,6 +88,7 @@ async def create_subnet(
             "auto_scan": result.auto_scan,
             "scan_interval": result.scan_interval,
             "last_scan_at": result.last_scan_at,
+            "last_enrichment_at": result.last_enrichment_at,
             "created_at": result.created_at,
             "updated_at": result.updated_at,
             **stats
@@ -359,6 +360,7 @@ async def list_subnets(
             "auto_scan": subnet.auto_scan,
             "scan_interval": subnet.scan_interval,
             "last_scan_at": subnet.last_scan_at,
+            "last_enrichment_at": subnet.last_enrichment_at,
             "created_at": subnet.created_at,
             "updated_at": subnet.updated_at,
             **stats
@@ -395,6 +397,7 @@ async def get_subnet(
         "auto_scan": subnet.auto_scan,
         "scan_interval": subnet.scan_interval,
         "last_scan_at": subnet.last_scan_at,
+        "last_enrichment_at": subnet.last_enrichment_at,
         "created_at": subnet.created_at,
         "updated_at": subnet.updated_at,
         **stats
@@ -442,6 +445,7 @@ async def update_subnet(
             "auto_scan": subnet.auto_scan,
             "scan_interval": subnet.scan_interval,
             "last_scan_at": subnet.last_scan_at,
+            "last_enrichment_at": subnet.last_enrichment_at,
             "created_at": subnet.created_at,
             "updated_at": subnet.updated_at,
             **stats
@@ -477,7 +481,8 @@ async def get_subnet_statistics(
         'subnet_name': subnet.name,
         'network': str(subnet.network),
         **stats,
-        'last_scan_at': subnet.last_scan_at
+        'last_scan_at': subnet.last_scan_at,
+        'last_enrichment_at': subnet.last_enrichment_at
     }
 
 

@@ -12,7 +12,13 @@
               <span> | </span>
               <span class="used-count">{{ subnet.used_ips || 0 }} used</span>
               <span> | </span>
-              <span>Last Scan: {{ subnet.last_scan_at ? formatDateTime(subnet.last_scan_at) : 'Never' }}</span>
+              <span>Last Scan: </span>
+              <span v-if="subnet.last_scan_at">{{ formatDateTime(subnet.last_scan_at) }}</span>
+              <el-tag v-else type="warning" size="small">从未扫描</el-tag>
+              <span> | </span>
+              <span>Last Enrichment: </span>
+              <span v-if="subnet.last_enrichment_at">{{ formatDateTime(subnet.last_enrichment_at) }}</span>
+              <el-tag v-else type="info" size="small">未识别</el-tag>
             </div>
           </div>
           <div style="display: flex; gap: 10px">
@@ -24,7 +30,7 @@
               <el-icon><Edit /></el-icon>
               编辑子网
             </el-button>
-            <el-button v-if="!scanStatus?.running" type="success" @click="scanSubnet" :loading="scanning || isCurrentSubnetScanning">
+            <el-button v-if="!scanStatus?.running" type="success" @click="scanSubnet" :loading="scanning || isCurrentSubnetScanning" :disabled="scanning || isCurrentSubnetScanning">
               <el-icon><Refresh /></el-icon>
               扫描子网
             </el-button>
@@ -337,6 +343,7 @@ interface IPAddress {
   description?: string
   last_seen_at?: string
   last_scan_at?: string
+  last_enrichment_at?: string
 }
 
 interface Subnet {
@@ -348,6 +355,7 @@ interface Subnet {
   available_ips: number
   used_ips: number
   last_scan_at?: string
+  last_enrichment_at?: string
 }
 
 const route = useRoute()

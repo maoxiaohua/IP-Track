@@ -194,7 +194,15 @@
 
         <el-table-column label="Last Scan" min-width="180">
           <template #default="{ row }">
-            {{ row.last_scan_at ? formatDateTime(row.last_scan_at) : 'Never' }}
+            <span v-if="row.last_scan_at" style="color: #374151">{{ formatDateTime(row.last_scan_at) }}</span>
+            <el-tag v-else type="warning" size="small">从未扫描</el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="Last Enrichment" min-width="180">
+          <template #default="{ row }">
+            <span v-if="row.last_enrichment_at" style="color: #374151">{{ formatDateTime(row.last_enrichment_at) }}</span>
+            <el-tag v-else type="info" size="small">未识别</el-tag>
           </template>
         </el-table-column>
 
@@ -211,6 +219,7 @@
               size="small"
               type="success"
               :loading="isSubnetScanning(row.subnet_id)"
+              :disabled="isSubnetScanning(row.subnet_id)"
               @click.stop="scanSubnet(row)"
             >
               扫描
@@ -505,6 +514,7 @@ interface Subnet {
   reserved_ips: number
   utilization_percent: number
   last_scan_at?: string
+  last_enrichment_at?: string
 }
 
 const router = useRouter()

@@ -830,6 +830,8 @@ class IPAMService:
                     else:
                         final_results_by_ip[ip_str] = enrichment_result
 
+                subnet.last_enrichment_at = datetime.now(timezone.utc)
+
             new_devices = 0
             changed_devices = 0
             ordered_scan_results = []
@@ -1179,7 +1181,8 @@ class IPAMService:
                 'auto_scan': subnet.auto_scan,
                 'scan_interval': subnet.scan_interval,
                 **subnet_stat,
-                'last_scan_at': subnet.last_scan_at
+                'last_scan_at': subnet.last_scan_at,
+                'last_enrichment_at': subnet.last_enrichment_at
             })
 
         # Recent changes (last 24 hours)
@@ -1371,6 +1374,8 @@ class IPAMService:
                     IPSubnet.enabled == True,
                     IPSubnet.auto_scan == True
                 )
+            ).order_by(
+                IPSubnet.last_scan_at.asc().nullsfirst()
             )
         )
         subnets = result.all()
@@ -1511,6 +1516,242 @@ class IPAMService:
 
         self._release_scan_memory("automatic subnet scan pass")
 
+        return summary
+
+    async def enrich_all_due_subnets(
+        self,
+        db: AsyncSession,
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None] | None]] = None,
+        max_subnets: Optional[int] = None,
+    ) -> Dict:
+        """
+        Enrich subnets that have been quick-scanned but never enriched (or whose
+        enrichment is overdue).  Only targets subnets with reachable IPs.
+
+        Runs hostname/DNS/SNMP resolution independently of the quick ping scan
+        so that slow enrichment never blocks reachability updates.
+        """
+        logger.info("Starting automatic enrichment pass")
+        start_time = datetime.now(timezone.utc)
+
+        result = await db.execute(
+            select(
+                IPSubnet.id,
+                IPSubnet.name,
+                IPSubnet.network,
+                IPSubnet.last_enrichment_at,
+            ).where(
+                and_(
+                    IPSubnet.enabled == True,
+                    IPSubnet.auto_scan == True,
+                    IPSubnet.last_scan_at.isnot(None),
+                )
+            ).order_by(
+                IPSubnet.last_enrichment_at.asc().nullsfirst()
+            )
+        )
+        subnets = result.all()
+        await db.commit()
+
+        if not subnets:
+            logger.info("No subnets eligible for enrichment")
+            return {
+                'total_subnets': 0,
+                'enriched_subnets': 0,
+                'total_ips_enriched': 0,
+                'duration': 0,
+            }
+
+        now = datetime.now(timezone.utc)
+        due_subnets = []
+        for subnet_id, subnet_name, subnet_network, last_enrichment_at in subnets:
+            if last_enrichment_at:
+                seconds_since = (now - last_enrichment_at).total_seconds()
+                if seconds_since < settings.IPAM_ENRICHMENT_INTERVAL_MINUTES * 60:
+                    continue
+            due_subnets.append((subnet_id, subnet_name, subnet_network))
+
+        total_due = len(due_subnets)
+        if max_subnets is not None and max_subnets >= 0:
+            due_subnets = due_subnets[:max_subnets]
+
+        logger.info(
+            f"{total_due} subnets due for enrichment"
+            + (f"; limiting to {len(due_subnets)}" if max_subnets else "")
+        )
+
+        if not due_subnets:
+            return {
+                'total_subnets': total_due,
+                'enriched_subnets': 0,
+                'total_ips_enriched': 0,
+                'duration': (datetime.now(timezone.utc) - start_time).total_seconds(),
+            }
+
+        enriched_count = 0
+        total_ips = 0
+        failed_subnets = []
+
+        async def _enrich_one_subnet(
+            index: int,
+            subnet_id: int,
+            subnet_name: str,
+            subnet_network,
+        ) -> Optional[int]:
+            enrich_db = None
+            try:
+                enrich_db = AsyncSessionLocal()
+                subnet = await self.get_subnet(enrich_db, subnet_id)
+                if not subnet:
+                    return None
+
+                snmp_profile = None
+                if subnet.snmp_profile_id:
+                    from models.ipam import SNMPProfile
+                    prof_result = await enrich_db.execute(
+                        select(SNMPProfile).where(SNMPProfile.id == subnet.snmp_profile_id)
+                    )
+                    profile = prof_result.scalar_one_or_none()
+                    if profile and profile.enabled:
+                        snmp_profile = {
+                            'username': profile.username,
+                            'auth_protocol': profile.auth_protocol,
+                            'auth_password_encrypted': profile.auth_password_encrypted,
+                            'priv_protocol': profile.priv_protocol,
+                            'priv_password_encrypted': profile.priv_password_encrypted,
+                            'port': profile.port,
+                            'timeout': profile.timeout,
+                        }
+
+                dns_servers = None
+                if subnet.dns_servers:
+                    dns_servers = [s.strip() for s in subnet.dns_servers.split(',') if s.strip()]
+
+                ip_result = await enrich_db.execute(
+                    select(IPAddress).where(
+                        and_(
+                            IPAddress.subnet_id == subnet_id,
+                            IPAddress.is_reachable == True,
+                        )
+                    )
+                )
+                reachable_ips = ip_result.scalars().all()
+                await enrich_db.commit()
+
+                if not reachable_ips:
+                    # Mark as enriched even with no reachable IPs so we don't retry every pass
+                    subnet.last_enrichment_at = datetime.now(timezone.utc)
+                    await enrich_db.commit()
+                    return 0
+
+                reachable_ip_list = [str(ip.ip_address) for ip in reachable_ips]
+                logger.info(
+                    f"Enriching subnet {subnet_name}: {len(reachable_ip_list)} reachable IPs"
+                )
+
+                enrichment_results = await ip_scan_service.enrich_multiple_ips(
+                    reachable_ip_list,
+                    snmp_profile,
+                    dns_servers,
+                    progress_callback=None,
+                )
+
+                for enr in enrichment_results:
+                    ip_str = enr['ip_address']
+                    ip_addr_result = await enrich_db.execute(
+                        select(IPAddress).where(
+                            and_(
+                                IPAddress.subnet_id == subnet_id,
+                                func.host(IPAddress.ip_address) == ip_str,
+                            )
+                        )
+                    )
+                    ip_addr = ip_addr_result.scalar_one_or_none()
+                    if not ip_addr:
+                        continue
+
+                    if enr.get('hostname'):
+                        ip_addr.hostname = enr['hostname']
+                    if enr.get('hostname_source'):
+                        ip_addr.hostname_source = enr['hostname_source']
+                    if enr.get('dns_name'):
+                        ip_addr.dns_name = enr['dns_name']
+                    if enr.get('system_name'):
+                        ip_addr.system_name = enr['system_name']
+                    if enr.get('contact'):
+                        ip_addr.contact = enr['contact']
+                    if enr.get('location'):
+                        ip_addr.location = enr['location']
+                    if enr.get('machine_type'):
+                        ip_addr.machine_type = enr['machine_type']
+                    if enr.get('vendor'):
+                        ip_addr.vendor = enr['vendor']
+                    if enr.get('os_type'):
+                        ip_addr.os_type = enr['os_type']
+                    if enr.get('os_name'):
+                        ip_addr.os_name = enr['os_name']
+                    if enr.get('os_version'):
+                        ip_addr.os_version = enr['os_version']
+                    if enr.get('os_vendor'):
+                        ip_addr.os_vendor = enr['os_vendor']
+                    if enr.get('mac_address'):
+                        ip_addr.mac_address = enr['mac_address']
+                        await self._update_switch_info(enrich_db, ip_addr, enr['mac_address'])
+
+                subnet.last_enrichment_at = datetime.now(timezone.utc)
+                await enrich_db.commit()
+                return len(reachable_ip_list)
+
+            except Exception as e:
+                logger.error(f"Enrichment failed for {subnet_name}: {e}")
+                async with scan_results_lock:
+                    failed_subnets.append({
+                        'subnet_id': subnet_id,
+                        'subnet_name': subnet_name,
+                        'error': str(e),
+                    })
+                return None
+            finally:
+                if enrich_db is not None:
+                    await enrich_db.close()
+
+        concurrent_limit = settings.IPAM_CONCURRENT_SUBNETS
+        sem = asyncio.Semaphore(concurrent_limit)
+        scan_results_lock = asyncio.Lock()
+
+        async def _enrich_with_semaphore(idx, sid, sname, snet):
+            async with sem:
+                return await _enrich_one_subnet(idx, sid, sname, snet)
+
+        tasks = [
+            _enrich_with_semaphore(idx, sid, sname, snet)
+            for idx, (sid, sname, snet) in enumerate(due_subnets, start=1)
+        ]
+
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+            for result in results:
+                if result is not None:
+                    enriched_count += 1
+                    total_ips += result
+
+        self._release_scan_memory("enrichment batch")
+
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        summary = {
+            'total_subnets': len(due_subnets),
+            'total_due_subnets': total_due,
+            'enriched_subnets': enriched_count,
+            'failed_subnets': len(failed_subnets),
+            'total_ips_enriched': total_ips,
+            'duration': elapsed,
+            'failures': failed_subnets,
+        }
+
+        logger.info(
+            f"Enrichment pass completed: {enriched_count}/{len(due_subnets)} subnets, "
+            f"{total_ips} IPs enriched, duration={elapsed:.1f}s"
+        )
         return summary
 
     async def cleanup_old_scan_history(

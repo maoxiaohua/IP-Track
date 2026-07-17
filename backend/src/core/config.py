@@ -106,10 +106,28 @@ class Settings(BaseSettings):
         description="Concurrent ping/scan operations within a single subnet scan"
     )
     IPAM_SCAN_HARD_TIMEOUT_SECONDS: int = Field(
-        default=3600,
+        default=7200,
         ge=600,
         le=14400,
         description="Hard timeout for the entire auto-scan pass"
+    )
+    IPAM_ENRICHMENT_INTERVAL_MINUTES: int = Field(
+        default=240,
+        ge=60,
+        le=1440,
+        description="Interval between automatic enrichment passes (hostname/DNS/SNMP)"
+    )
+    IPAM_ENRICHMENT_MAX_SUBNETS: int = Field(
+        default=50,
+        ge=10,
+        le=500,
+        description="Maximum subnets per enrichment pass"
+    )
+    IPAM_ENRICHMENT_HARD_TIMEOUT_SECONDS: int = Field(
+        default=3600,
+        ge=600,
+        le=14400,
+        description="Hard timeout for a single enrichment pass"
     )
     IP_SCAN_HISTORY_RECORD_ALL: bool = Field(
         default=True,

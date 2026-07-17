@@ -26,6 +26,7 @@ export interface IPAddressDetail {
   last_seen_at?: string
   last_boot_time?: string
   last_scan_at?: string
+  last_enrichment_at?: string
   description?: string
 }
 

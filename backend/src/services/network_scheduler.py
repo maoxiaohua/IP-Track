@@ -52,6 +52,50 @@ class NetworkCollectionScheduler:
             task.cancel()
         self._startup_ipam_catchup_task = None
 
+    async def _schedule_startup_enrichment(self) -> None:
+        """Wait for startup catch-up scan to finish, then run an enrichment pass."""
+        try:
+            # Wait for the initial catch-up delay plus some buffer for the scan itself
+            await asyncio.sleep(settings.IPAM_STARTUP_CATCHUP_DELAY_SECONDS + 120)
+
+            async with AsyncSessionLocal() as db:
+                # Check if there are subnets that need enrichment
+                from models.ipam import IPSubnet
+                from sqlalchemy import and_
+
+                result = await db.execute(
+                    select(func.count(IPSubnet.id)).where(
+                        and_(
+                            IPSubnet.enabled == True,
+                            IPSubnet.auto_scan == True,
+                            IPSubnet.last_scan_at.isnot(None),
+                            IPSubnet.last_enrichment_at.is_(None),
+                        )
+                    )
+                )
+                count = result.scalar() or 0
+
+            if count == 0:
+                logger.info("Startup enrichment skipped: no subnets need enrichment")
+                return
+
+            logger.info(f"Triggering startup enrichment for {count} never-enriched subnets")
+            await self._run_ipam_enrichment()
+        except asyncio.CancelledError:
+            logger.info("Startup enrichment was cancelled")
+        except Exception as e:
+            logger.error(f"Startup enrichment failed: {str(e)}", exc_info=True)
+
+    async def _retry_enrichment_after_delay(self, delay_seconds: int) -> None:
+        """Retry enrichment after a delay when the scan lock was busy."""
+        try:
+            await asyncio.sleep(delay_seconds)
+            await self._run_ipam_enrichment()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Enrichment retry failed: {str(e)}", exc_info=True)
+
     def get_ipam_scan_busy_message(self) -> str:
         """Return a friendly conflict message for concurrent IPAM scans."""
         if self._current_ipam_scan_context:
@@ -117,6 +161,16 @@ class NetworkCollectionScheduler:
                 trigger=IntervalTrigger(minutes=self.ipam_scan_interval_minutes),
                 id='ipam_auto_scan',
                 name='IPAM Auto Scan',
+                replace_existing=True,
+                max_instances=1
+            )
+
+            # Add IPAM auto-enrichment job (runs independently, hostname/DNS/SNMP only)
+            self.scheduler.add_job(
+                self._run_ipam_enrichment,
+                trigger=IntervalTrigger(minutes=settings.IPAM_ENRICHMENT_INTERVAL_MINUTES),
+                id='ipam_auto_enrichment',
+                name='IPAM Auto Enrichment',
                 replace_existing=True,
                 max_instances=1
             )
@@ -595,6 +649,51 @@ class NetworkCollectionScheduler:
             elapsed = (datetime.now() - start_time).total_seconds()
             logger.info(f"IPAM auto-scan finished in {elapsed:.1f}s")
 
+    async def _run_ipam_enrichment(self):
+        """Run IPAM enrichment pass - hostname/DNS/SNMP only, independent of quick scan"""
+        if self._ipam_scan_lock.locked():
+            logger.info("Skipping IPAM enrichment because a scan is already running, will retry in 120s")
+            asyncio.create_task(self._retry_enrichment_after_delay(120))
+            return
+
+        try:
+            await asyncio.wait_for(
+                self._do_ipam_enrichment(),
+                timeout=settings.IPAM_ENRICHMENT_HARD_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"IPAM enrichment timed out after {settings.IPAM_ENRICHMENT_HARD_TIMEOUT_SECONDS}s")
+
+    async def _do_ipam_enrichment(self):
+        async with self._ipam_scan_lock:
+            logger.info("Scheduled IPAM enrichment started")
+            start_time = datetime.now()
+
+            try:
+                from services.ipam_service import ipam_service
+
+                async with AsyncSessionLocal() as db:
+                    try:
+                        summary = await ipam_service.enrich_all_due_subnets(
+                            db,
+                            progress_callback=None,
+                            max_subnets=settings.IPAM_ENRICHMENT_MAX_SUBNETS,
+                        )
+                        logger.info(
+                            f"IPAM enrichment completed: "
+                            f"{summary['enriched_subnets']}/{summary['total_subnets']} subnets enriched, "
+                            f"{summary['total_ips_enriched']} IPs total"
+                        )
+                    except Exception as e:
+                        await db.rollback()
+                        logger.error(f"IPAM enrichment failed: {str(e)}", exc_info=True)
+
+            except Exception as e:
+                logger.error(f"IPAM enrichment error: {str(e)}", exc_info=True)
+
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.info(f"IPAM enrichment finished in {elapsed:.1f}s")
+
     async def _run_optical_module_collection(self):
         """Run optical module collection from all switches via worker pool"""
         logger.info("Scheduled optical module collection started - creating jobs for worker pool")
@@ -783,11 +882,26 @@ async def start_ipam_scheduler():
                 max_instances=1
             )
 
+            scheduler.add_job(
+                network_scheduler._run_ipam_enrichment,
+                trigger=IntervalTrigger(minutes=settings.IPAM_ENRICHMENT_INTERVAL_MINUTES),
+                id='ipam_auto_enrichment',
+                name='IPAM Auto Enrichment',
+                replace_existing=True,
+                max_instances=1
+            )
+
             scheduler.start()
             network_scheduler.is_running = True
             logger.info(f"IPAM scheduler started (interval: {settings.IPAM_SCAN_INTERVAL_MINUTES} min)")
+            logger.info(f"IPAM enrichment scheduler started (interval: {settings.IPAM_ENRICHMENT_INTERVAL_MINUTES} min)")
             asyncio.create_task(
                 network_scheduler.trigger_startup_catchup(include_ipam=True)
+            )
+            # Also schedule a delayed first enrichment pass so never-enriched subnets
+            # get hostname/DNS/SNMP data without waiting a full interval (4h).
+            asyncio.create_task(
+                network_scheduler._schedule_startup_enrichment()
             )
     except Exception as e:
         logger.error(f"Failed to start IPAM scheduler: {str(e)}", exc_info=True)

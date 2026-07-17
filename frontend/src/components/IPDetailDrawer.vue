@@ -75,7 +75,8 @@
             </div>
           </el-descriptions-item>
           <el-descriptions-item label="Last Seen">
-            {{ ipDetail.last_seen_at ? formatDateTime(ipDetail.last_seen_at) : 'Never' }}
+            <span v-if="ipDetail.last_seen_at">{{ formatDateTime(ipDetail.last_seen_at) }}</span>
+            <el-tag v-else type="warning" size="small">从未</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="Description">
             {{ ipDetail.description || '-' }}
