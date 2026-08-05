@@ -235,7 +235,7 @@
     >
       <el-form :model="testForm" label-width="120px">
         <el-form-item label="交换机IP">
-          <el-input v-model="testForm.switch_ip" placeholder="例如: 10.56.4.1" />
+          <el-input v-model="testForm.switch_ip" placeholder="例如: 10.10.10.1" />
         </el-form-item>
 
         <el-form-item label="用户名">

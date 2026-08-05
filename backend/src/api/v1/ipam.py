@@ -1079,7 +1079,7 @@ async def search_network(
     """
     Search for all IPs in a given network (CIDR)
 
-    Example: 10.101.63.0/24
+    Example: 10.10.10.0/24
 
     Returns all IP addresses in the subnet and their usage status.
     If the network exists in IPAM, returns managed IP data.
@@ -1110,7 +1110,7 @@ async def calculate_subnet(
     Calculate subnet information from IP address and netmask
 
     Input:
-    - IP address (e.g., 10.101.63.25)
+    - IP address (e.g., 10.10.10.25)
     - Netmask (e.g., 255.255.255.0 or /24)
 
     Output:

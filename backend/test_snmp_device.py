@@ -105,7 +105,7 @@ async def test_snmp_connection(ip_address: str):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("使用方法: python test_snmp_device.py <IP地址>")
-        print("示例: python test_snmp_device.py 10.71.192.1")
+        print("示例: python test_snmp_device.py 10.10.10.1")
         sys.exit(1)
 
     ip_address = sys.argv[1]

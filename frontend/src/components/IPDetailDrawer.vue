@@ -383,6 +383,7 @@ const getHostnameSourceLabel = (source?: string) => {
     SNMP: 'SNMP',
     DNS: 'DNS PTR',
     NETBIOS: 'NetBIOS',
+    MDNS: 'mDNS',
     ARP: 'ARP',
     SWITCH: 'Switch Cache',
     MANUAL: 'Manual'
@@ -395,6 +396,7 @@ const getHostnameSourceTagType = (source?: string) => {
     SNMP: 'warning',
     DNS: 'success',
     NETBIOS: 'primary',
+    MDNS: 'primary',
     ARP: 'info',
     SWITCH: 'info',
     MANUAL: 'danger'
@@ -409,6 +411,10 @@ const getIdentityHint = (detail: Partial<IPAddressDetail>) => {
 
   if (!getDisplayHostname(detail) && detail.is_reachable && detail.os_type === 'windows') {
     return 'Latest scan reached this Windows host, but neither DNS PTR nor NetBIOS returned a hostname.'
+  }
+
+  if (!getDisplayHostname(detail) && detail.is_reachable && (detail.os_type === 'linux' || detail.os_type === 'macos')) {
+    return 'Latest scan reached this host, but DNS PTR and mDNS did not return a hostname. Ensure avahi-daemon or systemd-resolved is running.'
   }
 
   if (!getDisplayHostname(detail) && detail.is_reachable) {

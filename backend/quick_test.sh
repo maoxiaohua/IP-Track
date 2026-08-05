@@ -51,7 +51,7 @@ if [ -n "$1" ]; then
     nslookup "$1" 2>&1 | grep -E "name =|can't find" | head -1
 else
     echo "5. 跳过DNS PTR测试（未提供IP地址）"
-    echo "   使用方法: ./quick_test.sh 10.101.35.10"
+    echo "   使用方法: ./quick_test.sh 10.10.10.10"
 fi
 echo ""
 

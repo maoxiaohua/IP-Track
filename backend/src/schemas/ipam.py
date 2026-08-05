@@ -321,7 +321,7 @@ class IPSubnetBatchImportResult(BaseModel):
 # Network Search Schemas
 class NetworkSearchRequest(BaseModel):
     """Schema for network search request"""
-    network: str = Field(..., description="Network in CIDR format, e.g., 10.101.63.0/24")
+    network: str = Field(..., description="Network in CIDR format, e.g., 10.10.10.0/24")
 
 
 class NetworkSearchIPResult(BaseModel):
@@ -356,7 +356,7 @@ class NetworkSearchResponse(BaseModel):
 # Subnet Calculator Schemas
 class SubnetCalculatorRequest(BaseModel):
     """Schema for subnet calculator request"""
-    ip_address: str = Field(..., description="IP address (e.g., 10.101.63.25)")
+    ip_address: str = Field(..., description="IP address (e.g., 10.10.10.25)")
     netmask: Optional[str] = Field(None, description="Subnet mask (e.g., 255.255.255.0) or CIDR prefix (e.g., 24)")
 
 

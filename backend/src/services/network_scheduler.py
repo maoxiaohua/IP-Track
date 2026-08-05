@@ -30,12 +30,13 @@ class NetworkCollectionScheduler:
         self.optical_module_interval_minutes = settings.OPTICAL_MODULE_INTERVAL_MINUTES
         self.is_running = False
         self._ipam_scan_lock = asyncio.Lock()
+        self._ipam_enrichment_lock = asyncio.Lock()
         self._current_ipam_scan_context: str | None = None
         self._startup_ipam_catchup_task: asyncio.Task | None = None
 
     def is_ipam_scan_running(self) -> bool:
-        """Return whether any IPAM subnet scan is currently in progress."""
-        return self._ipam_scan_lock.locked()
+        """Return whether any IPAM subnet scan OR enrichment is currently in progress."""
+        return self._ipam_scan_lock.locked() or self._ipam_enrichment_lock.locked()
 
     def set_ipam_scan_context(self, context: str) -> None:
         """Record human-readable context for the active IPAM scan."""
@@ -651,8 +652,8 @@ class NetworkCollectionScheduler:
 
     async def _run_ipam_enrichment(self):
         """Run IPAM enrichment pass - hostname/DNS/SNMP only, independent of quick scan"""
-        if self._ipam_scan_lock.locked():
-            logger.info("Skipping IPAM enrichment because a scan is already running, will retry in 120s")
+        if self._ipam_enrichment_lock.locked():
+            logger.info("Skipping IPAM enrichment because another enrichment is already running, will retry in 120s")
             asyncio.create_task(self._retry_enrichment_after_delay(120))
             return
 
@@ -665,7 +666,7 @@ class NetworkCollectionScheduler:
             logger.error(f"IPAM enrichment timed out after {settings.IPAM_ENRICHMENT_HARD_TIMEOUT_SECONDS}s")
 
     async def _do_ipam_enrichment(self):
-        async with self._ipam_scan_lock:
+        async with self._ipam_enrichment_lock:
             logger.info("Scheduled IPAM enrichment started")
             start_time = datetime.now()
 

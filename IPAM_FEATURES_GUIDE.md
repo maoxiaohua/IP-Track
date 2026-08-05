@@ -42,7 +42,7 @@ python diagnose_ipam.py
 docker exec -it iptrack-backend bash
 
 # 2. 测试DNS PTR
-nslookup 10.101.35.10
+nslookup 10.10.10.10
 
 # 如果返回 "** server can't find..." 说明DNS PTR记录不存在
 ```
@@ -57,11 +57,11 @@ dnsmgmt.msc
 
 # 右键"反向查找区域" → 新建区域
 # 区域类型: 主要区域
-# 区域名称: 35.101.10.in-addr.arpa (对应 10.101.35.0/24)
+# 区域名称: 10.10.10.in-addr.arpa (对应 10.10.10.0/24)
 
 # 添加PTR记录
 Add-DnsServerResourceRecordPtr -Name "10" `
-    -ZoneName "35.101.10.in-addr.arpa" `
+    -ZoneName "10.10.10.in-addr.arpa" `
     -PtrDomainName "pc10.example.com"
 ```
 
@@ -137,20 +137,20 @@ IP-Track通过以下**优先级顺序**获取主机名：
 1. 在Windows DNS服务器上配置PTR记录：
    ```
    DNS管理器 → 反向查找区域 → 新建反向查找区域
-   示例: 10.101.35.0/24 网段
-   - 区域名称: 35.101.10.in-addr.arpa
+   示例: 10.10.10.0/24 网段
+   - 区域名称: 10.10.10.in-addr.arpa
    - 为每个IP添加PTR记录指向主机名
    ```
 
 2. 验证PTR记录是否生效：
    ```bash
    # Linux/Mac
-   nslookup 10.101.35.10
+   nslookup 10.10.10.10
    # 或
-   dig -x 10.101.35.10
+   dig -x 10.10.10.10
 
    # Windows
-   nslookup 10.101.35.10
+   nslookup 10.10.10.10
    ```
 
 3. 如果返回hostname，说明PTR记录配置正确，IP-Track会自动识别。
@@ -179,7 +179,7 @@ IP-Track通过以下**优先级顺序**获取主机名：
 
 ### 当前检测优先级示例
 
-假设IP `10.101.35.10`：
+假设IP `10.10.10.10`：
 - **场景1**: 有SNMP，有DNS PTR
   - ✅ 使用SNMP sysName: `DESKTOP-ABC123`
   - ❌ 忽略DNS PTR: `pc10.example.com`
@@ -194,7 +194,7 @@ IP-Track通过以下**优先级顺序**获取主机名：
 
 ```powershell
 # PowerShell脚本示例 - 批量添加PTR记录
-$subnet = "10.101.35"
+$subnet = "10.10.10"
 $domain = "example.com"
 
 For ($i=1; $i -le 254; $i++) {
@@ -203,7 +203,7 @@ For ($i=1; $i -le 254; $i++) {
 
     # 添加PTR记录
     Add-DnsServerResourceRecordPtr -Name "$i" `
-        -ZoneName "35.101.10.in-addr.arpa" `
+        -ZoneName "10.10.10.in-addr.arpa" `
         -PtrDomainName "$hostname"
 }
 ```
@@ -378,7 +378,7 @@ snmpwalk -v3 \
   -A your_auth_password \
   -x AES \
   -X your_priv_password \
-  10.101.35.10 \
+  10.10.10.10 \
   1.3.6.1.2.1.1.5.0
 
 # 应该返回: SNMPv2-MIB::sysName.0 = STRING: DESKTOP-ABC123
@@ -391,7 +391,7 @@ snmpwalk -v3 \
   -A your_auth_password \
   -x AES \
   -X your_priv_password \
-  10.101.35.10 \
+  10.10.10.10 \
   1.3.6.1.2.1.1.3.0
 
 # 应该返回: DISMAN-EVENT-MIB::sysUpTimeInstance = Timeticks: (123456789) 14 days, 6:56:07.89
@@ -510,7 +510,7 @@ docker logs iptrack-backend | grep -i "snmp\|dns"
 snmpget -v3 -u snmp_monitor -l authPriv \
   -a SHA -A auth_pass \
   -x AES -X priv_pass \
-  10.101.35.10 1.3.6.1.2.1.1.3.0
+  10.10.10.10 1.3.6.1.2.1.1.3.0
 ```
 
 ### 问题3: OS检测不准确
@@ -567,7 +567,7 @@ snmpget -v3 -u snmp_monitor -l authPriv \
 # 仅配置DNS PTR记录
 # Windows DNS服务器:
 Add-DnsServerResourceRecordPtr -Name "10" \
-  -ZoneName "35.101.10.in-addr.arpa" \
+  -ZoneName "10.10.10.in-addr.arpa" \
   -PtrDomainName "pc10.example.com"
 ```
 
@@ -602,17 +602,17 @@ Add-DnsServerResourceRecordPtr -Name "10" \
 
 ```bash
 # 测试1: DNS PTR
-nslookup 10.101.35.10
+nslookup 10.10.10.10
 # 期望: 返回主机名
 
 # 测试2: SNMP sysName
 snmpget -v3 -u monitor -l authPriv -a SHA -A pass -x AES -X pass \
-  10.101.35.10 1.3.6.1.2.1.1.5.0
+  10.10.10.10 1.3.6.1.2.1.1.5.0
 # 期望: 返回sysName
 
 # 测试3: SNMP sysUpTime
 snmpget -v3 -u monitor -l authPriv -a SHA -A pass -x AES -X pass \
-  10.101.35.10 1.3.6.1.2.1.1.3.0
+  10.10.10.10 1.3.6.1.2.1.1.3.0
 # 期望: 返回Timeticks
 
 # 测试4: 在IP-Track触发扫描

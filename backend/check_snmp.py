@@ -35,7 +35,7 @@ def check_snmp_profiles():
             if not profiles:
                 print("❌ 没有配置SNMP Profile")
                 print("\n建议: 在Web界面创建SNMP Profile")
-                print("   路径: http://10.56.4.137:8001/snmp-profiles")
+                print("   路径: http://<host-ip>:8001/snmp-profiles")
                 return
 
             print(f"✅ 找到 {len(profiles)} 个SNMP Profile:\n")

@@ -71,7 +71,7 @@ Available nsock engines: epoll poll select
 sudo docker exec -it iptrack-backend bash
 
 # 在容器内测试
-nmap -O --osscan-guess 10.71.192.1
+nmap -O --osscan-guess 10.10.10.1
 
 # 退出容器
 exit

@@ -19,6 +19,7 @@ class HostnameSource(str, enum.Enum):
     SNMP = "SNMP"        # From SNMP sysName (OID 1.3.6.1.2.1.1.5.0)
     DNS = "DNS"          # From DNS reverse lookup (PTR record)
     NETBIOS = "NETBIOS"  # From NetBIOS node status (Windows hosts)
+    MDNS = "MDNS"        # From mDNS unicast query (Linux/Mac hosts)
     ARP = "ARP"          # From switch ARP table
     SWITCH = "SWITCH"    # From switch inventory when IP itself is a switch
     MANUAL = "MANUAL"    # Manually entered by user

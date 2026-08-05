@@ -56,7 +56,7 @@ class DellHandler(VendorHandler):
         Example output (S5232):
         Address        Hardware address    Interface                     Egress Interface
         ------------------------------------------------------------------------------------------
-        10.71.193.15   50:e0:ef:73:8f:f2   ethernet1/1/2                 ethernet1/1/2
+        10.10.10.15   50:e0:ef:73:8f:f2   ethernet1/1/2                 ethernet1/1/2
 
         Example output (older Dell):
         192.168.1.100   00:50:56:c0:00:01   Vlan 1          Dynamic

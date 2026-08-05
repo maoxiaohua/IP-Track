@@ -257,6 +257,70 @@ class IPScanService:
                 except Exception:
                     pass
 
+    def _get_mdns_hostname(self, ip: str, timeout: float = None) -> Optional[str]:
+        """
+        Query mDNS via unicast (UDP 5353) for the hostname.
+
+        Sends a PTR query for the reversed IP address directly to the target
+        on port 5353.  Most modern Linux distributions run systemd-resolved or
+        avahi-daemon which accept unicast mDNS queries and reply with the
+        ``<hostname>.local`` name.
+        """
+        sock = None
+        try:
+            if not DNS_AVAILABLE:
+                logger.debug("mDNS lookup skipped - dnspython not available")
+                return None
+
+            if timeout is None:
+                timeout = settings.IP_SCAN_MDNS_TIMEOUT
+
+            rev_name = dns.reversename.from_address(ip)
+            query = dns.message.make_query(rev_name, dns.rdatatype.PTR)
+            # Mark as unicast (QU bit) so responders reply via unicast
+            wire = query.to_wire()
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(timeout)
+            sock.sendto(wire, (ip, 5353))
+            data, _ = sock.recvfrom(4096)
+
+            response = dns.message.from_wire(data)
+            candidates: List[Tuple[int, str]] = []
+
+            for rrset in response.answer:
+                if rrset.rdtype != dns.rdatatype.PTR:
+                    continue
+                for item in rrset:
+                    name = str(item).rstrip('.')
+                    cleaned = self._normalize_hostname_candidate(name)
+                    if not cleaned:
+                        continue
+                    # Prefer names ending in .local (standard mDNS) but accept others
+                    priority = 0 if name.lower().endswith('.local') else 1
+                    candidates.append((priority, cleaned))
+
+            if candidates:
+                candidates.sort(key=lambda item: item[0])
+                best_hostname = candidates[0][1]
+                logger.debug(f"mDNS hostname for {ip}: {best_hostname}")
+                return best_hostname
+
+            return None
+
+        except socket.timeout:
+            logger.debug(f"mDNS lookup timeout for {ip}")
+            return None
+        except Exception as e:
+            logger.debug(f"mDNS lookup failed for {ip}: {str(e)}")
+            return None
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
     def _dns_ptr_lookup(self, ip: str, timeout: int = None, dns_servers: Optional[List[str]] = None) -> Optional[str]:
         """
         DNS PTR (reverse DNS) lookup to get hostname
@@ -673,6 +737,14 @@ class IPScanService:
                 result['hostname'] = netbios_name
                 result['hostname_source'] = 'NETBIOS'
                 logger.debug(f"Hostname from NetBIOS for {ip}: {netbios_name}")
+
+        # Step 5b: Linux/Mac hostname fallback via mDNS unicast (UDP 5353)
+        if not result['hostname'] and result.get('os_type') in ('linux', 'macos', None):
+            mdns_name = self._get_mdns_hostname(ip)
+            if mdns_name:
+                result['hostname'] = mdns_name
+                result['hostname_source'] = 'MDNS'
+                logger.debug(f"Hostname from mDNS for {ip}: {mdns_name}")
 
         # Step 6: SNMP device identification (highest priority for network devices)
         # Restrict SNMP to likely network devices or hosts we still cannot name.

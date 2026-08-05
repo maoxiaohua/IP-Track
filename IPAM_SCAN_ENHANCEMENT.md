@@ -280,12 +280,12 @@ sudo docker exec iptrack-backend python -c "import dns.resolver; print('dnspytho
 **扫描结果**:
 ```json
 {
-  "ip_address": "10.106.195.100",
+  "ip_address": "10.10.10.100",
   "is_reachable": true,
   "response_time": 2,
   "hostname": "WIN10-PC-001",
   "hostname_source": "DNS",
-  "dns_name": "WIN10-PC-001.company.local",
+  "dns_name": "desktop-pc-01.example.local",
   "system_name": null,
   "os_type": "windows",
   "os_name": "Windows",
@@ -308,14 +308,14 @@ sudo docker exec iptrack-backend python -c "import dns.resolver; print('dnspytho
 **扫描结果**:
 ```json
 {
-  "ip_address": "10.56.4.137",
+  "ip_address": "10.10.10.1",
   "is_reachable": true,
   "response_time": 1,
   "hostname": "CORE-SW-01",
   "hostname_source": "SNMP",
-  "dns_name": "core-sw-01.company.local",
+  "dns_name": "core-sw-01.example.local",
   "system_name": "CORE-SW-01",
-  "contact": "Network Admin (admin@company.com)",
+  "contact": "Network Admin (admin@example.com)",
   "location": "Data Center - Rack 12",
   "machine_type": "Cisco Switch",
   "vendor": "Cisco",
@@ -341,7 +341,7 @@ sudo docker exec iptrack-backend python -c "import dns.resolver; print('dnspytho
 **扫描结果**:
 ```json
 {
-  "ip_address": "10.200.50.10",
+  "ip_address": "10.10.20.10",
   "is_reachable": true,
   "response_time": 5,
   "hostname": "gNB-Site-001",

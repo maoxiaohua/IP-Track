@@ -124,8 +124,8 @@ class BMCInfoResponse(BaseModel):
 
 class BMCBatchImportRequest(BaseModel):
     """Batch import servers from an IP range or list with shared credentials."""
-    ip_start: Optional[str] = Field(None, description="Starting IP address, e.g. 10.57.135.1")
-    ip_end: Optional[str] = Field(None, description="Ending IP address, e.g. 10.57.135.100")
+    ip_start: Optional[str] = Field(None, description="Starting IP address, e.g. 10.10.10.1")
+    ip_end: Optional[str] = Field(None, description="Ending IP address, e.g. 10.10.10.100")
     ips: Optional[str] = Field(None, description="Comma- or newline-separated list of IPs (takes priority over ip_start/ip_end)")
     username: str = Field(..., min_length=1, max_length=100, description="IPMI username for all servers")
     password: Optional[str] = Field(None, max_length=255, description="IPMI password (if empty, servers will use global credentials)")

@@ -59,7 +59,7 @@ async def test_snmp_basic():
             return
 
         # 测试IP地址
-        test_ip = "10.71.192.1"
+        test_ip = "10.10.10.1"
         print(f"\n测试目标: {test_ip}")
         print(f"{'='*60}\n")
 

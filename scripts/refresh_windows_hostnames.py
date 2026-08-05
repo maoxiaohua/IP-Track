@@ -5,7 +5,7 @@ Refresh Windows hostnames for a subnet using the current IPAM scan pipeline.
 Usage examples:
   cd /opt/IP-Track
   PYTHONPATH=/opt/IP-Track/backend/src ./venv/bin/python scripts/refresh_windows_hostnames.py --subnet-id 176
-  PYTHONPATH=/opt/IP-Track/backend/src ./venv/bin/python scripts/refresh_windows_hostnames.py --network 10.106.195.0/24
+  PYTHONPATH=/opt/IP-Track/backend/src ./venv/bin/python scripts/refresh_windows_hostnames.py --network 10.10.10.0/24
 """
 
 from __future__ import annotations
@@ -166,7 +166,7 @@ async def refresh_windows_hostnames(subnet_id: int, dns_servers: list[str] | Non
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Refresh Windows hostnames for one subnet.")
     parser.add_argument("--subnet-id", type=int, help="IPAM subnet ID")
-    parser.add_argument("--network", help="Subnet CIDR, for example 10.106.195.0/24")
+    parser.add_argument("--network", help="Subnet CIDR, for example 10.10.10.0/24")
     parser.add_argument(
         "--dns-server",
         action="append",

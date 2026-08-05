@@ -34,7 +34,7 @@ ALTER COLUMN machine_type TYPE VARCHAR(255);  -- 从100增加到255
 ### 验证
 SNMP查询实际上一直在工作，日志显示：
 ```
-✅ SNMP GET success on 10.71.194.252 OID 1.3.6.1.2.1.1.1.0: SRLinux-v24.3.1...
+✅ SNMP GET success on 10.10.10.252 OID 1.3.6.1.2.1.1.1.0: SRLinux-v24.3.1...
 ```
 
 只是保存到数据库时失败了。修复后，数据可以正常保存。
@@ -268,7 +268,7 @@ sudo docker logs iptrack-backend -f
 ### Nokia网络设备
 ```json
 {
-  "ip_address": "10.71.194.252",
+  "ip_address": "10.10.10.252",
   "hostname": "CNHZ-L3-DXB2F-2II06-7220D2-D1",
   "hostname_source": "SNMP",
   "system_name": "CNHZ-L3-DXB2F-2II06-7220D2-D1",
@@ -283,10 +283,10 @@ sudo docker logs iptrack-backend -f
 ### Windows PC (DNS识别)
 ```json
 {
-  "ip_address": "10.71.196.100",
+  "ip_address": "10.10.20.100",
   "hostname": "WIN10-PC-001",
   "hostname_source": "DNS",
-  "dns_name": "WIN10-PC-001.company.local",
+  "dns_name": "desktop-pc-01.example.local",
   "is_reachable": true,
   "os_type": "windows",
   "os_vendor": "Microsoft"
@@ -296,7 +296,7 @@ sudo docker logs iptrack-backend -f
 ### 不支持SNMP的设备
 ```json
 {
-  "ip_address": "10.71.196.50",
+  "ip_address": "10.10.20.50",
   "hostname": null,
   "is_reachable": true,
   "os_type": "linux",  // 基于TTL检测

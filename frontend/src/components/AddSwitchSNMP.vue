@@ -13,7 +13,7 @@
       </el-form-item>
       
       <el-form-item label="IP地址" prop="ip_address">
-        <el-input v-model="form.ip_address" placeholder="例如: 10.71.192.1" />
+        <el-input v-model="form.ip_address" placeholder="例如: 10.10.10.1" />
       </el-form-item>
       
       <el-form-item label="厂商" prop="vendor">

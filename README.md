@@ -349,15 +349,15 @@ pytest --cov=src --cov-report=html
 | 入口 | 地址 | 技术 | 用途 |
 |------|------|------|------|
 | **Vite 开发服务器** | `http://<host>:8001` | Vite HMR + Docker volume 挂载 | 开发调试，修改代码后自动热更新 |
-| **Nginx 生产部署** | `http://<host>` 或域名（如 `ipam.hz.nsn-rdnet.net`） | Nginx 反向代理 + 静态文件 | 用户实际使用的生产环境 |
+| **Nginx 生产部署** | `http://<host>` 或域名（如 `ipam.example.com`） | Nginx 反向代理 + 静态文件 | 用户实际使用的生产环境 |
 
 **关键区别**：
 
 ```
-用户浏览器 → http://ipam.hz.nsn-rdnet.net → Nginx:80 → /opt/IP-Track/frontend/dist/index.html（静态构建文件）
+用户浏览器 → http://ipam.example.com → Nginx:80 → /opt/IP-Track/frontend/dist/index.html（静态构建文件）
                                                     → /api/* → proxy_pass 到后端容器
 
-开发者调试 → http://10.56.4.137:8001 → Docker port mapping → Vite Dev Server:5173 → 源码实时编译
+开发者调试 → http://&lt;host-ip&gt;:8001 → Docker port mapping → Vite Dev Server:5173 → 源码实时编译
 ```
 
 **每次修改前端代码后，必须执行以下步骤才能在生产环境生效**：

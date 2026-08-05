@@ -594,8 +594,8 @@ class CLIService:
         +-------------------+---------------+----------------+--------+---------------------+
         | Interface         | Subinterface  | Neighbor       | Origin | Link layer address  |
         +===================+===============+================+========+=====================+
-        | ethernet-1/51     | 0             | 10.71.194.130  | dynamic| 8C:47:BE:B1:50:91   |
-        | irb4              | 0             | 10.71.207.25   | dynamic| A8:1E:84:F3:C8:43   |
+        | ethernet-1/51     | 0             | 10.10.10.130  | dynamic| 8C:47:BE:B1:50:91   |
+        | irb4              | 0             | 10.10.20.25   | dynamic| A8:1E:84:F3:C8:43   |
 
         Column order: Interface, Subinterface, Neighbor(IP), Origin, Link layer address(MAC)
         """
@@ -633,7 +633,7 @@ class CLIService:
             if len(parts) >= 5:
                 interface = parts[0]           # ethernet-1/51, irb4, irb5
                 subinterface = parts[1]        # 0
-                ip_address = parts[2]          # 10.71.194.130
+                ip_address = parts[2]          # 10.10.10.130
                 origin = parts[3]              # dynamic
                 mac_address = parts[4]         # 8C:47:BE:B1:50:91
 
@@ -793,7 +793,7 @@ class CLIService:
 
         Example output:
         Address         Age       MAC Address     Interface
-        10.108.139.1    00:05:44  e4f0.0428.7d80  Vlan998
+        10.10.10.1    00:05:44  e4f0.0428.7d80  Vlan998
         """
         arp_entries = []
         lines = output.split('\n')
@@ -852,9 +852,9 @@ class CLIService:
         Example output:
         Protocol    Address         Age(min)  Hardware Address    Interface      VLAN             CPU
         ---------------------------------------------------------------------------------------------
-        Internet    10.71.194.134        63   8c:47:be:b1:50:95   Fo 1/51         -               CP
-        Internet    10.71.197.161         -   68:4f:64:fb:58:79        -         Vl 999           CP
-        Internet    10.71.202.36         22   00:0e:c6:66:52:1c   Te 1/5         Vl 7             CP
+        Internet    10.10.10.134        63   8c:47:be:b1:50:95   Fo 1/51         -               CP
+        Internet    10.10.20.161         -   68:4f:64:fb:58:79        -         Vl 999           CP
+        Internet    10.10.30.36         22   00:0e:c6:66:52:1c   Te 1/5         Vl 7             CP
 
         Note: Dell Force10 format is similar to Cisco IOS but:
         - MAC address uses colon format (aa:bb:cc:dd:ee:ff) instead of dot format
@@ -1101,8 +1101,8 @@ class CLIService:
         Example output:
         IP Address      HW Address        Type   Interface         Age
         -------------------------------------------------------------------------------
-        10.71.197.1     4c:62:cd:37:f4:3d Dynamic  ies-vlan235       0d 00:00:23
-        10.71.197.2     c8:f7:50:5c:96:c1 Dynamic  ies-vlan235       0d 00:00:13
+        10.10.20.1     4c:62:cd:37:f4:3d Dynamic  ies-vlan235       0d 00:00:23
+        10.10.20.2     c8:f7:50:5c:96:c1 Dynamic  ies-vlan235       0d 00:00:13
         """
         arp_entries = []
         lines = output.split('\n')

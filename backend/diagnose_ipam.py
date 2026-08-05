@@ -250,7 +250,7 @@ def main():
     print(f"{'='*60}")
 
     # 测试DNS PTR
-    test_ip = input("输入要测试DNS PTR的IP地址（例如: 10.101.35.10）: ").strip()
+    test_ip = input("输入要测试DNS PTR的IP地址（例如: 10.10.10.10）: ").strip()
     if test_ip:
         check_dns_ptr(test_ip)
 

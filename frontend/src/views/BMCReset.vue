@@ -352,7 +352,7 @@
           <el-input v-model="serverForm.name" placeholder="e.g. Server-01" />
         </el-form-item>
         <el-form-item label="Host / IP" required>
-          <el-input v-model="serverForm.host" placeholder="e.g. 10.57.135.202" />
+          <el-input v-model="serverForm.host" placeholder="e.g. 10.10.10.202" />
         </el-form-item>
         <el-form-item label="Credential Source" required>
           <el-select v-model="serverForm.credential_source" placeholder="Select credential source" style="width:100%">
@@ -394,10 +394,10 @@
           <el-input v-model="batchForm.ips" type="textarea" :rows="4" placeholder="One IP per line, or comma-separated. Takes priority over range below." />
         </el-form-item>
         <el-form-item label="Or IP Range Start">
-          <el-input v-model="batchForm.ip_start" placeholder="e.g. 10.57.135.1" />
+          <el-input v-model="batchForm.ip_start" placeholder="e.g. 10.10.10.1" />
         </el-form-item>
         <el-form-item label="IP Range End">
-          <el-input v-model="batchForm.ip_end" placeholder="e.g. 10.57.135.100" />
+          <el-input v-model="batchForm.ip_end" placeholder="e.g. 10.10.10.100" />
         </el-form-item>
         <el-form-item label="Credential Source">
           <el-select v-model="batchForm.credential_source" placeholder="Select credential source" style="width:100%">

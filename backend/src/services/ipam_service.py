@@ -1889,7 +1889,7 @@ def calculate_subnet_info(ip_address: str, netmask: Optional[str] = None) -> Dic
     Calculate subnet information from IP address and netmask
 
     Args:
-        ip_address: IP address (e.g., "10.101.63.25")
+        ip_address: IP address (e.g., "10.10.10.25")
         netmask: Subnet mask (e.g., "255.255.255.0") or CIDR prefix (e.g., "24" or "/24")
 
     Returns:

@@ -153,6 +153,12 @@ class Settings(BaseSettings):
         le=10.0,
         description="NetBIOS node status query timeout in seconds"
     )
+    IP_SCAN_MDNS_TIMEOUT: float = Field(
+        default=1.5,
+        ge=0.5,
+        le=10.0,
+        description="mDNS unicast query timeout in seconds (UDP 5353)"
+    )
     IP_SCAN_ARP_TIMEOUT: int = Field(
         default=2,
         ge=1,

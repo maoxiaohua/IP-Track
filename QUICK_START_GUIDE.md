@@ -44,7 +44,7 @@ docker exec -it iptrack-backend python /app/check_snmp.py
 
 #### 问题2: SNMP Profile未启用
 **解决**:
-1. 进入SNMP配置页面: http://10.56.4.137:8001/snmp-profiles
+1. 进入SNMP配置页面: http://&lt;host-ip&gt;:8001/snmp-profiles
 2. 编辑对应的Profile
 3. 确认"启用状态"已勾选
 4. 保存
@@ -80,12 +80,12 @@ Profile ID: 1
   用户名: monitor
   启用状态: 启用
   关联子网: 3 个
-    - 10.71.192.0/24 (数据中心网络)
-    - 10.71.194.0/24 (办公网络)
+    - 10.1.1.0/24 (核心网络)
+    - 10.1.2.0/24 (办公网络)
 ```
 
 ### 步骤2: 手动触发扫描
-1. 打开IPAM主页: http://10.56.4.137:8001/ipam
+1. 打开IPAM主页: http://&lt;host-ip&gt;:8001/ipam
 2. 找到需要扫描的子网
 3. 点击"扫描"按钮
 4. 等待5-30秒（取决于子网大小）
@@ -104,7 +104,7 @@ Profile ID: 1
 
 ✅ **已完成** - 刷新浏览器即可看到效果
 
-现在访问任意子网详情页（如 http://10.56.4.137:8001/ipam/subnets/67），会看到：
+现在访问任意子网详情页（如 http://&lt;host-ip&gt;:8001/ipam/subnets/1），会看到：
 - 显示全部IP地址（无滚动）
 - 页面会自然延伸显示所有内容
 
@@ -165,8 +165,8 @@ docker restart iptrack-backend
 
 | IP Address | Status | DNS | Machine Type | Last Boot Time |
 |------------|--------|-----|--------------|----------------|
-| 10.71.192.1 | 🟢 | switch-core-1 | Cisco Catalyst 3850 | 2026-02-15 10:23:45 |
-| 10.71.192.2 | 🟢 | switch-dist-2 | Dell S4048-ON | 2026-03-01 08:15:22 |
+| 10.1.1.1 | 🟢 | core-switch-01 | Cisco Catalyst 3850 | 2026-01-15 10:23:45 |
+| 10.1.1.2 | 🟢 | dist-switch-02 | Dell S4048-ON | 2026-01-20 08:15:22 |
 
 ---
 
