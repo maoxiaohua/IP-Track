@@ -282,68 +282,71 @@ class BMCService:
         triggered_by: str,
     ) -> None:
         """Background task: execute resets on all target servers."""
-        try:
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(
-                    select(BMCServer).where(
-                        and_(
-                            BMCServer.id.in_(server_ids),
-                            BMCServer.enabled == True,
+        # Hold the reset lock for the entire reset duration so a second batch reset
+        # cannot start concurrently (reset_servers only held it during scheduling).
+        async with self._reset_lock:
+            try:
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(
+                        select(BMCServer).where(
+                            and_(
+                                BMCServer.id.in_(server_ids),
+                                BMCServer.enabled == True,
+                            )
                         )
                     )
-                )
-                servers = result.scalars().all()
+                    servers = result.scalars().all()
 
-                for idx, server in enumerate(servers, 1):
-                    try:
-                        username, password = await self._get_credentials(db, server)
-                    except ValueError as e:
-                        outcome = {
-                            "status": "failure",
-                            "error_category": "unknown",
-                            "error_message": str(e),
-                            "attempts_made": 0,
-                            "duration_ms": 0,
-                            "ipmi_command": None,
-                        }
-                        await self._record_result(db, server, outcome, triggered_by)
+                    for idx, server in enumerate(servers, 1):
+                        try:
+                            username, password = await self._get_credentials(db, server)
+                        except ValueError as e:
+                            outcome = {
+                                "status": "failure",
+                                "error_category": "unknown",
+                                "error_message": str(e),
+                                "attempts_made": 0,
+                                "duration_ms": 0,
+                                "ipmi_command": None,
+                            }
+                            await self._record_result(db, server, outcome, triggered_by)
+                            await bmc_reset_status_service.server_complete(
+                                server_id=server.id,
+                                server_name=server.name,
+                                server_host=server.host,
+                                status="failure",
+                                error_category="unknown",
+                                error_message=str(e),
+                                attempts_made=0,
+                                duration_ms=0,
+                            )
+                            continue
+
+                        outcome = await self._try_reset_one_server(
+                            server, username, password, timeout
+                        )
+                        outcome["server_index"] = idx
+
+                        await self._record_result(
+                            db, server, outcome, triggered_by
+                        )
+
                         await bmc_reset_status_service.server_complete(
                             server_id=server.id,
                             server_name=server.name,
                             server_host=server.host,
-                            status="failure",
-                            error_category="unknown",
-                            error_message=str(e),
-                            attempts_made=0,
-                            duration_ms=0,
+                            status=outcome["status"],
+                            error_category=outcome.get("error_category"),
+                            error_message=outcome.get("error_message"),
+                            attempts_made=outcome.get("attempts_made", 0),
+                            duration_ms=outcome.get("duration_ms", 0),
                         )
-                        continue
 
-                    outcome = await self._try_reset_one_server(
-                        server, username, password, timeout
-                    )
-                    outcome["server_index"] = idx
+                await bmc_reset_status_service.complete_reset()
 
-                    await self._record_result(
-                        db, server, outcome, triggered_by
-                    )
-
-                    await bmc_reset_status_service.server_complete(
-                        server_id=server.id,
-                        server_name=server.name,
-                        server_host=server.host,
-                        status=outcome["status"],
-                        error_category=outcome.get("error_category"),
-                        error_message=outcome.get("error_message"),
-                        attempts_made=outcome.get("attempts_made", 0),
-                        duration_ms=outcome.get("duration_ms", 0),
-                    )
-
-            await bmc_reset_status_service.complete_reset()
-
-        except Exception as e:
-            logger.error(f"BMC reset session {session_id} failed: {e}")
-            await bmc_reset_status_service.fail_reset(error=str(e))
+            except Exception as e:
+                logger.error(f"BMC reset session {session_id} failed: {e}")
+                await bmc_reset_status_service.fail_reset(error=str(e))
 
     async def _record_result(
         self,

@@ -484,7 +484,8 @@ async def refresh_all_hostnames(db: AsyncSession = Depends(get_db)):
                                 'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
                                 'snmp_priv_protocol': switch.snmp_priv_protocol,
                                 'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                                'snmp_port': switch.snmp_port or 161
+                                'snmp_port': switch.snmp_port or 161,
+                                'snmp_version': switch.snmp_version,
                             }
                             hostname = await snmp_service.get_hostname(str(switch.ip_address), snmp_config)
 
@@ -632,7 +633,8 @@ async def refresh_all_device_info(db: AsyncSession = Depends(get_db)):
                         'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
                         'snmp_priv_protocol': switch.snmp_priv_protocol,
                         'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                        'snmp_port': switch.snmp_port or 161
+                        'snmp_port': switch.snmp_port or 161,
+                        'snmp_version': switch.snmp_version,
                     }
 
                     device_info = await snmp_service.get_device_info(

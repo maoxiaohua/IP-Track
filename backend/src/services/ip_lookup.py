@@ -8,7 +8,7 @@ from models.mac_table import MACTable
 from models.port_analysis import PortAnalysis
 from models.query_history import QueryHistory
 from models.mac_cache import MACAddressCache
-from services.port_lookup_policy_service import build_lookup_eligible_clause, resolve_lookup_policy
+from services.port_lookup_policy_service import resolve_lookup_policy, is_port_lookup_eligible
 from services.data_freshness_service import build_lookup_result_freshness
 from services.port_analysis_service import port_analysis_service
 from services.switch_manager import switch_manager, SwitchConnectionError
@@ -238,6 +238,10 @@ class IPLookupService:
                 # All candidates excluded; fall back to same-switch query
                 logger.info(f"  All {len(mac_candidates)} MAC candidates excluded by lookup policy")
 
+            # Tracks the resolved physical port; stays None if every candidate
+            # (including the ARP interface fallback) is excluded by lookup policy.
+            port_name = None
+
             if mac_entry:
                 # Found physical port in MAC table
                 # IMPORTANT: Use the switch from MAC table (physical location), not from ARP (gateway)
@@ -312,26 +316,37 @@ class IPLookupService:
                         f"{switch.name} after lookup-policy filtering excluded other candidates"
                     )
                 elif arp_interface and self._is_usable_arp_interface(arp_interface):
-                    # Fallback to ARP interface only when it looks like a real port.
-                    port_name = arp_interface
-                    logger.info(f"Using ARP interface {port_name} (MAC table entry not found)")
-                else:
-                    # No port info at all
-                    logger.info(f"No port information found for {mac_address}")
-                    await self._log_query(
-                        db, target_ip, mac_address, None, None, None, None,
-                        "not_found", "MAC address found but port information not available",
-                        int((time.time() - start_time) * 1000)
-                    )
-                    return {
-                        'found': False,
-                        'target_ip': target_ip,
-                        'mac_address': mac_address,
-                        'message': 'MAC address found but port information not available',
-                        'query_time_ms': int((time.time() - start_time) * 1000),
-                        'query_mode': 'cache',
-                        'data_age_seconds': data_age_seconds
-                    }
+                    # Fallback to ARP interface only when it looks like a real port
+                    # AND is eligible for lookup (access port, not trunk/uplink).
+                    eligible, reason = await is_port_lookup_eligible(db, switch.id, arp_interface)
+                    if eligible:
+                        port_name = arp_interface
+                        logger.info(
+                            f"Using ARP interface {port_name} (MAC table entry not found, policy={reason})"
+                        )
+                    else:
+                        logger.info(
+                            f"  ARP interface {arp_interface} on switch {switch.id} excluded by "
+                            f"lookup policy (reason={reason}); not using as port location"
+                        )
+
+            if not port_name:
+                # No port info at all
+                logger.info(f"No port information found for {mac_address}")
+                await self._log_query(
+                    db, target_ip, mac_address, None, None, None, None,
+                    "not_found", "MAC address found but port information not available",
+                    int((time.time() - start_time) * 1000)
+                )
+                return {
+                    'found': False,
+                    'target_ip': target_ip,
+                    'mac_address': mac_address,
+                    'message': 'MAC address found but port information not available',
+                    'query_time_ms': int((time.time() - start_time) * 1000),
+                    'query_mode': 'cache',
+                    'data_age_seconds': data_age_seconds
+                }
 
             # Step 3: Update MAC cache
             if port_name:

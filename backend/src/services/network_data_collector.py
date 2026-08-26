@@ -230,7 +230,8 @@ class NetworkDataCollector:
             'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
             'snmp_priv_protocol': switch.snmp_priv_protocol,
             'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-            'snmp_port': switch.snmp_port
+            'snmp_port': switch.snmp_port,
+            'snmp_version': switch.snmp_version,
         }
 
     def _build_cli_config(self, switch: Switch) -> Dict:
@@ -550,6 +551,12 @@ class NetworkDataCollector:
         batch_success = 0
         batch_failed = 0
         failed_switches = []
+
+        # Detach batch switches from the parent session so each per-switch session
+        # below can attach and commit them independently. Otherwise re-adding a
+        # switch already owned by this session raises "already attached to session".
+        for _switch in batch:
+            db.expunge(_switch)
 
         # Process switches concurrently within the batch
         # IMPORTANT: Each switch gets its own database session to avoid concurrent access errors
@@ -1186,8 +1193,14 @@ class NetworkDataCollector:
             except Exception as e:
                 logger.warning(f"  Failed to get device info for {switch.name}: {str(e)}")
 
-            # Collect chassis serial via SNMP for duplicate detection
-            if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        # Collect chassis serial via SNMP (ENTITY-MIB), falling back to CLI 'show version'
+        # for platforms that don't expose it over SNMP (e.g. Nokia SR Linux).
+        # Dell: SNMP ENTITY-MIB returns the piece-part ID (or literal 'NA') instead of
+        # the real service tag, so skip SNMP and rely on CLI 'show inventory' Svc Tag.
+        if not (switch.serial_number and switch.serial_number.strip()):
+            serial = None
+            vendor_lower = (switch.vendor or '').lower()
+            if 'dell' not in vendor_lower and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
                 try:
                     from services.snmp_service import snmp_service as _snmp_svc
                     snmp_config = {
@@ -1197,16 +1210,45 @@ class NetworkDataCollector:
                         'snmp_priv_protocol': switch.snmp_priv_protocol,
                         'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
                         'snmp_port': switch.snmp_port or 161,
+                        'snmp_version': switch.snmp_version,
                     }
                     serial = await _snmp_svc.get_chassis_serial(
                         str(switch.ip_address), snmp_config
                     )
-                    if serial and serial != switch.serial_number:
-                        switch.serial_number = serial
-                        db.add(switch)
-                        logger.info(f"  Serial number for {switch.name}: {serial}")
                 except Exception as serial_err:
-                    logger.debug(f"  Serial collection failed for {switch.name}: {serial_err}")
+                    logger.debug(f"  SNMP serial collection failed for {switch.name}: {serial_err}")
+
+            if not serial and switch.cli_enabled and switch.password_encrypted:
+                try:
+                    device_type_map = {
+                        'alcatel': 'nokia_sros',
+                        'nokia': 'nokia_sros',
+                        'dell': 'dell_os10',
+                        'cisco': 'cisco_ios',
+                        'juniper': 'juniper_junos',
+                    }
+                    cli_serial_config = {
+                        'username': switch.username,
+                        'password_encrypted': switch.password_encrypted,
+                        'vendor': switch.vendor,
+                        'device_type': device_type_map.get(switch.vendor.lower(), 'generic'),
+                        'cli_transport': switch.cli_transport,
+                        'ssh_port': switch.ssh_port,
+                        'connection_timeout': switch.connection_timeout,
+                        'enable_password_encrypted': switch.enable_password_encrypted,
+                    }
+                    serial = await asyncio.to_thread(
+                        cli_service.get_chassis_serial_cli,
+                        str(switch.ip_address),
+                        cli_serial_config,
+                    )
+                except Exception as cli_err:
+                    logger.debug(f"  CLI serial collection failed for {switch.name}: {cli_err}")
+
+            if serial and serial != switch.serial_number:
+                switch.serial_number = serial
+                db.add(switch)
+                logger.info(f"  Serial number for {switch.name}: {serial}")
 
         cli_config = {
             'username': switch.username,
@@ -1261,7 +1303,7 @@ class NetworkDataCollector:
         # --- Try primary method ---
         if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
             arp_result_detail = await self._try_snmp_arp(
-                switch, arp_entries, collected_at
+                switch, arp_entries, collected_at, oid_overrides
             )
             if arp_entries:
                 arp_method_used = 'snmp'
@@ -1300,13 +1342,13 @@ class NetworkDataCollector:
                  switch.snmp_enabled and switch.snmp_auth_password_encrypted:
                 logger.info(f"  ARP: CLI empty/failed, falling back to SNMP for {switch.name}")
                 arp_result_detail += " | " + await self._try_snmp_arp(
-                    switch, arp_entries, collected_at
+                    switch, arp_entries, collected_at, oid_overrides
                 )
                 if arp_entries:
                     arp_method_used = 'snmp'
         elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
             logger.info(f"  ARP: CLI not available for {switch.name}, using SNMP directly")
-            arp_result_detail = await self._try_snmp_arp(switch, arp_entries, collected_at)
+            arp_result_detail = await self._try_snmp_arp(switch, arp_entries, collected_at, oid_overrides)
             if arp_entries:
                 arp_method_used = 'snmp'
         elif try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
@@ -1325,7 +1367,7 @@ class NetworkDataCollector:
 
         if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
             mac_result_detail = await self._try_snmp_mac(
-                switch, mac_entries, collected_at
+                switch, mac_entries, collected_at, oid_overrides
             )
             if mac_entries:
                 mac_method_used = 'snmp'
@@ -1362,13 +1404,13 @@ class NetworkDataCollector:
                  switch.snmp_enabled and switch.snmp_auth_password_encrypted:
                 logger.info(f"  MAC: CLI empty/failed, falling back to SNMP for {switch.name}")
                 mac_result_detail += " | " + await self._try_snmp_mac(
-                    switch, mac_entries, collected_at
+                    switch, mac_entries, collected_at, oid_overrides
                 )
                 if mac_entries:
                     mac_method_used = 'snmp'
         elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
             logger.info(f"  MAC: CLI not available for {switch.name}, using SNMP directly")
-            mac_result_detail = await self._try_snmp_mac(switch, mac_entries, collected_at)
+            mac_result_detail = await self._try_snmp_mac(switch, mac_entries, collected_at, oid_overrides)
             if mac_entries:
                 mac_method_used = 'snmp'
         elif try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
@@ -1402,6 +1444,11 @@ class NetworkDataCollector:
                 collected_at=collected_at
             )
             raise RuntimeError(failure_message)
+
+        # Persist collected ARP/MAC entries (REPLACE strategy: delete old, insert new).
+        # Keeps this batch path consistent with collect_arp/mac_single_switch (job worker path).
+        await self._store_arp_entries_bulk(db, switch.id, arp_entries, collected_at)
+        await self._store_mac_entries_bulk(db, switch.id, mac_entries, collected_at)
 
         # Update switch's last collection timestamp and status.
         switch.last_arp_collection_at = collected_at

@@ -1,6 +1,6 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, select
 
 
 LOOKUP_POLICY_INCLUDE = "include"
@@ -110,3 +110,84 @@ def serialize_lookup_policy(port_analysis) -> Dict[str, Any]:
         "effective_lookup_reason": resolved["reason"],
         "lookup_included": resolved["included"]
     }
+
+
+def _normalize_lookup_port_name(port_name: Optional[str]) -> str:
+    """Return the normalized physical port name, or empty string if non-physical."""
+    from services.port_analysis_service import port_analysis_service
+
+    if not port_name:
+        return ''
+    return port_analysis_service.normalize_port_name(port_name)
+
+
+async def load_port_lookup_policy_map(db, switch_ids):
+    """Preload lookup policy info for ports on the given switches.
+
+    Keys use NORMALIZED port names so lookups stay correct even when the raw
+    MAC-table port name differs from the stored analysis name (e.g. raw
+    ``TenGigabitEthernet 1/50`` vs stored ``Te 1/50``).
+    """
+    from models.port_analysis import PortAnalysis
+
+    if not switch_ids:
+        return {}
+
+    result = await db.execute(
+        select(PortAnalysis).where(PortAnalysis.switch_id.in_(list(switch_ids)))
+    )
+    rows = result.scalars().all()
+    return {
+        (p.switch_id, _normalize_lookup_port_name(p.port_name)): {
+            'port_type': p.port_type,
+            'lookup_policy_override': p.lookup_policy_override,
+        }
+        for p in rows
+    }
+
+
+def resolve_port_lookup_from_map(
+    port_map: Dict[Tuple[int, str], Dict[str, Any]],
+    switch_id: int,
+    port_name: Optional[str]
+) -> Tuple[bool, str]:
+    """Resolve lookup eligibility for a port against a preloaded policy map.
+
+    Normalizes the port name before matching so raw vendor names (e.g.
+    ``TenGigabitEthernet 1/50``) resolve to the same analysis row as the
+    normalized name (``Te 1/50``). Ports with no analysis record fall back to
+    include (existing behavior for not-yet-analyzed switches).
+    """
+    if not port_name:
+        return False, 'no_port_name'
+
+    normalized = _normalize_lookup_port_name(port_name)
+    if not normalized:
+        return False, 'non_physical_port'
+
+    info = port_map.get((switch_id, normalized))
+    if info is None:
+        policy = resolve_lookup_policy(None, None, has_analysis=False)
+        return policy['included'], policy['reason']
+
+    policy = resolve_lookup_policy(
+        port_type=info['port_type'],
+        lookup_policy_override=info['lookup_policy_override'],
+        has_analysis=True
+    )
+    return policy['included'], policy['reason']
+
+
+async def is_port_lookup_eligible(
+    db,
+    switch_id: int,
+    port_name: Optional[str]
+) -> Tuple[bool, str]:
+    """Resolve whether a single port on a switch may be used as an IP location.
+
+    Applies the effective lookup policy using the NORMALIZED port name, so
+    trunk/uplink ports are never used as a lookup result. No-analysis ports
+    fall back to include.
+    """
+    port_map = await load_port_lookup_policy_map(db, [switch_id])
+    return resolve_port_lookup_from_map(port_map, switch_id, port_name)

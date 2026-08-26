@@ -26,9 +26,10 @@ from services.network_data_collector import network_data_collector
 from services.network_scheduler import network_scheduler
 from services.port_analysis_service import port_analysis_service
 from services.port_lookup_policy_service import (
-    build_lookup_eligible_clause,
     normalize_lookup_policy_override,
     serialize_lookup_policy,
+    load_port_lookup_policy_map,
+    resolve_port_lookup_from_map,
 )
 from services.data_freshness_service import (
     build_lookup_result_freshness,
@@ -333,22 +334,28 @@ async def get_mac_locations(
     # Normalize MAC format
     mac_normalized = mac_address.lower().replace('-', ':')
 
-    # Join with port_analysis to filter out ports excluded from lookup matching
+    # Query all switches where this MAC appears, then keep only lookup-eligible
+    # ports in Python using NORMALIZED port names. A raw-name SQL join would miss
+    # the analysis row for verbose vendor names (e.g. raw "TenGigabitEthernet 1/50"
+    # vs stored "Te 1/50") and let trunk/uplink ports leak into the locations.
     result = await db.execute(
         select(MACTable, Switch)
         .join(Switch, MACTable.switch_id == Switch.id)
-        .outerjoin(
-            PortAnalysis,
-            and_(
-                PortAnalysis.switch_id == MACTable.switch_id,
-                PortAnalysis.port_name == MACTable.port_name
-            )
-        )
         .where(cast(MACTable.mac_address, Text) == mac_normalized)
-        .where(build_lookup_eligible_clause(PortAnalysis))
         .order_by(desc(MACTable.last_seen))
     )
-    rows = result.all()
+    all_rows = result.all()
+
+    port_map = await load_port_lookup_policy_map(
+        db, {mac.switch_id for mac, _ in all_rows}
+    )
+    rows = [
+        (mac, sw)
+        for mac, sw in all_rows
+        if resolve_port_lookup_from_map(
+            port_map, mac.switch_id, mac.port_name
+        )[0]
+    ]
 
     if not rows:
         raise HTTPException(status_code=404, detail=f"MAC {mac_address} not found on any access ports")

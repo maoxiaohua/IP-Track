@@ -5,10 +5,13 @@ from models.ipam import IPSubnet, IPAddress, IPScanHistory, IPStatus
 from models.switch import Switch
 from models.arp_table import ARPTable
 from models.mac_table import MACTable
-from models.port_analysis import PortAnalysis
 from services.ip_scan import ip_scan_service
 from services.ip_lookup import ip_lookup_service
-from services.port_lookup_policy_service import build_lookup_eligible_clause
+from services.port_lookup_policy_service import (
+    is_port_lookup_eligible,
+    load_port_lookup_policy_map,
+    resolve_port_lookup_from_map,
+)
 from core.config import settings
 from core.database import AsyncSessionLocal
 from utils.logger import logger
@@ -160,7 +163,16 @@ class IPAMService:
             if arp_mac:
                 macs.add(arp_mac)
 
+        preferred_switch_ids = {
+            int(arp_row['switch_id'])
+            for arp_row in latest_arp_by_ip.values()
+            if arp_row.get('switch_id') is not None
+        }
+
+        all_switch_ids = set(preferred_switch_ids)
         latest_mac_by_mac: Dict[str, Dict[str, Optional[str]]] = {}
+        same_switch_mac_by_pair: Dict[tuple[int, str], Dict[str, Optional[str]]] = {}
+
         if macs:
             mac_rows = await db.execute(
                 select(
@@ -171,29 +183,36 @@ class IPAMService:
                     MACTable.vlan_id.label('vlan_id')
                 )
                 .join(Switch, MACTable.switch_id == Switch.id)
-                .outerjoin(
-                    PortAnalysis,
-                    and_(
-                        PortAnalysis.switch_id == MACTable.switch_id,
-                        PortAnalysis.port_name == MACTable.port_name
-                    )
-                )
                 .where(func.lower(cast(MACTable.mac_address, String)).in_(list(macs)))
-                .where(build_lookup_eligible_clause(PortAnalysis))
                 .order_by(func.lower(cast(MACTable.mac_address, String)), MACTable.last_seen.desc())
             )
+            mac_row_list = mac_rows.mappings().all()
+            all_switch_ids.update(
+                int(r['switch_id']) for r in mac_row_list if r['switch_id'] is not None
+            )
 
-            for row in mac_rows.mappings():
+            # Lookup eligibility uses NORMALIZED port names: the raw MAC-table
+            # name may differ from the stored analysis name (e.g. raw
+            # "TenGigabitEthernet 1/50" vs stored "Te 1/50"), so a raw-name SQL
+            # join would miss trunk/uplink classification and leak it here.
+            port_map = await load_port_lookup_policy_map(db, all_switch_ids)
+
+            # Keep the most recent lookup-ELIGIBLE location per MAC.
+            for row in mac_row_list:
                 mac_key = self._normalize_mac(row['mac_address'])
-                if mac_key and mac_key not in latest_mac_by_mac:
+                switch_id = row['switch_id']
+                if not mac_key or switch_id is None:
+                    continue
+                if mac_key in latest_mac_by_mac:
+                    continue
+                eligible, _reason = resolve_port_lookup_from_map(
+                    port_map, int(switch_id), row['switch_port']
+                )
+                if eligible:
                     latest_mac_by_mac[mac_key] = dict(row)
+        else:
+            port_map = await load_port_lookup_policy_map(db, all_switch_ids)
 
-        same_switch_mac_by_pair: Dict[tuple[int, str], Dict[str, Optional[str]]] = {}
-        preferred_switch_ids = {
-            int(arp_row['switch_id'])
-            for arp_row in latest_arp_by_ip.values()
-            if arp_row.get('switch_id') is not None
-        }
         if macs and preferred_switch_ids:
             same_switch_rows = await db.execute(
                 select(
@@ -216,7 +235,11 @@ class IPAMService:
                     continue
                 pair_key = (int(switch_id), mac_key)
                 if pair_key not in same_switch_mac_by_pair:
-                    same_switch_mac_by_pair[pair_key] = dict(row)
+                    eligible, _reason = resolve_port_lookup_from_map(
+                        port_map, int(switch_id), row['switch_port']
+                    )
+                    if eligible:
+                        same_switch_mac_by_pair[pair_key] = dict(row)
 
         overlays: Dict[int, Dict[str, Optional[str]]] = {}
         for ip_string, ip_addr in ip_by_string.items():
@@ -229,7 +252,15 @@ class IPAMService:
             if arp_overlay and effective_mac and arp_overlay.get('switch_id') is not None:
                 same_switch_mac_overlay = same_switch_mac_by_pair.get((int(arp_overlay['switch_id']), effective_mac))
             arp_port = arp_overlay.get('switch_port') if arp_overlay else None
-            usable_arp_port = arp_port if self._is_usable_arp_interface(arp_port) else None
+            usable_arp_port = None
+            if arp_port and self._is_usable_arp_interface(arp_port):
+                arp_switch_id = arp_overlay.get('switch_id')
+                if arp_switch_id is not None:
+                    eligible, _reason = resolve_port_lookup_from_map(
+                        port_map, int(arp_switch_id), arp_port
+                    )
+                    if eligible:
+                        usable_arp_port = arp_port
 
             if mac_overlay or arp_overlay or effective_mac:
                 overlays[ip_addr.id] = {
@@ -1046,37 +1077,44 @@ class IPAMService:
         Only matches access ports (ports with 1-3 MAC addresses), not trunk ports
         """
         try:
-            result = await db.execute(
-                select(MACTable, Switch, PortAnalysis)
+            # Find lookup-eligible access ports for this MAC across all switches.
+            # Filtering happens in Python with NORMALIZED port names because the
+            # stored analysis names are normalized while MAC-table raw names may
+            # differ (e.g. raw "TenGigabitEthernet 1/50" vs stored "Te 1/50");
+            # a raw-name SQL join would miss the trunk/uplink classification and
+            # let a trunk/uplink port be picked as the device location.
+            mac_candidate_result = await db.execute(
+                select(MACTable, Switch)
                 .join(Switch, MACTable.switch_id == Switch.id)
-                .outerjoin(
-                    PortAnalysis,
-                    and_(
-                        PortAnalysis.switch_id == MACTable.switch_id,
-                        PortAnalysis.port_name == MACTable.port_name
-                    )
-                )
                 .where(
                     cast(MACTable.mac_address, Text) == cast(mac_address.lower(), Text)
                 )
-                .where(build_lookup_eligible_clause(PortAnalysis))
                 .order_by(MACTable.last_seen.desc())
-                .limit(1)
             )
-            row = result.first()
+            mac_candidates = mac_candidate_result.all()
 
-            if row:
-                mac_entry, switch, port_analysis = row
-                mac_count = port_analysis.mac_count if port_analysis else None
-                ip_addr.switch_id = switch.id
-                ip_addr.switch_port = mac_entry.port_name
-                ip_addr.vlan_id = mac_entry.vlan_id
-                logger.info(
-                    f"Found switch info for {ip_addr.ip_address} (MAC: {mac_address}): "
-                    f"{switch.name} port {mac_entry.port_name} VLAN {mac_entry.vlan_id} "
-                    f"(lookup-eligible port, mac_count={mac_count if mac_count is not None else 'n/a'})"
+            if mac_candidates:
+                port_map = await load_port_lookup_policy_map(
+                    db, {mac_entry.switch_id for mac_entry, _ in mac_candidates}
                 )
-                return
+                for mac_entry, switch in mac_candidates:
+                    eligible, reason = resolve_port_lookup_from_map(
+                        port_map, mac_entry.switch_id, mac_entry.port_name
+                    )
+                    if eligible:
+                        ip_addr.switch_id = switch.id
+                        ip_addr.switch_port = mac_entry.port_name
+                        ip_addr.vlan_id = mac_entry.vlan_id
+                        logger.info(
+                            f"Found switch info for {ip_addr.ip_address} (MAC: {mac_address}): "
+                            f"{switch.name} port {mac_entry.port_name} VLAN {mac_entry.vlan_id} "
+                            f"(lookup-eligible port, policy={reason})"
+                        )
+                        return
+                    logger.info(
+                        f"  MAC port {mac_entry.port_name} on switch {switch.id} for "
+                        f"{ip_addr.ip_address} excluded by lookup policy (reason={reason})"
+                    )
 
             # If not found in lookup-eligible MAC data, try ARP to identify the
             # switch first, then check raw MAC data on that same switch. This
@@ -1107,22 +1145,40 @@ class IPAMService:
                         )
                     )
                     .order_by(MACTable.last_seen.desc())
-                    .limit(1)
+                    .limit(5)
                 )
-                same_switch_mac_entry = same_switch_mac_result.scalar_one_or_none()
+                same_switch_candidates = same_switch_mac_result.scalars().all()
 
-                if same_switch_mac_entry:
-                    ip_addr.switch_port = same_switch_mac_entry.port_name
-                    ip_addr.vlan_id = same_switch_mac_entry.vlan_id or arp_entry.vlan_id
-                    logger.info(
-                        f"Found same-switch MAC port for {ip_addr.ip_address} (MAC: {mac_address}): "
-                        f"{switch.name} port {same_switch_mac_entry.port_name}"
+                for same_switch_mac_entry in same_switch_candidates:
+                    eligible, reason = await is_port_lookup_eligible(
+                        db, switch.id, same_switch_mac_entry.port_name
                     )
-                    return
+                    if eligible:
+                        ip_addr.switch_port = same_switch_mac_entry.port_name
+                        ip_addr.vlan_id = same_switch_mac_entry.vlan_id or arp_entry.vlan_id
+                        logger.info(
+                            f"Found same-switch MAC port for {ip_addr.ip_address} (MAC: {mac_address}): "
+                            f"{switch.name} port {same_switch_mac_entry.port_name} (policy={reason})"
+                        )
+                        return
+                    logger.info(
+                        f"Same-switch MAC port {same_switch_mac_entry.port_name} for "
+                        f"{ip_addr.ip_address} excluded by lookup policy (reason={reason})"
+                    )
 
                 # ARP interface is only a last resort and may be unusable on some models.
                 if self._is_usable_arp_interface(arp_entry.interface):
-                    ip_addr.switch_port = arp_entry.interface
+                    eligible, reason = await is_port_lookup_eligible(
+                        db, switch.id, arp_entry.interface
+                    )
+                    if eligible:
+                        ip_addr.switch_port = arp_entry.interface
+                    else:
+                        ip_addr.switch_port = None
+                        logger.info(
+                            f"ARP interface {arp_entry.interface} for {ip_addr.ip_address} "
+                            f"excluded by lookup policy (reason={reason})"
+                        )
                 else:
                     ip_addr.switch_port = None
                 ip_addr.vlan_id = arp_entry.vlan_id

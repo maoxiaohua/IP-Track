@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func, or_, and_, cast, String, case, delete
+from sqlalchemy import select, desc, func, cast, String, case, delete
 from sqlalchemy.dialects.postgresql import INET
 from typing import List, Dict, Any
 from datetime import datetime, timezone
@@ -17,7 +17,10 @@ from services.switch_manager import switch_manager
 from services.cli_service import cli_service
 from services.snmp_service import snmp_service
 from services.port_analysis_service import port_analysis_service
-from services.port_lookup_policy_service import build_lookup_eligible_clause
+from services.port_lookup_policy_service import (
+    load_port_lookup_policy_map,
+    resolve_port_lookup_from_map,
+)
 from services.data_freshness_service import (
     build_optical_inventory_freshness,
     build_optical_module_freshness,
@@ -219,7 +222,8 @@ async def list_switches(
         if search:
             search_filter = (
                 Switch.name.ilike(f"%{search}%") |
-                cast(Switch.ip_address, String).ilike(f"%{search}%")
+                cast(Switch.ip_address, String).ilike(f"%{search}%") |
+                Switch.serial_number.ilike(f"%{search}%")
             )
             query = query.where(search_filter)
 
@@ -854,6 +858,70 @@ async def export_all_mac(
         )
 
 
+@router.get("/export/switches")
+async def export_switches(
+    db: AsyncSession = Depends(get_db)
+):
+    """Export all switches as flat JSON for client-side Excel/CSV export."""
+    try:
+        result = await db.execute(
+            select(Switch).order_by(Switch.name.asc(), Switch.id.asc())
+        )
+        switches = result.scalars().all()
+
+        def _connection_status(sw: Switch) -> str:
+            if sw.is_reachable is True:
+                return "在线"
+            if sw.is_reachable is False:
+                return "离线"
+            return "未知"
+
+        def _collection_method(sw: Switch) -> str:
+            parts = []
+            if sw.cli_enabled:
+                parts.append((sw.cli_transport or "ssh").upper())
+            if sw.snmp_enabled:
+                parts.append("SNMP")
+            return "+".join(parts) if parts else "无"
+
+        def _last_collection_time(sw: Switch) -> str | None:
+            times = [
+                t for t in (
+                    sw.last_arp_collection_at,
+                    sw.last_mac_collection_at,
+                    sw.last_optical_collection_at,
+                ) if t is not None
+            ]
+            return max(times).isoformat() if times else None
+
+        entries = [
+            {
+                "name": sw.name,
+                "ip_address": str(sw.ip_address),
+                "serial_number": sw.serial_number or "",
+                "vendor": sw.vendor,
+                "model": sw.model or "",
+                "connection_status": _connection_status(sw),
+                "collection_method": _collection_method(sw),
+                "last_collection_status": sw.last_collection_status or "",
+                "last_collection_time": _last_collection_time(sw),
+                "response_time_ms": sw.response_time_ms,
+                "last_check_at": sw.last_check_at.isoformat() if sw.last_check_at else None,
+                "enabled": "是" if sw.enabled else "否",
+                "created_at": sw.created_at.isoformat() if sw.created_at else None,
+                "updated_at": sw.updated_at.isoformat() if sw.updated_at else None,
+            }
+            for sw in switches
+        ]
+        return entries
+    except Exception as e:
+        logger.error(f"Error exporting switches: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export switches: {str(e)}"
+        )
+
+
 @router.get("/{switch_id}/arp", response_model=Dict[str, Any])
 async def get_switch_arp_table(
     switch_id: int,
@@ -965,19 +1033,19 @@ async def get_switch_mac_table(
 
         result = await db.execute(
             select(MACTable)
-            .outerjoin(
-                PortAnalysis,
-                and_(
-                    PortAnalysis.switch_id == MACTable.switch_id,
-                    PortAnalysis.port_name == MACTable.port_name
-                )
-            )
             .where(MACTable.switch_id == switch_id)
-            .where(build_lookup_eligible_clause(PortAnalysis))
             .order_by(desc(MACTable.last_seen))
-            .limit(limit)
         )
-        mac_entries = result.scalars().all()
+        all_mac_entries = result.scalars().all()
+
+        # Filter to lookup-eligible ports using NORMALIZED port names so verbose
+        # raw names (e.g. raw "TenGigabitEthernet 1/50") still resolve to their
+        # stored analysis and trunk/uplink ports are excluded from the list.
+        port_map = await load_port_lookup_policy_map(db, [switch_id])
+        mac_entries = [
+            entry for entry in all_mac_entries
+            if resolve_port_lookup_from_map(port_map, switch_id, entry.port_name)[0]
+        ][:limit]
 
         # Format response
         entries = []
@@ -1215,6 +1283,7 @@ async def collect_switch_device_info(
                     'snmp_priv_protocol': switch.snmp_priv_protocol,
                     'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
                     'snmp_port': switch.snmp_port or 161,
+                    'snmp_version': switch.snmp_version,
                 }
                 serial = await _snmp_svc.get_chassis_serial(
                     str(switch.ip_address), snmp_config

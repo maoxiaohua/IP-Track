@@ -338,5 +338,11 @@ export const switchesApi = {
   exportMac: async (): Promise<any[]> => {
     const response = await apiClient.get('/api/v1/switches/export/mac')
     return response.data
+  },
+
+  // Export all switches list
+  exportSwitches: async (): Promise<any[]> => {
+    const response = await apiClient.get('/api/v1/switches/export/switches')
+    return response.data
   }
 }

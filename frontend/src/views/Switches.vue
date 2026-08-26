@@ -16,6 +16,19 @@
               <el-icon><Monitor /></el-icon>
               刷新设备信息
             </el-button>
+            <el-dropdown trigger="click" @command="(cmd: string) => exportSwitches(cmd as 'excel' | 'csv')">
+              <el-button type="success" :loading="exportingSwitches">
+                <el-icon><Download /></el-icon>
+                导出
+                <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="excel">导出 Excel (.xlsx)</el-dropdown-item>
+                  <el-dropdown-item command="csv">导出 CSV</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
             <el-button type="primary" @click="openAddDialog">
               <el-icon><Plus /></el-icon>
               Add Switch
@@ -42,7 +55,7 @@
         <div class="search-controls">
           <el-input
             v-model="searchQuery"
-            placeholder="搜索交换机名称或IP地址..."
+            placeholder="搜索交换机名称 / IP / 序列号..."
             clearable
             @clear="handleSearch"
             @keyup.enter="handleSearch"
@@ -385,7 +398,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { Plus, Refresh, Check, Close, Setting, Delete, Monitor, Search } from '@element-plus/icons-vue'
+import { Plus, Refresh, Check, Close, Setting, Delete, Monitor, Search, Download, ArrowDown } from '@element-plus/icons-vue'
 import { switchesApi, type Switch, type SwitchCreate } from '@/api/switches'
 import SwitchList from '@/components/SwitchList.vue'
 import { API_BASE_URL } from '@/api/index'
@@ -395,6 +408,7 @@ const loading = ref(false)
 const saving = ref(false)
 const refreshingHostnames = ref(false)
 const refreshingDeviceInfo = ref(false)
+const exportingSwitches = ref(false)
 const showAddDialog = ref(false)
 const editingSwitch = ref<Switch | null>(null)
 const duplicateCount = ref(0)
@@ -1057,6 +1071,33 @@ const refreshDeviceInfo = async () => {
     }
   } catch (error: any) {
     if (error !== 'cancel') console.error('Error:', error)
+  }
+}
+
+// Export switches list
+const exportSwitches = async (format: 'excel' | 'csv') => {
+  if (exportingSwitches.value) return
+  exportingSwitches.value = true
+  try {
+    ElMessage.info('正在导出交换机列表...')
+    const { exportToExcel, exportToCSV } = await import('@/utils/export')
+    const data = await switchesApi.exportSwitches()
+    if (!data || data.length === 0) {
+      ElMessage.warning('没有交换机数据可导出')
+      return
+    }
+    const filename = `交换机列表_${new Date().toISOString().slice(0, 10)}`
+    if (format === 'excel') {
+      await exportToExcel(data, filename, '交换机列表')
+    } else {
+      exportToCSV(data, filename)
+    }
+    ElMessage.success(`成功导出 ${data.length} 台交换机`)
+  } catch (error: any) {
+    console.error('Failed to export switches:', error)
+    ElMessage.error(error.response?.data?.detail || '导出交换机列表失败')
+  } finally {
+    exportingSwitches.value = false
   }
 }
 

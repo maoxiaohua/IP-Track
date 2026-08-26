@@ -562,6 +562,16 @@ class NetworkCollectionScheduler:
         except asyncio.TimeoutError:
             logger.error(f"IPAM auto-scan timed out after {settings.IPAM_SCAN_HARD_TIMEOUT_SECONDS}s")
             self.clear_ipam_scan_context()
+            # _do_ipam_scan 被 wait_for 取消时注入的是 CancelledError（BaseException，
+            # 不落入其 except Exception），start_scan 已置 running=True 但 complete/fail
+            # 均不会执行。这里显式 fail_scan 以清除扫描状态，避免 /scan-status 永远报扫描中。
+            try:
+                await ipam_scan_status_service.fail_scan(
+                    error="timeout",
+                    message="IPAM 启动补扫超时" if startup_catchup else "自动 IPAM 扫描超时"
+                )
+            except Exception as e:
+                logger.error(f"Failed to mark timed-out IPAM scan as failed: {e}", exc_info=True)
 
     async def _do_ipam_scan(self, *, startup_catchup: bool = False, max_subnets: int | None = None):
         async with self._ipam_scan_lock:

@@ -19,7 +19,7 @@ Standard SNMP OIDs used:
 """
 
 import fnmatch
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pysnmp.hlapi.v3arch.asyncio import (
     SnmpEngine, UsmUserData, UdpTransportTarget, ContextData,
     ObjectType, ObjectIdentity, get_cmd, next_cmd, CommunityData,
@@ -159,18 +159,27 @@ class SNMPService:
         auth_protocol: str,
         auth_password: str,
         priv_protocol: Optional[str],
-        priv_password: Optional[str]
-    ) -> UsmUserData:
+        priv_password: Optional[str],
+        snmp_version: Optional[str] = None,
+    ) -> Any:
         """
-        Create SNMPv3 authentication credentials
+        Create SNMP authentication credentials.
+
+        SNMPv1/v2c builds CommunityData from the community string (carried in
+        auth_password, which for v2c is the decrypted community string). SNMPv3
+        builds UsmUserData. Fixes v2c switches failing all SNMP collection.
 
         Args:
-            username: SNMPv3 username
+            username: SNMPv3 username (ignored for v2c)
             auth_protocol: 'MD5', 'SHA', 'SHA256'
-            auth_password: Authentication password
+            auth_password: Authentication password (v2c: decrypted community)
             priv_protocol: 'DES', 'AES', 'AES128', 'AES192', 'AES256'
             priv_password: Privacy password. When omitted, authNoPriv is used.
+            snmp_version: '1'/'2c' -> CommunityData, otherwise SNMPv3
         """
+        if snmp_version in ('1', '2c'):
+            return CommunityData(auth_password, mpModel=1)
+
         # Map protocol names to pysnmp protocol objects
         auth_map = {
             'MD5': usmHMACMD5AuthProtocol,
@@ -423,7 +432,8 @@ class SNMPService:
                 auth_protocol=switch_config['snmp_auth_protocol'],
                 auth_password=auth_password,
                 priv_protocol=switch_config.get('snmp_priv_protocol'),
-                priv_password=priv_password
+                priv_password=priv_password,
+                snmp_version=switch_config.get('snmp_version'),
             )
 
             port = switch_config.get('snmp_port', 161)
@@ -500,7 +510,8 @@ class SNMPService:
                 auth_protocol=switch_config['snmp_auth_protocol'],
                 auth_password=auth_password,
                 priv_protocol=switch_config.get('snmp_priv_protocol'),
-                priv_password=priv_password
+                priv_password=priv_password,
+                snmp_version=switch_config.get('snmp_version'),
             )
 
             port = switch_config.get('snmp_port', 161)
@@ -680,7 +691,8 @@ class SNMPService:
                 auth_protocol=switch_config['snmp_auth_protocol'],
                 auth_password=auth_password,
                 priv_protocol=switch_config.get('snmp_priv_protocol'),
-                priv_password=priv_password
+                priv_password=priv_password,
+                snmp_version=switch_config.get('snmp_version'),
             )
 
             port = switch_config.get('snmp_port', 161)
@@ -728,7 +740,8 @@ class SNMPService:
                 auth_protocol=switch_config['snmp_auth_protocol'],
                 auth_password=auth_password,
                 priv_protocol=switch_config.get('snmp_priv_protocol'),
-                priv_password=priv_password
+                priv_password=priv_password,
+                snmp_version=switch_config.get('snmp_version'),
             )
 
             port = switch_config.get('snmp_port', 161)
@@ -797,7 +810,18 @@ class SNMPService:
         Falls back to entPhysicalSerialNum.1 if the walk returns nothing.
         """
         try:
-            auth_data = self._create_snmp_auth(switch_config)
+            auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
+            priv_password = self._decrypt_optional_password(
+                switch_config.get('snmp_priv_password_encrypted')
+            )
+            auth_data = self._create_snmp_auth(
+                username=switch_config.get('snmp_username'),
+                auth_protocol=switch_config.get('snmp_auth_protocol', 'SHA'),
+                auth_password=auth_password,
+                priv_protocol=switch_config.get('snmp_priv_protocol'),
+                priv_password=priv_password,
+                snmp_version=switch_config.get('snmp_version'),
+            )
             if not auth_data:
                 return None
 
@@ -834,7 +858,9 @@ class SNMPService:
 
             if serial is not None:
                 serial_str = str(serial).strip()
-                if serial_str and serial_str.lower() not in ('', 'null', 'none'):
+                if serial_str and serial_str.lower() not in (
+                    '', 'null', 'none', 'na', 'n/a', 'n.a.', 'unknown', 'not available',
+                ):
                     logger.info(f"Chassis serial for {switch_ip}: {serial_str}")
                     return serial_str
 
@@ -978,7 +1004,8 @@ class SNMPService:
                 auth_protocol=snmp_profile.get('auth_protocol', 'SHA'),
                 auth_password=auth_password,
                 priv_protocol=snmp_profile.get('priv_protocol'),
-                priv_password=priv_password
+                priv_password=priv_password,
+                snmp_version=snmp_profile.get('snmp_version'),
             )
 
             port = snmp_profile.get('port', 161)
@@ -1222,7 +1249,8 @@ class SNMPService:
                 priv_protocol=switch_config.get('snmp_priv_protocol'),
                 priv_password=self._decrypt_optional_password(
                     switch_config.get('snmp_priv_password_encrypted')
-                )
+                ),
+                snmp_version=switch_config.get('snmp_version'),
             )
 
             # Step 1: Walk entPhysicalDescr and entPhysicalClass to find optical modules

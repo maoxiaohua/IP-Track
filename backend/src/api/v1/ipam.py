@@ -805,21 +805,6 @@ async def start_scan_stream(
     subnet_label = str(subnet.network)
     await network_scheduler._ipam_scan_lock.acquire()
 
-    try:
-        network_scheduler.set_ipam_scan_context(
-            f"当前正在手动扫描子网 {subnet_label}"
-        )
-        session_id = await ipam_scan_status_service.start_scan(
-            source="manual",
-            scan_type=scan_request.scan_type,
-            total_subnets=1,
-            message=f"已启动手动扫描，准备扫描子网 {subnet_label}"
-        )
-    except Exception:
-        network_scheduler.clear_ipam_scan_context()
-        network_scheduler._ipam_scan_lock.release()
-        raise
-
     async def run_manual_scan() -> None:
         manual_db = AsyncSessionLocal()
         try:
@@ -851,7 +836,27 @@ async def start_scan_stream(
             network_scheduler.clear_ipam_scan_context()
             network_scheduler._ipam_scan_lock.release()
 
-    asyncio.create_task(run_manual_scan())
+    # acquire() 成功后必须保证锁被释放：正常时由 run_manual_scan 释放；
+    # 若 start_scan 期间请求被取消（CancelledError 不被 except Exception 捕获）
+    # 或创建后台任务前抛出异常，则由 finally 释放，避免锁永久泄漏。
+    bg_scheduled = False
+    try:
+        network_scheduler.set_ipam_scan_context(
+            f"当前正在手动扫描子网 {subnet_label}"
+        )
+        session_id = await ipam_scan_status_service.start_scan(
+            source="manual",
+            scan_type=scan_request.scan_type,
+            total_subnets=1,
+            message=f"已启动手动扫描，准备扫描子网 {subnet_label}"
+        )
+        asyncio.create_task(run_manual_scan())
+        bg_scheduled = True
+    finally:
+        if not bg_scheduled:
+            network_scheduler.clear_ipam_scan_context()
+            if network_scheduler._ipam_scan_lock.locked():
+                network_scheduler._ipam_scan_lock.release()
 
     return {
         "session_id": session_id,

@@ -2499,6 +2499,140 @@ class CLIService:
                 except Exception:
                     pass
 
+    def get_chassis_serial_cli(
+        self,
+        switch_ip: str,
+        switch_config: Dict
+    ) -> Optional[str]:
+        """
+        Collect chassis serial number via CLI as a fallback when SNMP ENTITY-MIB
+        does not expose it (e.g. Nokia SR Linux).
+
+        Uses 'show version' (or 'show chassis hardware' for Juniper) and extracts
+        the serial with vendor-specific patterns.
+        """
+        connection = None
+        try:
+            vendor = (switch_config.get('vendor') or '').lower()
+
+            commands = []
+            if 'juniper' in vendor:
+                commands = ['show chassis hardware']
+            elif 'dell' in vendor:
+                commands = ['show inventory']
+            elif 'alcatel' in vendor or 'nokia' in vendor:
+                # Nokia SR OS (TiMOS): 'show version' only prints the banner; the
+                # chassis serial lives in 'show chassis detail' -> Chassis -> Hardware
+                # Data -> "Serial number". Some Nokia white-box variants (e.g. Nuage
+                # 210 WBX) reject 'detail' but expose it under plain 'show chassis'.
+                commands = ['show chassis detail', 'show chassis']
+            else:
+                commands = ['show version']
+
+            password = decrypt_password(switch_config['password_encrypted'])
+            transport = switch_config.get('cli_transport', 'ssh')
+            device_type = switch_config.get('device_type', 'nokia_sros')
+            enable_secret = None
+            if switch_config.get('enable_password_encrypted'):
+                enable_secret = decrypt_password(switch_config['enable_password_encrypted'])
+
+            connection = self._create_cli_connection(
+                host=switch_ip,
+                username=switch_config['username'],
+                password=password,
+                device_type=device_type,
+                port=switch_config.get('ssh_port'),
+                timeout=switch_config.get('connection_timeout', 30),
+                enable_secret=enable_secret,
+                transport=transport,
+            )
+            if not connection:
+                return None
+
+            # Dell FTOS (OS6) requires enable mode before 'show inventory' exposes
+            # the service tag. The 'dell_os10' driver does not auto-enable.
+            if 'dell' in vendor:
+                try:
+                    connection.send_command_timing('enable', delay_factor=2, max_loops=50)
+                    if enable_secret:
+                        connection.send_command_timing(enable_secret, delay_factor=2, max_loops=50)
+                    connection.send_command_timing('terminal length 0', delay_factor=2, max_loops=50)
+                except Exception as enable_err:
+                    logger.debug(f"Enable mode for serial collection failed on {switch_ip}: {enable_err}")
+
+            # Use timing-based read: 'show version' on SR Linux/SR OS returns output
+            # that netmiko's send_command() may truncate to just the command echo.
+            serial = None
+            for command in commands:
+                try:
+                    output = connection.send_command_timing(command, delay_factor=2, max_loops=200)
+                except Exception as cmd_err:
+                    logger.debug(f"CLI serial command '{command}' failed on {switch_ip}: {cmd_err}")
+                    continue
+                if not output:
+                    continue
+                serial = self._extract_chassis_serial(output, vendor)
+                if serial:
+                    break
+
+            if serial:
+                logger.info(f"Chassis serial (CLI) for {switch_ip}: {serial}")
+            return serial
+
+        except Exception as e:
+            logger.debug(f"CLI serial collection failed for {switch_ip}: {e}")
+            return None
+
+        finally:
+            if connection:
+                try:
+                    connection.disconnect()
+                except Exception:
+                    pass
+
+    def _extract_chassis_serial(self, output: str, vendor: str) -> Optional[str]:
+        """Extract chassis serial from 'show version' / 'show chassis hardware' / 'show inventory' output."""
+        # Dell FTOS (OS6) 'show inventory': the 'Serial Number' column literally
+        # shows 'NA'; the real identifier is the 7-char service tag in the 'Svc
+        # Tag' column of the management-unit (star-marked) row.
+        if 'dell' in (vendor or '').lower():
+            svc_tag = self._extract_dell_ftos_svc_tag(output)
+            if svc_tag:
+                return svc_tag
+
+        patterns = [
+            r'Serial\s+Number\s*[:=]\s*"?([A-Za-z0-9]+)"?',      # Nokia SR Linux / Dell / Junos
+            r'serial[-_]?number\s*[:=]\s*"?([A-Za-z0-9]+)"?',    # SR Linux info / Junos table
+            r'Processor\s+board\s+ID\s+([A-Za-z0-9]+)',          # Cisco IOS
+            r'Service\s+Tag\s*[:=]\s*"?([A-Za-z0-9]+)"?',        # Dell OS10
+        ]
+        for pat in patterns:
+            m = re.search(pat, output, re.IGNORECASE)
+            if m:
+                val = m.group(1).strip()
+                if val and val.lower() not in ('null', 'none', 'n/a', 'na'):
+                    return val
+        return None
+
+    def _extract_dell_ftos_svc_tag(self, output: str) -> Optional[str]:
+        """Extract the 7-char Dell service tag from FTOS 'show inventory' output.
+
+        The chassis (management unit) row is the one marked with a leading '*'.
+        Dell service tags are exactly 7 alphanumeric characters; part numbers are
+        6 chars and the model name contains dashes, so a 7-char token in the star
+        row is the service tag.
+        """
+        if not output:
+            return None
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith('*'):
+                continue
+            for token in stripped.split():
+                if re.fullmatch(r'[A-Za-z0-9]{7}', token) and token.upper() not in ('NA', 'N/A'):
+                    return token
+        return None
+
     def _get_parser(self, parser_type: Optional[str], data_type: str):
         """
         Get parser function by type
