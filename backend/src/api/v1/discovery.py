@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
-from api.deps import get_db
+from api.deps import get_db, load_snmp_profile_or_400
 from schemas.discovery import (
     SwitchDiscoveryRequest,
     SwitchDiscoveryResponse,
@@ -12,6 +12,14 @@ from schemas.switch import SwitchCreate, SwitchResponse
 from services.switch_discovery import switch_discovery_service
 from services.switch_manager import switch_manager
 from services.cli_service import cli_service
+# 统一凭据解析：交换机可能引用 SNMP 模板，凭据不在自己行上。任何按交换机取
+# 凭据的地方都必须走这两个函数，直接读 switch.snmp_auth_password_encrypted
+# 会把引用模板的交换机整批当成「没配凭据」。
+from services.snmp_service import (
+    apply_profile_display_fields,
+    build_switch_snmp_config,
+    switch_has_snmp_credentials,
+)
 from core.security import credential_encryption
 from models.switch import Switch
 from utils.logger import logger
@@ -19,7 +27,7 @@ import asyncio
 import json
 import uuid
 import time
-from sqlalchemy import select, cast, String
+from sqlalchemy import select, cast, String, or_
 from sqlalchemy.dialects.postgresql import INET
 
 router = APIRouter(prefix="/discovery", tags=["discovery"])
@@ -423,11 +431,17 @@ async def refresh_all_hostnames(db: AsyncSession = Depends(get_db)):
             logger.info("Starting hostname refresh for all switches")
 
             # Get all enabled switches with SNMP configured
+            # 有可用凭据 = 本机自带口令，**或**引用了 SNMP 模板（凭据在模板上）。
+            # 只判 snmp_auth_password_encrypted 会把这些交换机整批漏掉，
+            # 而它们恰恰是这次改成引用模板的那批。
             result = await db.execute(
                 select(Switch).where(
                     Switch.enabled == True,
                     Switch.snmp_enabled == True,
-                    Switch.snmp_auth_password_encrypted.isnot(None)
+                    or_(
+                        Switch.snmp_auth_password_encrypted.isnot(None),
+                        Switch.snmp_profile_id.isnot(None),
+                    ),
                 )
             )
             switches = list(result.scalars().all())
@@ -476,17 +490,10 @@ async def refresh_all_hostnames(db: AsyncSession = Depends(get_db)):
                     error_detail = None
 
                     # Use SNMP only (no SSH fallback)
-                    if switch.snmp_auth_password_encrypted:
+                    if switch_has_snmp_credentials(switch):
                         try:
-                            snmp_config = {
-                                'snmp_username': switch.snmp_username,
-                                'snmp_auth_protocol': switch.snmp_auth_protocol,
-                                'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-                                'snmp_priv_protocol': switch.snmp_priv_protocol,
-                                'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                                'snmp_port': switch.snmp_port or 161,
-                                'snmp_version': switch.snmp_version,
-                            }
+                            # 凭据统一解析：引用了模板就以模板为准（含端口），否则用本机那份
+                            snmp_config = build_switch_snmp_config(switch)
                             hostname = await snmp_service.get_hostname(str(switch.ip_address), snmp_config)
 
                             if hostname:
@@ -589,7 +596,10 @@ async def refresh_all_device_info(db: AsyncSession = Depends(get_db)):
                 select(Switch).where(
                     Switch.enabled == True,
                     Switch.snmp_enabled == True,
-                    Switch.snmp_auth_password_encrypted.isnot(None)
+                    or_(
+                        Switch.snmp_auth_password_encrypted.isnot(None),
+                        Switch.snmp_profile_id.isnot(None),
+                    ),
                 )
             )
             switches = list(result.scalars().all())
@@ -627,15 +637,8 @@ async def refresh_all_device_info(db: AsyncSession = Depends(get_db)):
                 yield f"data: {json.dumps(progress_data)}\n\n"
 
                 try:
-                    snmp_config = {
-                        'snmp_username': switch.snmp_username,
-                        'snmp_auth_protocol': switch.snmp_auth_protocol,
-                        'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-                        'snmp_priv_protocol': switch.snmp_priv_protocol,
-                        'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                        'snmp_port': switch.snmp_port or 161,
-                        'snmp_version': switch.snmp_version,
-                    }
+                    # 凭据统一解析：引用了模板就以模板为准（含端口），否则用本机那份
+                    snmp_config = build_switch_snmp_config(switch)
 
                     device_info = await snmp_service.get_device_info(
                         str(switch.ip_address), snmp_config
@@ -827,6 +830,12 @@ async def batch_add_switches(
         batch_ips = set()  # Track IPs in current batch to detect duplicates
         logger.info(f"Starting to process {len(discovered_switches)} switches for batch add")
 
+        # 先把本批用到的 SNMP 模板一次性校验掉，再进循环。放在循环外是必需的：
+        # 循环体里的 try/except 会把异常吞掉然后 continue，「引用了不存在的模板」
+        # 这种整批参数都错了的问题如果在那里抛，表现成「静默少加了几台」，极难查。
+        for _pid in {s.snmp_profile_id for s in discovered_switches if s.snmp_profile_id}:
+            await load_snmp_profile_or_400(db, _pid)
+
         for idx, switch_data in enumerate(discovered_switches, 1):
             try:
                 # Check for duplicate in current batch
@@ -858,12 +867,18 @@ async def batch_add_switches(
                     enable_password_encrypted = credential_encryption.encrypt(switch_data.enable_password)
 
                 # Encrypt SNMP credentials
+                # 引用了模板就**一个口令都不加密、不留存**：凭据整体以模板为准，
+                # 这里存一份副本正是这次改造要消灭的东西。也正因为口令可能为空，
+                # 下面几行必须先判空，否则 encrypt(None) 会直接抛异常、
+                # 被外层 except 吞掉，表现成「这台设备莫名其妙没加进去」。
                 snmp_auth_password_encrypted = None
                 snmp_priv_password_encrypted = None
-                if switch_data.snmp_auth_password:
-                    snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_auth_password)
-                if switch_data.snmp_priv_password:
-                    snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
+                snmp_profile = await load_snmp_profile_or_400(db, switch_data.snmp_profile_id)
+                if snmp_profile is None:
+                    if switch_data.snmp_auth_password:
+                        snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_auth_password)
+                    if switch_data.snmp_priv_password:
+                        snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
 
                 cli_transport, ssh_port = cli_service.normalize_cli_connection_settings(
                     switch_data.cli_transport,
@@ -896,7 +911,12 @@ async def batch_add_switches(
                     snmp_priv_protocol=switch_data.snmp_priv_protocol if switch_data.snmp_priv_password else None,
                     snmp_priv_password_encrypted=snmp_priv_password_encrypted,
                     snmp_community=switch_data.snmp_community,
+                    snmp_profile_id=switch_data.snmp_profile_id,
                 )
+
+                # 引用了模板就把版本/端口/用户名/协议这些展示字段回填成模板上的值，
+                # 免得列表页显示的还是表单里残留的默认值（比如端口 161 而模板是 1161）。
+                apply_profile_display_fields(switch, snmp_profile)
 
                 db.add(switch)
                 added_switches.append(switch)

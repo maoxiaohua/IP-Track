@@ -28,6 +28,7 @@ export interface Switch {
   last_mac_collection_at?: string | null
   last_optical_collection_at?: string | null
   last_optical_success_at?: string | null
+  last_successful_collection_at?: string | null
   last_collection_status?: string | null
   last_collection_message?: string | null
   last_optical_collection_status?: string | null
@@ -45,6 +46,10 @@ export interface Switch {
   snmp_auth_protocol?: string
   snmp_priv_protocol?: string
   has_snmp_credentials?: boolean
+  // 凭据来源模板。非空表示这台交换机的凭据取自该模板，上面那些 snmp_* 字段
+  // 显示的是模板上的生效值；口令只存在模板上，这里拿不到也不需要拿。
+  snmp_profile_id?: number | null
+  snmp_profile_name?: string | null
 
   // Collection method per data type
   mac_collection_method?: string
@@ -85,6 +90,8 @@ export interface SwitchCreate {
   snmp_priv_protocol?: string
   snmp_priv_password?: string
   snmp_community?: string
+  // 引用已保存的 SNMP 凭据模板。非空时上面的逐台凭据字段后端一律忽略。
+  snmp_profile_id?: number | null
 }
 
 export interface SwitchUpdate {
@@ -115,6 +122,9 @@ export interface SwitchUpdate {
   snmp_priv_protocol?: string
   snmp_priv_password?: string
   snmp_community?: string
+  // 传 id 表示改挂到该模板；显式传 null 表示解绑（改回用本机自带凭据）。
+  // 「不传」和「传 null」是两种不同语义，所以这里必须是可选且可为 null。
+  snmp_profile_id?: number | null
   trunk_review_completed?: boolean
   trunk_review_note?: string | null
 }
@@ -131,7 +141,7 @@ export interface SwitchListParams {
   search?: string
   trunk_review_completed?: boolean
   collection_status?: string
-  sort_by?: 'id' | 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'connection_status'
+  sort_by?: 'id' | 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'last_successful_collection_time' | 'connection_status'
   sort_order?: 'asc' | 'desc'
 }
 

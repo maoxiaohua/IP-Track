@@ -5,8 +5,9 @@ from sqlalchemy.dialects.postgresql import INET
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 import asyncio
-from api.deps import get_db
+from api.deps import get_db, load_snmp_profile_or_400
 from models.switch import Switch
+from models.ipam import SNMPProfile
 from models.arp_table import ARPTable
 from models.mac_table import MACTable
 from models.port_analysis import PortAnalysis
@@ -15,7 +16,12 @@ from schemas.switch import SwitchCreate, SwitchUpdate, SwitchResponse, SwitchTes
 from core.security import credential_encryption, decrypt_password
 from services.switch_manager import switch_manager
 from services.cli_service import cli_service
-from services.snmp_service import snmp_service
+from services.snmp_service import (
+    snmp_service,
+    apply_profile_display_fields,
+    build_switch_snmp_config,
+    switch_has_snmp_credentials,
+)
 from services.port_analysis_service import port_analysis_service
 from services.port_lookup_policy_service import (
     load_port_lookup_policy_map,
@@ -101,6 +107,14 @@ async def _check_switch_duplicates(
     return conflicts
 
 
+async def _load_snmp_profile_or_400(
+    db: AsyncSession,
+    profile_id: int | None,
+) -> SNMPProfile | None:
+    """本模块内沿用旧名字；实现见 api.deps.load_snmp_profile_or_400。"""
+    return await load_snmp_profile_or_400(db, profile_id)
+
+
 @router.get("/status-checker", response_model=Dict[str, Any])
 async def get_status_checker_status():
     """Get lightweight switch reachability checker runtime status."""
@@ -143,17 +157,24 @@ async def create_switch(
             enable_password_encrypted = credential_encryption.encrypt(switch_data.enable_password)
 
         # Encrypt SNMP credentials (required)
+        # 引用了模板就**一个口令都不加密、不留存**：凭据整体以模板为准，这里存一份
+        # 副本正是这次改造要消灭的东西。也正因为口令可能为空，下面几行必须先判空，
+        # 否则 encrypt(None) 会直接抛异常，新增交换机整个接口 500。
         snmp_auth_password_encrypted = None
         snmp_priv_password_encrypted = None
-        
-        if switch_data.snmp_version == '3':
-            # SNMPv3 - encrypt auth and priv passwords
-            snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_auth_password)
-            if switch_data.snmp_priv_password:
-                snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
-        elif switch_data.snmp_version == '2c' and switch_data.snmp_community:
-            # SNMPv2c - encrypt community string (store in auth_password field)
-            snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_community)
+
+        snmp_profile = await _load_snmp_profile_or_400(db, switch_data.snmp_profile_id)
+
+        if snmp_profile is None:
+            if switch_data.snmp_version == '3':
+                # SNMPv3 - encrypt auth and priv passwords
+                if switch_data.snmp_auth_password:
+                    snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_auth_password)
+                if switch_data.snmp_priv_password:
+                    snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
+            elif switch_data.snmp_version == '2c' and switch_data.snmp_community:
+                # SNMPv2c - encrypt community string (store in auth_password field)
+                snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_community)
 
         # Create switch
         switch = Switch(
@@ -162,7 +183,7 @@ async def create_switch(
             vendor=switch_data.vendor,
             model=switch_data.model,
             enabled=switch_data.enabled,
-            
+
             # SSH fields (optional)
             cli_enabled=switch_data.cli_enabled,
             cli_transport=cli_transport,
@@ -171,7 +192,7 @@ async def create_switch(
             password_encrypted=password_encrypted,
             enable_password_encrypted=enable_password_encrypted,
             connection_timeout=switch_data.connection_timeout,
-            
+
             # SNMP fields (required)
             snmp_enabled=switch_data.snmp_enabled,
             snmp_version=switch_data.snmp_version,
@@ -181,8 +202,13 @@ async def create_switch(
             snmp_auth_password_encrypted=snmp_auth_password_encrypted,
             snmp_priv_protocol=switch_data.snmp_priv_protocol if switch_data.snmp_priv_password else None,
             snmp_priv_password_encrypted=snmp_priv_password_encrypted,
-            snmp_community=switch_data.snmp_community
+            snmp_community=switch_data.snmp_community,
+            snmp_profile_id=switch_data.snmp_profile_id,
         )
+
+        # 引用了模板就把版本/端口/用户名/协议这些展示字段回填成模板上的值，
+        # 免得列表页显示的还是表单里残留的默认值（比如端口 161 而模板是 1161）。
+        apply_profile_display_fields(switch, snmp_profile)
 
         db.add(switch)
         await db.commit()
@@ -266,6 +292,7 @@ async def list_switches(
             "ip_address": Switch.ip_address,
             "model": Switch.model,
             "last_collection_time": collection_time_expr,
+            "last_successful_collection_time": Switch.last_successful_collection_at,
             "connection_status": connection_status_expr,
         }
         sort_expr = sort_columns.get(sort_by, Switch.id)
@@ -435,6 +462,24 @@ async def update_switch(
         elif 'enable_password' in update_data:
             update_data.pop('enable_password')
 
+        # 引用 / 解绑 SNMP 模板。**必须放在下面那些口令加密处理之前** ——
+        # 绑定了模板就绝不能再往交换机行写一份口令副本，否则「同一份凭据抄 239 份」
+        # 又回来了，而且模板和副本还会各自变。
+        snmp_profile = None
+        if 'snmp_profile_id' in switch_data.model_fields_set:
+            snmp_profile = await _load_snmp_profile_or_400(db, switch_data.snmp_profile_id)
+            if snmp_profile is not None:
+                # 模板为准：这一轮请求里逐台填的 SNMP 字段全部丢弃，改由模板回填
+                for field in (
+                    'snmp_version', 'snmp_port', 'snmp_username', 'snmp_auth_protocol',
+                    'snmp_auth_password', 'snmp_priv_password', 'snmp_priv_protocol',
+                    'snmp_community',
+                ):
+                    update_data.pop(field, None)
+            # 解绑（值为 null）时**不动**逐台字段：用户很可能在同一次请求里既解绑
+            # 又填了新口令，把口令吞掉会变成静默失败。解绑后本表若本来就没口令，
+            # 界面会显示「未配置凭据」，这是符合事实的。
+
         # Handle SNMP password encryption
         if 'snmp_auth_password' in update_data and update_data['snmp_auth_password']:
             update_data['snmp_auth_password_encrypted'] = credential_encryption.encrypt(update_data.pop('snmp_auth_password'))
@@ -486,6 +531,12 @@ async def update_switch(
         # Update switch
         for field, value in update_data.items():
             setattr(switch, field, value)
+
+        # 绑定模板后把版本/端口/用户名/协议这些展示字段回填成模板上的值，
+        # 让列表页、详情页显示的就是当前生效的那一份（口令不回填）。
+        if snmp_profile is not None:
+            switch.snmp_profile = snmp_profile
+            apply_profile_display_fields(switch, snmp_profile)
 
         await db.commit()
         await db.refresh(switch)
@@ -557,57 +608,45 @@ async def test_switch_connection(
             )
 
         # Test SNMP connectivity if enabled
-        if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
-            from services.snmp_service import snmp_service
+        # 判定必须走 switch_has_snmp_credentials：交换机改成引用模板之后，自己那份
+        # snmp_auth_password_encrypted 是空的，直接读列会让所有引用模板的交换机
+        # 静默退化成 ping 测试 —— 用户点「连接测试」得到「能 ping 通」，
+        # 而 SNMP 到底通不通完全没测。
+        if switch_has_snmp_credentials(switch):
+            from services.snmp_service import build_snmp_auth, describe_snmp_error
             from core.security import decrypt_password
-            
-            try:
-                # Try to get system description via SNMP
-                auth_password = decrypt_password(switch.snmp_auth_password_encrypted)
-                priv_password = decrypt_password(switch.snmp_priv_password_encrypted) if switch.snmp_priv_password_encrypted else None
 
-                from pysnmp.hlapi.v3arch.asyncio import (
-                    SnmpEngine, UsmUserData, UdpTransportTarget, ContextData,
-                    ObjectType, ObjectIdentity, get_cmd,
-                    usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol, usmHMAC128SHA224AuthProtocol,
-                    usmDESPrivProtocol, usmAesCfb128Protocol, usmAesCfb192Protocol, usmAesCfb256Protocol
+            switch_ip = str(switch.ip_address)
+
+            try:
+                # 凭据统一从 build_switch_snmp_config 取：引用了模板就以模板为准，
+                # 没有就用电交换机自己那份，和后台采集走的是同一条解析路径。
+                snmp_config = build_switch_snmp_config(switch)
+
+                # Try to get system description via SNMP
+                auth_password = decrypt_password(snmp_config['snmp_auth_password_encrypted']) if snmp_config['snmp_auth_password_encrypted'] else None
+                priv_password = decrypt_password(snmp_config['snmp_priv_password_encrypted']) if snmp_config['snmp_priv_password_encrypted'] else None
+
+                # 认证凭据统一走 services.snmp_service.build_snmp_auth：
+                # 这样连接测试与后台采集对同一台交换机构造出的认证参数完全一致，
+                # v1/v2c 的团体字、协议名大小写也由同一处处理。
+                auth_data = build_snmp_auth(
+                    username=snmp_config['snmp_username'],
+                    auth_protocol=snmp_config['snmp_auth_protocol'],
+                    auth_password=auth_password,
+                    priv_protocol=snmp_config['snmp_priv_protocol'],
+                    priv_password=priv_password,
+                    snmp_version=snmp_config['snmp_version'],
                 )
 
-                # Map protocol names to pysnmp protocol objects
-                auth_map = {
-                    'MD5': usmHMACMD5AuthProtocol,
-                    'SHA': usmHMACSHAAuthProtocol,
-                    'SHA256': usmHMAC128SHA224AuthProtocol,
-                }
-                priv_map = {
-                    'DES': usmDESPrivProtocol,
-                    'AES': usmAesCfb128Protocol,
-                    'AES128': usmAesCfb128Protocol,
-                    'AES192': usmAesCfb192Protocol,
-                    'AES256': usmAesCfb256Protocol,
-                }
-
-                # Get protocols from switch config or use defaults
-                auth_proto = auth_map.get(switch.snmp_auth_protocol, usmHMACSHAAuthProtocol)
-                if priv_password:
-                    priv_proto = priv_map.get(switch.snmp_priv_protocol, usmAesCfb128Protocol)
-                    auth_data = UsmUserData(
-                        switch.snmp_username,
-                        authKey=auth_password,
-                        privKey=priv_password,
-                        authProtocol=auth_proto,
-                        privProtocol=priv_proto
-                    )
-                else:
-                    auth_data = UsmUserData(
-                        switch.snmp_username,
-                        authKey=auth_password,
-                        authProtocol=auth_proto
-                    )
+                from pysnmp.hlapi.v3arch.asyncio import (
+                    SnmpEngine, UdpTransportTarget, ContextData,
+                    ObjectType, ObjectIdentity, get_cmd
+                )
 
                 # Create transport target (pysnmp 7.x requires .create())
                 transport = await UdpTransportTarget.create(
-                    (str(switch.ip_address), switch.snmp_port or 161),
+                    (switch_ip, snmp_config['snmp_port'] or 161),
                     timeout=5,
                     retries=2
                 )
@@ -620,18 +659,50 @@ async def test_switch_connection(
                     ContextData(),
                     ObjectType(ObjectIdentity('1.3.6.1.2.1.1.1.0'))  # sysDescr
                 )
-                
+
                 if errorIndication:
+                    # 这里以前不写日志，导致用户点「连接测试」在 app.log 里查不到任何痕迹
+                    logger.warning(
+                        f"SNMP test failed for switch {switch_id} ({switch_ip}), "
+                        f"version={snmp_config['snmp_version']}, user={snmp_config['snmp_username']}, "
+                        f"auth={snmp_config['snmp_auth_protocol']}, priv={snmp_config['snmp_priv_protocol']}: "
+                        f"{errorIndication}"
+                    )
                     return SwitchTestResponse(
                         success=False,
-                        message=f"SNMP connection failed: {errorIndication}",
-                        details={"error_type": "connection_error"}
+                        # message 给人看（中文可操作），原文留在 details 里给排障看
+                        message=describe_snmp_error(errorIndication),
+                        details={
+                            "error_type": "connection_error",
+                            "raw_error": str(errorIndication),
+                            "target_ip": switch_ip,
+                            "snmp_version": snmp_config['snmp_version'],
+                            "snmp_username": snmp_config['snmp_username'],
+                            "snmp_auth_protocol": snmp_config['snmp_auth_protocol'],
+                            "snmp_priv_protocol": snmp_config['snmp_priv_protocol'],
+                            # 告诉排障的人这份凭据到底是从模板来的还是本机自带的，
+                            # 否则改了交换机上的口令却毫无变化，会以为是缓存没刷新。
+                            "credential_source": switch.snmp_profile_name or "switch",
+                            "collection_note": (
+                                "该结果只反映 SNMP。ARP/MAC 等采集项默认走 SSH CLI，"
+                                "SNMP 失败不一定影响定期采集。"
+                            ),
+                        }
                     )
                 elif errorStatus:
+                    logger.warning(
+                        f"SNMP error status for switch {switch_id} ({switch_ip}): "
+                        f"{errorStatus.prettyPrint()} at {errorIndex}"
+                    )
                     return SwitchTestResponse(
                         success=False,
-                        message=f"SNMP error: {errorStatus.prettyPrint()}",
-                        details={"error_type": "snmp_error"}
+                        message=f"设备返回 SNMP 错误：{errorStatus.prettyPrint()}（第 {errorIndex} 个绑定）",
+                        details={
+                            "error_type": "snmp_error",
+                            "raw_error": errorStatus.prettyPrint(),
+                            "target_ip": switch_ip,
+                            "credential_source": switch.snmp_profile_name or "switch",
+                        }
                     )
                 else:
                     sys_descr = str(varBinds[0][1])[:200]
@@ -640,7 +711,8 @@ async def test_switch_connection(
                         message="SNMP connection successful",
                         details={
                             "system_description": sys_descr,
-                            "snmp_version": switch.snmp_version,
+                            "snmp_version": snmp_config['snmp_version'],
+                            "credential_source": switch.snmp_profile_name or "switch",
                             "connection_type": "snmp"
                         }
                     )
@@ -713,15 +785,20 @@ async def bulk_create_switches(
                 enable_password_encrypted = credential_encryption.encrypt(switch_data.enable_password)
 
             # Encrypt SNMP credentials
+            # 同 create_switch：引用了模板就不留任何口令副本，且必须先判空再加密。
             snmp_auth_password_encrypted = None
             snmp_priv_password_encrypted = None
-            
-            if switch_data.snmp_version == '3':
-                snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_auth_password)
-                if switch_data.snmp_priv_password:
-                    snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
-            elif switch_data.snmp_version == '2c' and switch_data.snmp_community:
-                snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_community)
+
+            snmp_profile = await _load_snmp_profile_or_400(db, switch_data.snmp_profile_id)
+
+            if snmp_profile is None:
+                if switch_data.snmp_version == '3':
+                    if switch_data.snmp_auth_password:
+                        snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_auth_password)
+                    if switch_data.snmp_priv_password:
+                        snmp_priv_password_encrypted = credential_encryption.encrypt(switch_data.snmp_priv_password)
+                elif switch_data.snmp_version == '2c' and switch_data.snmp_community:
+                    snmp_auth_password_encrypted = credential_encryption.encrypt(switch_data.snmp_community)
 
             # Create switch
             switch = Switch(
@@ -745,8 +822,10 @@ async def bulk_create_switches(
                 snmp_auth_password_encrypted=snmp_auth_password_encrypted,
                 snmp_priv_protocol=switch_data.snmp_priv_protocol if switch_data.snmp_priv_password else None,
                 snmp_priv_password_encrypted=snmp_priv_password_encrypted,
-                snmp_community=switch_data.snmp_community
+                snmp_community=switch_data.snmp_community,
+                snmp_profile_id=switch_data.snmp_profile_id,
             )
+            apply_profile_display_fields(switch, snmp_profile)
 
             db.add(switch)
             created_switches.append(switch)
@@ -894,6 +973,9 @@ async def export_switches(
             ]
             return max(times).isoformat() if times else None
 
+        def _last_successful_collection_time(sw: Switch) -> str | None:
+            return sw.last_successful_collection_at.isoformat() if sw.last_successful_collection_at else None
+
         entries = [
             {
                 "name": sw.name,
@@ -905,6 +987,7 @@ async def export_switches(
                 "collection_method": _collection_method(sw),
                 "last_collection_status": sw.last_collection_status or "",
                 "last_collection_time": _last_collection_time(sw),
+                "last_successful_collection_time": _last_successful_collection_time(sw),
                 "response_time_ms": sw.response_time_ms,
                 "last_check_at": sw.last_check_at.isoformat() if sw.last_check_at else None,
                 "enabled": "是" if sw.enabled else "否",
@@ -1273,20 +1356,12 @@ async def collect_switch_device_info(
             logger.info(f"✅ Updated device info for {switch.ip_address}: {updated_fields}")
 
         # Collect chassis serial via SNMP for duplicate detection
-        if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if switch_has_snmp_credentials(switch):
             try:
                 from services.snmp_service import snmp_service as _snmp_svc
-                snmp_config = {
-                    'snmp_username': switch.snmp_username,
-                    'snmp_auth_protocol': switch.snmp_auth_protocol,
-                    'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-                    'snmp_priv_protocol': switch.snmp_priv_protocol,
-                    'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                    'snmp_port': switch.snmp_port or 161,
-                    'snmp_version': switch.snmp_version,
-                }
+                # 凭据走统一解析：引用了模板就以模板为准，否则用本机自带那份
                 serial = await _snmp_svc.get_chassis_serial(
-                    str(switch.ip_address), snmp_config
+                    str(switch.ip_address), build_switch_snmp_config(switch)
                 )
                 if serial and serial != switch.serial_number:
                     switch.serial_number = serial

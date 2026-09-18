@@ -15,6 +15,9 @@ export interface SNMPProfile {
   created_at: string
   updated_at: string
   subnet_count?: number
+  // 引用了这个模板的交换机台数。删模板/改口令前先看这个数，
+  // 知道这一下会影响多少台设备。
+  switch_count?: number
 }
 
 export interface SNMPProfileCreate {
@@ -115,6 +118,35 @@ export const updateSNMPProfile = async (id: number, data: SNMPProfileUpdate) => 
 // Delete SNMP profile
 export const deleteSNMPProfile = async (id: number) => {
   await apiClient.delete(`/api/v1/snmp-profiles/${id}`)
+}
+
+export interface SNMPProfileAdoptRequest {
+  // 默认 true：只统计会动到哪些交换机，不写库
+  dry_run?: boolean
+  switch_ids?: number[]
+}
+
+export interface SNMPProfileAdoptResponse {
+  profile_id: number
+  profile_name: string
+  dry_run: boolean
+  examined: number
+  matched_count: number
+  skipped_count: number
+  matched: { id: number; name: string; ip_address: string }[]
+  skipped_by_reason: Record<string, number>
+}
+
+// 把已经用着同一份凭据的历史交换机改成引用这个模板（只认真正对得上的）
+export const adoptSwitchesIntoProfile = async (
+  id: number,
+  data: SNMPProfileAdoptRequest = {}
+) => {
+  const response = await apiClient.post<SNMPProfileAdoptResponse>(
+    `/api/v1/snmp-profiles/${id}/adopt`,
+    data
+  )
+  return response.data
 }
 
 // Test SNMP connection

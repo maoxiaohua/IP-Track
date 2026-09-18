@@ -123,7 +123,7 @@
             <el-icon><Close /></el-icon>
             批量禁用
           </el-button>
-          <el-button size="small" type="primary" @click="showBatchSnmpDialog = true">
+          <el-button size="small" type="primary" @click="openBatchSnmpDialog">
             <el-icon><Setting /></el-icon>
             批量配置 SNMP
           </el-button>
@@ -259,6 +259,45 @@
             <el-input-number v-model="switchForm.snmp_port" :min="1" :max="65535" />
           </el-form-item>
 
+          <el-form-item label="凭据来源" prop="snmp_profile_id">
+            <el-select
+              v-model="switchForm.snmp_profile_id"
+              placeholder="本机自带（不引用模板）"
+              style="width: 100%"
+            >
+              <el-option label="本机自带（不引用模板）" :value="null" />
+              <el-option
+                v-for="p in snmpProfileStore.enabledProfiles()"
+                :key="p.id"
+                :label="`模板：${p.name}（${p.version} · ${p.auth_protocol || '—'} / ${p.priv_protocol || '—'}）`"
+                :value="p.id"
+              />
+            </el-select>
+            <div style="color: #909399; font-size: 12px; margin-top: 4px;">
+              选中模板后，下面这台设备自己的凭据字段会被模板取代；以后改口令只改模板一处，
+              所有引用它的交换机同时生效。
+            </div>
+          </el-form-item>
+
+          <!--
+            引用模板时整段隐藏，而不是显示成空值：
+            后端在 snmp_profile_id 非空时本来就忽略这些字段，显示出来只会让人以为
+            「这里填的还算数」。留一段说明告诉人去哪儿改。
+          -->
+          <el-alert
+            v-if="switchForm.snmp_profile_id"
+            type="info"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 18px;"
+          >
+            <template #title>
+              凭据取自模板「{{ snmpProfileStore.byId(switchForm.snmp_profile_id)?.name }}」，
+              用户名、协议、口令都在模板上维护。
+            </template>
+          </el-alert>
+
+          <template v-if="!switchForm.snmp_profile_id">
           <el-form-item label="SNMP 用户名" prop="snmp_username">
             <el-input v-model="switchForm.snmp_username" placeholder="SNMP username" />
           </el-form-item>
@@ -267,7 +306,10 @@
             <el-select v-model="switchForm.snmp_auth_protocol">
               <el-option label="MD5" value="MD5" />
               <el-option label="SHA" value="SHA" />
-              <el-option label="SHA256" value="SHA256" />
+              <el-option label="SHA-224" value="SHA-224" />
+              <el-option label="SHA-256" value="SHA-256" />
+              <el-option label="SHA-384" value="SHA-384" />
+              <el-option label="SHA-512" value="SHA-512" />
             </el-select>
           </el-form-item>
 
@@ -286,9 +328,9 @@
           <el-form-item label="加密协议" prop="snmp_priv_protocol">
             <el-select v-model="switchForm.snmp_priv_protocol">
               <el-option label="DES" value="DES" />
-              <el-option label="AES128" value="AES128" />
-              <el-option label="AES192" value="AES192" />
-              <el-option label="AES256" value="AES256" />
+              <el-option label="AES-128" value="AES-128" />
+              <el-option label="AES-192" value="AES-192" />
+              <el-option label="AES-256" value="AES-256" />
             </el-select>
           </el-form-item>
 
@@ -303,6 +345,7 @@
               新建时留空则不启用加密；编辑现有设备时留空则保持现有配置
             </div>
           </el-form-item>
+          </template>
         </template>
 
         <el-form-item label="Enabled" prop="enabled">
@@ -345,6 +388,40 @@
           <el-input-number v-model="batchSnmpForm.snmp_port" :min="1" :max="65535" />
         </el-form-item>
 
+        <el-form-item label="凭据来源" prop="snmp_profile_id">
+          <el-select
+            v-model="batchSnmpForm.snmp_profile_id"
+            placeholder="本机自带（不引用模板）"
+            style="width: 100%"
+          >
+            <el-option label="本机自带（不引用模板）" :value="null" />
+            <el-option
+              v-for="p in snmpProfileStore.enabledProfiles()"
+              :key="p.id"
+              :label="`模板：${p.name}（${p.version} · ${p.auth_protocol || '—'} / ${p.priv_protocol || '—'}）`"
+              :value="p.id"
+            />
+          </el-select>
+          <div style="color: #909399; font-size: 12px; margin-top: 4px;">
+            选中模板时，下面这些逐台凭据字段不生效，{{ selectedSwitches.length }} 台交换机统一改为引用该模板。
+          </div>
+        </el-form-item>
+
+        <el-alert
+          v-if="batchSnmpForm.snmp_profile_id"
+          type="info"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 18px;"
+        >
+          <template #title>
+            将把 {{ selectedSwitches.length }} 台交换机改挂到模板
+            「{{ snmpProfileStore.byId(batchSnmpForm.snmp_profile_id)?.name }}」，
+            它们各自原有的凭据副本会被清除。
+          </template>
+        </el-alert>
+
+        <template v-if="!batchSnmpForm.snmp_profile_id">
         <el-form-item label="用户名" prop="snmp_username">
           <el-input v-model="batchSnmpForm.snmp_username" placeholder="SNMP username" />
         </el-form-item>
@@ -353,7 +430,10 @@
           <el-select v-model="batchSnmpForm.snmp_auth_protocol">
             <el-option label="MD5" value="MD5" />
             <el-option label="SHA" value="SHA" />
-            <el-option label="SHA256" value="SHA256" />
+            <el-option label="SHA-224" value="SHA-224" />
+            <el-option label="SHA-256" value="SHA-256" />
+            <el-option label="SHA-384" value="SHA-384" />
+            <el-option label="SHA-512" value="SHA-512" />
           </el-select>
         </el-form-item>
 
@@ -369,9 +449,9 @@
         <el-form-item label="加密协议" prop="snmp_priv_protocol">
           <el-select v-model="batchSnmpForm.snmp_priv_protocol">
             <el-option label="DES" value="DES" />
-            <el-option label="AES128" value="AES128" />
-            <el-option label="AES192" value="AES192" />
-            <el-option label="AES256" value="AES256" />
+            <el-option label="AES-128" value="AES-128" />
+            <el-option label="AES-192" value="AES-192" />
+            <el-option label="AES-256" value="AES-256" />
           </el-select>
         </el-form-item>
 
@@ -383,6 +463,7 @@
             show-password
           />
         </el-form-item>
+        </template>
       </el-form>
 
       <template #footer>
@@ -396,12 +477,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { ref, reactive, onMounted, computed, watch, h } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus, Refresh, Check, Close, Setting, Delete, Monitor, Search, Download, ArrowDown } from '@element-plus/icons-vue'
 import { switchesApi, type Switch, type SwitchCreate } from '@/api/switches'
 import SwitchList from '@/components/SwitchList.vue'
 import { API_BASE_URL } from '@/api/index'
+// 已保存的 SNMP 凭据模板，用于新增/编辑/批量配置时的「凭据来源」下拉。
+// 集中在一个 store 里，模板页改完名字这里调 load(true) 就能同步。
+import { useSNMPProfilesStore } from '@/stores/snmpProfiles'
+
+const snmpProfileStore = useSNMPProfilesStore()
 
 const switches = ref<Switch[]>([])
 const loading = ref(false)
@@ -421,7 +507,7 @@ const pageSize = ref(100)
 const totalSwitches = ref(0)
 const showPendingTrunkOnly = ref(false)
 const collectionStatusFilter = ref('')
-type SortField = 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'connection_status'
+type SortField = 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'last_successful_collection_time' | 'connection_status'
 type SortOption = SortField | 'collection_status_success' | 'collection_status_failed' | 'collection_status_partial'
 
 const sortBy = ref<SortField | null>(null)
@@ -435,6 +521,7 @@ const sortFieldOptions: Array<{ label: string; value: SortOption }> = [
   { label: '采集成功', value: 'collection_status_success' },
   { label: '采集失败', value: 'collection_status_failed' },
   { label: '采集部分成功', value: 'collection_status_partial' },
+  { label: '最后采集成功时间', value: 'last_successful_collection_time' },
   { label: '连接状态', value: 'connection_status' }
 ]
 
@@ -443,7 +530,7 @@ const sortDirectionOptions = computed(() => {
     return []
   }
 
-  if (selectedSortField.value?.startsWith('last_collection_time')) {
+  if (selectedSortField.value === 'last_collection_time' || selectedSortField.value === 'last_successful_collection_time') {
     return [
       { label: '旧到新', value: 'asc' },
       { label: '新到旧', value: 'desc' }
@@ -499,6 +586,9 @@ const switchForm = reactive<SwitchCreate>({
   snmp_enabled: true,
   snmp_version: '3',
   snmp_port: 161,
+  // null = 本机自带凭据，不引用模板。这是新增时的默认值：
+  // 让「没选模板」和「选了某模板」在类型上就分得开。
+  snmp_profile_id: null,
   snmp_username: '',
   snmp_auth_protocol: 'SHA',
   snmp_auth_password: '',
@@ -530,6 +620,9 @@ const switchRules: FormRules = {
 const batchSnmpForm = reactive({
   snmp_version: '3',
   snmp_port: 161,
+  // null = 不引用模板，走下面这套逐台凭据；非空 = 这批判全部改挂到该模板。
+  // 显式标注 number | null，否则字面量 null 会被推断成只有 null 一种类型。
+  snmp_profile_id: null as number | null,
   snmp_username: '',
   snmp_auth_protocol: 'SHA',
   snmp_auth_password: '',
@@ -537,25 +630,32 @@ const batchSnmpForm = reactive({
   snmp_priv_password: ''
 })
 
-const batchSnmpRules: FormRules = {
-  snmp_username: [{ required: true, message: 'SNMP 用户名必填', trigger: 'blur' }],
-  snmp_auth_password: [
-    { required: true, message: '认证密码必填', trigger: 'blur' },
-    { min: 8, message: '密码至少8位字符', trigger: 'blur' }
-  ],
-  snmp_priv_password: [
-    {
-      validator: (_rule: any, value: string, callback: (error?: Error) => void) => {
-        if (value && value.length < 8) {
-          callback(new Error('密码至少8位字符'))
-          return
-        }
-        callback()
-      },
-      trigger: 'blur'
-    }
-  ]
-}
+// 规则随「凭据来源」切换：选了模板，下面那几个字段在模板上，本表单里既不显示
+// 也不校验。写成 computed 而不是依赖「隐藏的 el-form-item 会自动注销」——
+// 后者一旦有人把 v-if 改成 v-show 就会变成「看不见的必填项拦住提交」。
+const batchSnmpRules = computed<FormRules>(() => {
+  if (batchSnmpForm.snmp_profile_id) return {}
+
+  return {
+    snmp_username: [{ required: true, message: 'SNMP 用户名必填', trigger: 'blur' }],
+    snmp_auth_password: [
+      { required: true, message: '认证密码必填', trigger: 'blur' },
+      { min: 8, message: '密码至少8位字符', trigger: 'blur' }
+    ],
+    snmp_priv_password: [
+      {
+        validator: (_rule: any, value: string, callback: (error?: Error) => void) => {
+          if (value && value.length < 8) {
+            callback(new Error('密码至少8位字符'))
+            return
+          }
+          callback()
+        },
+        trigger: 'blur'
+      }
+    ]
+  }
+})
 
 const loadSwitches = async () => {
   loading.value = true
@@ -644,7 +744,7 @@ const clearSort = () => {
 }
 
 const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc' | null) => {
-  const allowedSortFields = ['name', 'ip_address', 'model', 'last_collection_time', 'connection_status']
+  const allowedSortFields = ['name', 'ip_address', 'model', 'last_collection_time', 'last_successful_collection_time', 'connection_status']
   selectedSortField.value = newSortOrder && allowedSortFields.includes(newSortBy)
     ? newSortBy as SortOption
     : null
@@ -655,9 +755,16 @@ const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc' | null
   loadSwitches()
 }
 
-const openAddDialog = () => {
+const openAddDialog = async () => {
   resetForm()
+  // 缓存里已有就不重复请求；模板页刚改过的话那边会 force 刷新。
+  await snmpProfileStore.load()
   showAddDialog.value = true
+}
+
+const openBatchSnmpDialog = async () => {
+  await snmpProfileStore.load()
+  showBatchSnmpDialog.value = true
 }
 
 const resetForm = () => {
@@ -679,6 +786,7 @@ const resetForm = () => {
     snmp_enabled: true,
     snmp_version: '3',
     snmp_port: 161,
+    snmp_profile_id: null,
     snmp_username: '',
     snmp_auth_protocol: 'SHA',
     snmp_auth_password: '',
@@ -709,6 +817,7 @@ const handleEdit = (switchItem: Switch) => {
     snmp_enabled: switchItem.snmp_enabled || false,
     snmp_version: switchItem.snmp_version || '3',
     snmp_port: switchItem.snmp_port || 161,
+    snmp_profile_id: switchItem.snmp_profile_id ?? null,
     snmp_username: switchItem.snmp_username || '',
     snmp_auth_protocol: switchItem.snmp_auth_protocol || 'SHA',
     snmp_auth_password: '',
@@ -741,6 +850,11 @@ const handleSave = async () => {
             updateData[key] = value
           }
         })
+
+        // snmp_profile_id 必须显式带上，null 也要带。
+        // 上面的循环把 null 当「空值」丢掉了，而后端把「字段不在请求里」解释成
+        // 「不改动现有绑定」—— 两者语义正好相反，不补这一行，界面上就永远解不了绑。
+        updateData.snmp_profile_id = switchForm.snmp_profile_id ?? null
 
         await switchesApi.update(editingSwitch.value.id, updateData)
         ElMessage.success('Switch updated successfully')
@@ -794,7 +908,46 @@ const handleTest = async (switchItem: Switch) => {
     if (result.success) {
       ElMessage.success('Connection successful!')
     } else {
-      ElMessage.error(`Connection failed: ${result.message}`)
+      // 失败时用弹窗而不是 toast：后端返回的中文说明可能上百字（含处置建议），
+      // toast 会截断成一行看不出所以然，而且用户没法复制去排障。
+      const details = result.details || {}
+      const lines: any[] = [
+        h('div', { style: 'line-height: 1.6;' }, result.message || '连接测试失败')
+      ]
+
+      // 备注：说明 SNMP 失败不等于采集失败（ARP/MAC 默认走 SSH CLI）
+      if (details.collection_note) {
+        lines.push(h('div', {
+          style: 'margin-top: 8px; color: #909399; font-size: 12px; line-height: 1.6;'
+        }, details.collection_note))
+      }
+
+      // 排障上下文：SNMP 版本 / 用户名 / 协议，一眼看出用的是哪套凭据
+      const ctx: string[] = []
+      if (details.target_ip) ctx.push(`目标：${details.target_ip}`)
+      if (details.snmp_version) ctx.push(`版本：v${details.snmp_version}`)
+      if (details.snmp_username) ctx.push(`用户：${details.snmp_username}`)
+      if (details.snmp_auth_protocol) ctx.push(`认证协议：${details.snmp_auth_protocol}`)
+      if (details.snmp_priv_protocol) ctx.push(`加密协议：${details.snmp_priv_protocol}`)
+      if (ctx.length) {
+        lines.push(h('div', {
+          style: 'margin-top: 8px; color: #909399; font-size: 12px;'
+        }, ctx.join('　')))
+      }
+
+      // pysnmp 英文原文照样给出，排障时可以直接搜索
+      if (details.raw_error) {
+        lines.push(h('div', {
+          style: 'margin-top: 8px; color: #909399; font-size: 12px; font-family: monospace;'
+        }, `原始错误：${details.raw_error}`))
+      }
+
+      ElMessageBox.alert(h('div', null, lines), '连接测试失败', {
+        type: 'error',
+        confirmButtonText: '知道了',
+        // 报错内容需要能选中复制，默认的居中样式不方便看
+        customStyle: { maxWidth: '560px' }
+      }).catch(() => { /* 用户关闭弹窗，无需处理 */ })
     }
   } catch (error) {
     loading.close()
@@ -1271,15 +1424,23 @@ const handleBatchSnmpConfig = async () => {
     })
 
     try {
-      const updateData = {
+      // snmp_profile_id 每次都显式给出（null 也发）：后端把「字段不在请求里」
+      // 当成「不改动绑定」，不显式发 null 就没法把设备从模板上摘下来。
+      const updateData: Record<string, any> = {
         snmp_enabled: true,
         snmp_version: batchSnmpForm.snmp_version,
         snmp_port: batchSnmpForm.snmp_port,
-        snmp_username: batchSnmpForm.snmp_username,
-        snmp_auth_protocol: batchSnmpForm.snmp_auth_protocol,
-        snmp_auth_password: batchSnmpForm.snmp_auth_password,
-        snmp_priv_protocol: batchSnmpForm.snmp_priv_protocol,
-        snmp_priv_password: batchSnmpForm.snmp_priv_password
+        snmp_profile_id: batchSnmpForm.snmp_profile_id ?? null
+      }
+
+      // 引用模板时逐台凭据字段一律不发：后端本来就忽略它们，发过去只会让
+      // 「这批量到底用了哪份口令」变得含糊。
+      if (!batchSnmpForm.snmp_profile_id) {
+        updateData.snmp_username = batchSnmpForm.snmp_username
+        updateData.snmp_auth_protocol = batchSnmpForm.snmp_auth_protocol
+        updateData.snmp_auth_password = batchSnmpForm.snmp_auth_password
+        updateData.snmp_priv_protocol = batchSnmpForm.snmp_priv_protocol
+        updateData.snmp_priv_password = batchSnmpForm.snmp_priv_password
       }
 
       // 分批处理，每批10个交换机，避免并发请求过多
@@ -1344,6 +1505,7 @@ const handleBatchSnmpConfig = async () => {
       Object.assign(batchSnmpForm, {
         snmp_version: '3',
         snmp_port: 161,
+        snmp_profile_id: null,
         snmp_username: '',
         snmp_auth_protocol: 'SHA',
         snmp_auth_password: '',
@@ -1366,6 +1528,9 @@ const handleBatchSnmpConfig = async () => {
 onMounted(() => {
   loadSwitches()
   checkDuplicates()
+  // 预取凭据模板列表，免得打开对话框时下拉框先空一下再冒出来。
+  // store 内部有缓存，这个页面来回切也只请求一次。
+  snmpProfileStore.load()
 })
 </script>
 

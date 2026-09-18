@@ -51,6 +51,16 @@
               <template #icon><el-icon><Refresh /></el-icon></template>
               刷新设备信息
             </el-button>
+            <el-button
+              type="danger"
+              size="small"
+              class="detail-action-button"
+              @click="handleDelete"
+              :loading="deletingSwitch"
+            >
+              <template #icon><el-icon><Delete /></el-icon></template>
+              删除交换机
+            </el-button>
           </el-space>
         </div>
       </template>
@@ -94,6 +104,16 @@
             {{ switchInfo.snmp_enabled ? '已启用' : '未启用' }}
           </el-tag>
         </el-descriptions-item>
+        <el-descriptions-item label="SNMP 凭据来源" label-class-name="desc-label">
+          <!--
+            引用模板时把模板名摆出来。这一步很要紧：模板口令改了以后设备却毫无变化，
+            先看这里是不是「本机自带」——没挂上模板的话，改模板当然不起作用。
+          -->
+          <el-tag v-if="switchInfo.snmp_profile_id" type="warning" size="small">
+            模板：{{ switchInfo.snmp_profile_name || `#${switchInfo.snmp_profile_id}` }}
+          </el-tag>
+          <span v-else style="color: #909399;">本机自带</span>
+        </el-descriptions-item>
         <el-descriptions-item label="最近采集状态" label-class-name="desc-label">
           <el-tag
             v-if="switchInfo.last_collection_status"
@@ -106,6 +126,12 @@
         </el-descriptions-item>
         <el-descriptions-item label="最近采集时间" label-class-name="desc-label">
           {{ getLatestCollectionTime(switchInfo) }}
+        </el-descriptions-item>
+        <el-descriptions-item label="上次成功采集" label-class-name="desc-label">
+          <span v-if="switchInfo.last_successful_collection_at" style="color: #409eff; font-weight: 500;">
+            {{ formatDateTime(switchInfo.last_successful_collection_at) }}
+          </span>
+          <span v-else style="color: #909399;">从未成功</span>
         </el-descriptions-item>
         <el-descriptions-item label="Trunk 人工识别" label-class-name="desc-label">
           <div class="trunk-review-status">
@@ -234,6 +260,39 @@
         </el-form-item>
 
         <template v-if="switchForm.snmp_enabled">
+          <el-form-item label="凭据来源" prop="snmp_profile_id">
+            <el-select
+              v-model="switchForm.snmp_profile_id"
+              placeholder="本机自带（不引用模板）"
+              style="width: 100%"
+            >
+              <el-option label="本机自带（不引用模板）" :value="null" />
+              <el-option
+                v-for="p in snmpProfileStore.enabledProfiles()"
+                :key="p.id"
+                :label="`模板：${p.name}（${p.version} · ${p.auth_protocol || '—'} / ${p.priv_protocol || '—'}）`"
+                :value="p.id"
+              />
+            </el-select>
+            <div class="edit-form-tip">
+              选中模板后，本机的用户名、协议、口令都不再使用，凭据整体以模板为准；
+              以后改口令只改模板一处，所有引用它的交换机同时生效。
+            </div>
+          </el-form-item>
+
+          <el-alert
+            v-if="switchForm.snmp_profile_id"
+            type="info"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 18px;"
+          >
+            <template #title>
+              凭据取自模板「{{ snmpProfileStore.byId(switchForm.snmp_profile_id)?.name }}」，
+              用户名、协议、口令都在模板上维护。改回「本机自带」并保存即可解绑。
+            </template>
+          </el-alert>
+
           <el-form-item label="SNMP 版本" prop="snmp_version">
             <el-radio-group v-model="switchForm.snmp_version">
               <el-radio label="3">SNMPv3</el-radio>
@@ -241,6 +300,11 @@
             </el-radio-group>
           </el-form-item>
 
+          <!--
+            引用模板时整段隐藏：这些字段后端本来就不读，留在界面上只会让人以为
+            「这里填的还算数」，改了没效果反而更难排查。
+          -->
+          <template v-if="!switchForm.snmp_profile_id">
           <template v-if="switchForm.snmp_version === '3'">
             <el-form-item label="SNMP 用户名" prop="snmp_username">
               <el-input v-model="switchForm.snmp_username" placeholder="请输入 SNMP 用户名" />
@@ -250,7 +314,10 @@
               <el-select v-model="switchForm.snmp_auth_protocol">
                 <el-option label="MD5" value="MD5" />
                 <el-option label="SHA" value="SHA" />
-                <el-option label="SHA256" value="SHA256" />
+                <el-option label="SHA-224" value="SHA-224" />
+                <el-option label="SHA-256" value="SHA-256" />
+                <el-option label="SHA-384" value="SHA-384" />
+                <el-option label="SHA-512" value="SHA-512" />
               </el-select>
             </el-form-item>
 
@@ -269,9 +336,9 @@
             <el-form-item label="加密协议" prop="snmp_priv_protocol">
               <el-select v-model="switchForm.snmp_priv_protocol">
                 <el-option label="DES" value="DES" />
-                <el-option label="AES128" value="AES128" />
-                <el-option label="AES192" value="AES192" />
-                <el-option label="AES256" value="AES256" />
+                <el-option label="AES-128" value="AES-128" />
+                <el-option label="AES-192" value="AES-192" />
+                <el-option label="AES-256" value="AES-256" />
               </el-select>
             </el-form-item>
 
@@ -298,6 +365,7 @@
                 SNMPv2c 不加密，建议仅在可信网络环境中使用。
               </div>
             </el-form-item>
+          </template>
           </template>
 
           <el-form-item label="SNMP 端口" prop="snmp_port">
@@ -717,8 +785,8 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, reactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { Edit, Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { Delete, Edit, Refresh } from '@element-plus/icons-vue'
 import apiClient from '@/api'
 import {
   switchesApi,
@@ -729,9 +797,13 @@ import {
   type SwitchCreate,
   type Switch,
 } from '@/api/switches'
+// 凭据模板列表：编辑对话框的「凭据来源」下拉要用。与新增/批量配置共用同一份缓存。
+import { useSNMPProfilesStore } from '@/stores/snmpProfiles'
 
 const route = useRoute()
 const router = useRouter()
+
+const snmpProfileStore = useSNMPProfilesStore()
 
 const switchId = ref(Number(route.params.id))
 const switchInfo = ref<Switch | null>(null)
@@ -740,6 +812,7 @@ const loading = ref(true)
 const deviceInfoLoading = ref(false)
 const showEditDialog = ref(false)
 const savingSwitch = ref(false)
+const deletingSwitch = ref(false)
 const switchFormRef = ref<FormInstance>()
 
 const arpData = ref<any[]>([])
@@ -786,6 +859,8 @@ const switchForm = reactive<SwitchCreate>({
   snmp_enabled: true,
   snmp_version: '3',
   snmp_port: 161,
+  // null = 本机自带凭据，不引用模板。
+  snmp_profile_id: null,
   snmp_username: '',
   snmp_auth_protocol: 'SHA',
   snmp_auth_password: '',
@@ -825,6 +900,11 @@ const switchRules: FormRules = {
   snmp_username: [
     {
       validator: (_rule, value, callback) => {
+        // 引用模板时用户名在模板上，这里不校验；否则隐藏的必填项会拦住提交。
+        if (switchForm.snmp_profile_id) {
+          callback()
+          return
+        }
         if (switchForm.snmp_enabled && switchForm.snmp_version === '3' && !value) {
           callback(new Error('SNMPv3 必须填写用户名'))
           return
@@ -837,6 +917,10 @@ const switchRules: FormRules = {
   snmp_auth_password: [
     {
       validator: (_rule, value, callback) => {
+        if (switchForm.snmp_profile_id) {
+          callback()
+          return
+        }
         if (
           switchForm.snmp_enabled &&
           switchForm.snmp_version === '3' &&
@@ -870,6 +954,10 @@ const switchRules: FormRules = {
   snmp_community: [
     {
       validator: (_rule, value, callback) => {
+        if (switchForm.snmp_profile_id) {
+          callback()
+          return
+        }
         if (
           switchForm.snmp_enabled &&
           switchForm.snmp_version === '2c' &&
@@ -1102,6 +1190,7 @@ const resetSwitchForm = () => {
     snmp_enabled: true,
     snmp_version: '3',
     snmp_port: 161,
+    snmp_profile_id: null,
     snmp_username: '',
     snmp_auth_protocol: 'SHA',
     snmp_auth_password: '',
@@ -1112,8 +1201,12 @@ const resetSwitchForm = () => {
   switchFormRef.value?.clearValidate()
 }
 
-const openEditDialog = () => {
+const openEditDialog = async () => {
   if (!switchInfo.value) return
+
+  // 先备好模板列表再开框：下拉框否则会先空一下再冒出来。
+  // store 有缓存，来回开关对话框也只请求一次。
+  await snmpProfileStore.load()
 
   Object.assign(switchForm, {
     name: switchInfo.value.name,
@@ -1133,6 +1226,7 @@ const openEditDialog = () => {
     snmp_enabled: switchInfo.value.snmp_enabled || false,
     snmp_version: switchInfo.value.snmp_version || '3',
     snmp_port: switchInfo.value.snmp_port || 161,
+    snmp_profile_id: switchInfo.value.snmp_profile_id ?? null,
     snmp_username: switchInfo.value.snmp_username || '',
     snmp_auth_protocol: switchInfo.value.snmp_auth_protocol || 'SHA',
     snmp_auth_password: '',
@@ -1174,6 +1268,11 @@ const saveSwitch = async () => {
       }
     })
 
+    // snmp_profile_id 必须显式带上，null 也要带：上面的循环把 null 当「空值」
+    // 丢掉了，而后端把「字段不在请求里」解释成「不改动现有绑定」，两者语义相反。
+    // 少了这一行，界面上就永远解不了绑（选回「本机自带」保存后还是挂着模板）。
+    updateData.snmp_profile_id = switchForm.snmp_profile_id ?? null
+
     const updatedSwitch = await switchesApi.update(switchInfo.value.id, updateData)
     switchInfo.value = updatedSwitch
     ElMessage.success('交换机信息已更新')
@@ -1183,6 +1282,37 @@ const saveSwitch = async () => {
     ElMessage.error(error.response?.data?.detail || '保存交换机信息失败')
   } finally {
     savingSwitch.value = false
+  }
+}
+
+const handleDelete = async () => {
+  if (!switchInfo.value) return
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除交换机「${switchInfo.value.name}」吗？此操作不可撤销。`,
+      '删除交换机',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        confirmButtonClass: 'el-button--danger'
+      }
+    )
+  } catch {
+    return // 用户取消
+  }
+
+  deletingSwitch.value = true
+  try {
+    await switchesApi.delete(switchInfo.value.id)
+    ElMessage.success('交换机已删除')
+    router.push('/switches')
+  } catch (error: any) {
+    console.error('Failed to delete switch:', error)
+    ElMessage.error(error.response?.data?.detail || '删除交换机失败')
+  } finally {
+    deletingSwitch.value = false
   }
 }
 
@@ -1496,6 +1626,8 @@ const setTrunkReview = async (value: boolean) => {
 
 onMounted(async () => {
   await loadSwitchInfo()
+  // 与详情一起预取模板列表，供编辑对话框的「凭据来源」下拉使用。
+  snmpProfileStore.load()
   await loadArpData()
   await loadMacData()
   await loadPortAnalysis()

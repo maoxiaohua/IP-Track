@@ -589,11 +589,12 @@ class SwitchDiscoveryService:
         """
         try:
             from pysnmp.hlapi.v3arch.asyncio import (
-                SnmpEngine, UsmUserData, UdpTransportTarget, ContextData,
-                ObjectType, ObjectIdentity, get_cmd, CommunityData,
-                usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol, usmHMAC128SHA224AuthProtocol,
-                usmDESPrivProtocol, usmAesCfb128Protocol, usmAesCfb192Protocol, usmAesCfb256Protocol
+                SnmpEngine, UdpTransportTarget, ContextData,
+                ObjectType, ObjectIdentity, get_cmd
             )
+            # 认证凭据统一走 services.snmp_service.build_snmp_auth，
+            # 与连接测试、后台采集共用同一份协议映射与 v1/v2c 分支。
+            from services.snmp_service import build_snmp_auth
 
             port = snmp_config.get('snmp_port', 161)
             version = snmp_config.get('snmp_version', '3')
@@ -603,43 +604,26 @@ class SwitchDiscoveryService:
             if version == '3':
                 username = snmp_config.get('snmp_username', '')
                 auth_password = snmp_config.get('snmp_auth_password', '')
-                priv_password = snmp_config.get('snmp_priv_password', '')
-                auth_protocol = snmp_config.get('snmp_auth_protocol', 'SHA').upper()
-                priv_protocol = snmp_config.get('snmp_priv_protocol', 'AES128').upper()
 
                 if not username or not auth_password:
                     logger.debug(f"{ip}: SNMP v3 config incomplete, skipping SNMP discovery")
                     return None
 
-                auth_map = {
-                    'MD5': usmHMACMD5AuthProtocol,
-                    'SHA': usmHMACSHAAuthProtocol,
-                    'SHA256': usmHMAC128SHA224AuthProtocol,
-                }
-                priv_map = {
-                    'DES': usmDESPrivProtocol,
-                    'AES': usmAesCfb128Protocol,
-                    'AES128': usmAesCfb128Protocol,
-                    'AES192': usmAesCfb192Protocol,
-                    'AES256': usmAesCfb256Protocol,
-                }
-                if priv_password:
-                    auth_data = UsmUserData(
-                        username,
-                        authKey=auth_password,
-                        privKey=priv_password,
-                        authProtocol=auth_map.get(auth_protocol, usmHMACSHAAuthProtocol),
-                        privProtocol=priv_map.get(priv_protocol, usmAesCfb128Protocol)
-                    )
-                else:
-                    auth_data = UsmUserData(
-                        username,
-                        authKey=auth_password,
-                        authProtocol=auth_map.get(auth_protocol, usmHMACSHAAuthProtocol)
-                    )
+                auth_data = build_snmp_auth(
+                    username=username,
+                    auth_protocol=snmp_config.get('snmp_auth_protocol', 'SHA'),
+                    auth_password=auth_password,
+                    priv_protocol=snmp_config.get('snmp_priv_protocol', 'AES128'),
+                    priv_password=snmp_config.get('snmp_priv_password', ''),
+                    snmp_version='3',
+                )
             else:
-                community = snmp_config.get('snmp_community', settings.SNMP_COMMUNITY)
-                auth_data = CommunityData(community)
+                auth_data = build_snmp_auth(
+                    username=None,
+                    auth_protocol=None,
+                    auth_password=snmp_config.get('snmp_community', settings.SNMP_COMMUNITY),
+                    snmp_version='2c',
+                )
 
             transport = await UdpTransportTarget.create((ip, port), timeout=5, retries=1)
 

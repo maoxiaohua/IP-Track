@@ -28,6 +28,7 @@
       >
         <p>在此页面配置交换机的 SNMP 凭据，系统会使用这些凭据做设备识别和轻量补充采集，例如硬件型号、系统信息以及部分 SNMP 可读属性。</p>
         <p>ARP/MAC 表已统一走交换机 CLI 采集（SSH/Telnet）；推荐使用 <strong>SNMPv3</strong>，同时兼容仅认证不加密的老设备场景。</p>
+        <p>「凭据来源」可以选一个已保存的凭据模板：选上之后这台交换机不再用自己那份凭据，改模板口令时所有引用它的交换机一起生效。</p>
       </el-alert>
     </el-card>
 
@@ -110,6 +111,17 @@
           </template>
         </el-table-column>
 
+        <!-- 凭据来源：一眼看出这台是引用模板还是用自己那份。
+             排查「改了模板口令设备却没反应」时，第一步就是看这一列。 -->
+        <el-table-column label="凭据来源" min-width="140">
+          <template #default="{ row }">
+            <el-tag v-if="row.snmp_profile_id" type="warning" size="small">
+              模板：{{ row.snmp_profile_name || `#${row.snmp_profile_id}` }}
+            </el-tag>
+            <span v-else class="text-muted">本机自带</span>
+          </template>
+        </el-table-column>
+
         <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
             <el-space>
@@ -155,6 +167,7 @@
     >
       <SNMPConfigForm
         v-if="currentSwitch"
+        :key="currentSwitch.id"
         :switch-id="currentSwitch.id"
         :switch-ip="currentSwitch.ip_address"
         :initial-config="currentConfig"
@@ -234,8 +247,10 @@ const batchConfig = ref<Partial<SNMPConfig>>({
   snmp_enabled: true,
   snmp_version: '3',
   snmp_auth_protocol: 'SHA',
-  snmp_priv_protocol: 'AES128',
-  snmp_port: 161
+  snmp_priv_protocol: 'AES-128',
+  snmp_port: 161,
+  // 批量配置下选模板最有价值：一次把一批交换机挂到同一个模板上。
+  snmp_profile_id: null
 });
 
 // 选中的交换机
@@ -269,7 +284,11 @@ const handleEdit = async (switchItem: SwitchSNMPStatus) => {
         snmp_username: config.snmp_username,
         snmp_auth_protocol: config.snmp_auth_protocol as any,
         snmp_priv_protocol: config.snmp_priv_protocol as any,
-        snmp_port: config.snmp_port
+        snmp_port: config.snmp_port,
+        // 必须回填：漏了它，引用模板的交换机打开时一律显示「本机自带」，
+        // 用户不动它直接保存，就等于把模板绑定悄悄解掉了。
+        // null 与 undefined 语义不同（null=解绑），所以这里要兜到 null。
+        snmp_profile_id: config.snmp_profile_id ?? null
       };
     } catch (error: any) {
       ElMessage.error(`加载配置失败: ${error.message}`);
@@ -281,8 +300,9 @@ const handleEdit = async (switchItem: SwitchSNMPStatus) => {
       snmp_enabled: true,
       snmp_version: '3',
       snmp_auth_protocol: 'SHA',
-      snmp_priv_protocol: 'AES128',
-      snmp_port: 161
+      snmp_priv_protocol: 'AES-128',
+      snmp_port: 161,
+      snmp_profile_id: null
     };
   }
 

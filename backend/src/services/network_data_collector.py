@@ -24,7 +24,11 @@ from models.ip_location import IPLocation
 from models.switch_command_template import SwitchCommandTemplate
 from models.alarm import AlarmSeverity, AlarmSourceType
 
-from services.snmp_service import snmp_service
+from services.snmp_service import (
+    snmp_service,
+    build_switch_snmp_config,
+    switch_has_snmp_credentials,
+)
 from services.cli_service import cli_service
 from services.port_analysis_service import port_analysis_service
 from services.ip_location_engine import ip_location_engine
@@ -223,16 +227,15 @@ class NetworkDataCollector:
             await self._clear_port_analysis_for_switch(db, switch.id)
 
     def _get_snmp_config(self, switch: Switch) -> Dict:
-        """Build SNMP configuration dictionary for a switch"""
-        return {
-            'snmp_username': switch.snmp_username,
-            'snmp_auth_protocol': switch.snmp_auth_protocol,
-            'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-            'snmp_priv_protocol': switch.snmp_priv_protocol,
-            'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-            'snmp_port': switch.snmp_port,
-            'snmp_version': switch.snmp_version,
-        }
+        """
+        取该交换机**实际生效**的 SNMP 配置。
+
+        以前这里直接把 switch 的七个 snmp_* 列拼成字典。交换机改成「引用 SNMP 模板」
+        之后，这些列在引用模板的交换机上全是空的，再直接拼就会拿到一份没有口令的配置 ——
+        采集这边不报错，只是静默地什么都采不到，是这次改动里最危险的一类漏改。
+        所以统一改走 build_switch_snmp_config，由它决定凭据来自模板还是来自交换机自己。
+        """
+        return build_switch_snmp_config(switch)
 
     def _build_cli_config(self, switch: Switch) -> Dict:
         """Build CLI configuration dictionary for a switch"""
@@ -1200,20 +1203,11 @@ class NetworkDataCollector:
         if not (switch.serial_number and switch.serial_number.strip()):
             serial = None
             vendor_lower = (switch.vendor or '').lower()
-            if 'dell' not in vendor_lower and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+            if 'dell' not in vendor_lower and switch_has_snmp_credentials(switch):
                 try:
                     from services.snmp_service import snmp_service as _snmp_svc
-                    snmp_config = {
-                        'snmp_username': switch.snmp_username,
-                        'snmp_auth_protocol': switch.snmp_auth_protocol,
-                        'snmp_auth_password_encrypted': switch.snmp_auth_password_encrypted,
-                        'snmp_priv_protocol': switch.snmp_priv_protocol,
-                        'snmp_priv_password_encrypted': switch.snmp_priv_password_encrypted,
-                        'snmp_port': switch.snmp_port or 161,
-                        'snmp_version': switch.snmp_version,
-                    }
                     serial = await _snmp_svc.get_chassis_serial(
-                        str(switch.ip_address), snmp_config
+                        str(switch.ip_address), self._get_snmp_config(switch)
                     )
                 except Exception as serial_err:
                     logger.debug(f"  SNMP serial collection failed for {switch.name}: {serial_err}")
@@ -1269,7 +1263,7 @@ class NetworkDataCollector:
 
         # Resolve vendor-specific SNMP OID overrides
         oid_overrides: Optional[Dict[str, str]] = None
-        if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if switch_has_snmp_credentials(switch):
             all_overrides = await self._load_oid_overrides(db)
             from services.snmp_service import snmp_service as _snmp_svc
             oid_overrides = _snmp_svc.resolve_oid_overrides(
@@ -1301,7 +1295,7 @@ class NetworkDataCollector:
             try_snmp_first = True  # AUTO defaults to SNMP first
 
         # --- Try primary method ---
-        if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if try_snmp_first and switch_has_snmp_credentials(switch):
             arp_result_detail = await self._try_snmp_arp(
                 switch, arp_entries, collected_at, oid_overrides
             )
@@ -1322,8 +1316,8 @@ class NetworkDataCollector:
                 )
                 if arp_entries:
                     arp_method_used = 'cli'
-        elif try_snmp_first and switch.snmp_enabled and not switch.snmp_auth_password_encrypted:
-            # SNMP enabled but no credentials — skip SNMP and try CLI directly
+        elif try_snmp_first and not switch_has_snmp_credentials(switch):
+            # SNMP 用不了（未启用，或没有可用凭据，含引用模板但模板缺失）—— 直接走 CLI
             if switch.cli_enabled and switch.password_encrypted:
                 logger.info(f"  ARP: SNMP enabled but no credentials for {switch.name}, trying CLI instead")
                 arp_result_detail = await self._try_cli_arp(
@@ -1339,19 +1333,19 @@ class NetworkDataCollector:
             if arp_entries:
                 arp_method_used = 'cli'
             elif CollectionStrategy.should_fallback_to_snmp(switch.vendor, switch.model) and \
-                 switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                 switch_has_snmp_credentials(switch):
                 logger.info(f"  ARP: CLI empty/failed, falling back to SNMP for {switch.name}")
                 arp_result_detail += " | " + await self._try_snmp_arp(
                     switch, arp_entries, collected_at, oid_overrides
                 )
                 if arp_entries:
                     arp_method_used = 'snmp'
-        elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        elif try_cli_first and switch_has_snmp_credentials(switch):
             logger.info(f"  ARP: CLI not available for {switch.name}, using SNMP directly")
             arp_result_detail = await self._try_snmp_arp(switch, arp_entries, collected_at, oid_overrides)
             if arp_entries:
                 arp_method_used = 'snmp'
-        elif try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        elif try_snmp_first and switch_has_snmp_credentials(switch):
             # Already tried SNMP in the first branch and fell through (no CLI fallback)
             pass
         else:
@@ -1365,7 +1359,7 @@ class NetworkDataCollector:
         mac_method_used = None
         mac_result_detail = ""
 
-        if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if try_snmp_first and switch_has_snmp_credentials(switch):
             mac_result_detail = await self._try_snmp_mac(
                 switch, mac_entries, collected_at, oid_overrides
             )
@@ -1385,7 +1379,7 @@ class NetworkDataCollector:
                 )
                 if mac_entries:
                     mac_method_used = 'cli'
-        elif try_snmp_first and switch.snmp_enabled and not switch.snmp_auth_password_encrypted:
+        elif try_snmp_first and not switch_has_snmp_credentials(switch):
             if switch.cli_enabled and switch.password_encrypted:
                 logger.info(f"  MAC: SNMP enabled but no credentials for {switch.name}, trying CLI instead")
                 mac_result_detail = await self._try_cli_mac(
@@ -1401,19 +1395,19 @@ class NetworkDataCollector:
             if mac_entries:
                 mac_method_used = 'cli'
             elif CollectionStrategy.should_fallback_to_snmp(switch.vendor, switch.model) and \
-                 switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                 switch_has_snmp_credentials(switch):
                 logger.info(f"  MAC: CLI empty/failed, falling back to SNMP for {switch.name}")
                 mac_result_detail += " | " + await self._try_snmp_mac(
                     switch, mac_entries, collected_at, oid_overrides
                 )
                 if mac_entries:
                     mac_method_used = 'snmp'
-        elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        elif try_cli_first and switch_has_snmp_credentials(switch):
             logger.info(f"  MAC: CLI not available for {switch.name}, using SNMP directly")
             mac_result_detail = await self._try_snmp_mac(switch, mac_entries, collected_at, oid_overrides)
             if mac_entries:
                 mac_method_used = 'snmp'
-        elif try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        elif try_snmp_first and switch_has_snmp_credentials(switch):
             pass
         else:
             mac_result_detail = "No usable method (CLI not configured, SNMP not configured)"
@@ -1453,6 +1447,7 @@ class NetworkDataCollector:
         # Update switch's last collection timestamp and status.
         switch.last_arp_collection_at = collected_at
         switch.last_mac_collection_at = collected_at
+        switch.last_successful_collection_at = collected_at
         switch.last_collection_status = 'success'
 
         # Include optical status in the collection message for completeness
@@ -1787,14 +1782,14 @@ class NetworkDataCollector:
 
         # Resolve vendor-specific SNMP OID overrides
         oid_overrides: Optional[Dict[str, str]] = None
-        if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if switch_has_snmp_credentials(switch):
             all_overrides = await self._load_oid_overrides(db)
             from services.snmp_service import snmp_service as _s
             oid_overrides = _s.resolve_oid_overrides(
                 all_overrides, switch.vendor or '', switch.model or ''
             )
 
-        if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if try_snmp_first and switch_has_snmp_credentials(switch):
             await self._try_snmp_mac(switch, mac_entries, collected_at, oid_overrides)
             if mac_entries:
                 method_used = 'snmp'
@@ -1808,7 +1803,7 @@ class NetworkDataCollector:
                 await self._try_cli_mac(switch, cli_config, templates, mac_entries)
                 if mac_entries:
                     method_used = 'cli'
-        elif try_snmp_first and switch.snmp_enabled and not switch.snmp_auth_password_encrypted:
+        elif try_snmp_first and not switch_has_snmp_credentials(switch):
             if switch.cli_enabled and switch.password_encrypted:
                 logger.info(f"  MAC: SNMP enabled but no credentials for {switch.name}, trying CLI instead")
                 await self._try_cli_mac(switch, cli_config, templates, mac_entries)
@@ -1820,13 +1815,13 @@ class NetworkDataCollector:
             if mac_entries:
                 method_used = 'cli'
             elif CollectionStrategy.should_fallback_to_snmp(switch.vendor, switch.model) and \
-                 switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                 switch_has_snmp_credentials(switch):
                 logger.info(f"  MAC: CLI empty, falling back to SNMP for {switch.name}")
                 await self._try_snmp_mac(switch, mac_entries, collected_at, oid_overrides)
                 if mac_entries:
                     method_used = 'snmp'
 
-        elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        elif try_cli_first and switch_has_snmp_credentials(switch):
             logger.info(f"  MAC: CLI not available for {switch.name}, using SNMP directly")
             await self._try_snmp_mac(switch, mac_entries, collected_at, oid_overrides)
             if mac_entries:
@@ -1838,6 +1833,7 @@ class NetworkDataCollector:
             await self._store_mac_entries_bulk(db, switch.id, mac_entries, collected_at)
             analysis_summary = await self.refresh_port_analysis_for_switch(db, switch)
             switch.last_mac_collection_at = collected_at
+            switch.last_successful_collection_at = collected_at
             switch.last_collection_status = 'success'
             switch.last_collection_message = (
                 f"MAC: {len(mac_entries)} entries via {method_used}; "
@@ -1875,14 +1871,14 @@ class NetworkDataCollector:
 
         # Resolve vendor-specific SNMP OID overrides
         oid_overrides: Optional[Dict[str, str]] = None
-        if switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if switch_has_snmp_credentials(switch):
             all_overrides = await self._load_oid_overrides(db)
             from services.snmp_service import snmp_service as _s
             oid_overrides = _s.resolve_oid_overrides(
                 all_overrides, switch.vendor or '', switch.model or ''
             )
 
-        if try_snmp_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if try_snmp_first and switch_has_snmp_credentials(switch):
             await self._try_snmp_arp(switch, arp_entries, collected_at, oid_overrides)
             if arp_entries:
                 method_used = 'snmp'
@@ -1897,8 +1893,8 @@ class NetworkDataCollector:
                 await self._try_cli_arp(switch, cli_config, templates, arp_entries)
                 if arp_entries:
                     method_used = 'cli'
-        elif try_snmp_first and switch.snmp_enabled and not switch.snmp_auth_password_encrypted:
-            # SNMP enabled but no credentials — skip SNMP and try CLI directly
+        elif try_snmp_first and not switch_has_snmp_credentials(switch):
+            # SNMP 用不了（未启用，或没有可用凭据，含引用模板但模板缺失）—— 直接走 CLI
             if switch.cli_enabled and switch.password_encrypted:
                 logger.info(f"  ARP: SNMP enabled but no credentials for {switch.name}, trying CLI instead")
                 await self._try_cli_arp(switch, cli_config, templates, arp_entries)
@@ -1910,13 +1906,13 @@ class NetworkDataCollector:
             if arp_entries:
                 method_used = 'cli'
             elif CollectionStrategy.should_fallback_to_snmp(switch.vendor, switch.model) and \
-                 switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+                 switch_has_snmp_credentials(switch):
                 logger.info(f"  ARP: CLI empty, falling back to SNMP for {switch.name}")
                 await self._try_snmp_arp(switch, arp_entries, collected_at, oid_overrides)
                 if arp_entries:
                     method_used = 'snmp'
 
-        elif try_cli_first and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        elif try_cli_first and switch_has_snmp_credentials(switch):
             logger.info(f"  ARP: CLI not available for {switch.name}, using SNMP directly")
             await self._try_snmp_arp(switch, arp_entries, collected_at, oid_overrides)
             if arp_entries:
@@ -1927,6 +1923,7 @@ class NetworkDataCollector:
             switch.arp_collection_method = method_used
             await self._store_arp_entries_bulk(db, switch.id, arp_entries, collected_at)
             switch.last_arp_collection_at = collected_at
+            switch.last_successful_collection_at = collected_at
             switch.last_collection_status = 'success'
             switch.last_collection_message = f"ARP: {len(arp_entries)} entries via {method_used}"
             return arp_entries
@@ -1972,7 +1969,7 @@ class NetworkDataCollector:
             logger.debug(f"Auto mode: trying {preferred_method} first for optical on {switch.name}")
 
         # Try preferred method first
-        if preferred_method == 'snmp' and switch.snmp_enabled and switch.snmp_auth_password_encrypted:
+        if preferred_method == 'snmp' and switch_has_snmp_credentials(switch):
             try:
                 snmp_config = self._get_snmp_config(switch)
                 optical_modules = await asyncio.wait_for(

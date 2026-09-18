@@ -1,7 +1,18 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float
+from typing import Any, Optional
+
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, ForeignKey
 from sqlalchemy.dialects.postgresql import INET
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from core.database import Base
+
+# 必须在这里显式导入 SNMPProfile，否则下面 relationship('SNMPProfile') 里的字符串
+# 在本进程的 mapper registry 里找不到对应类，第一次查询时抛 InvalidRequestError。
+# models/__init__.py 是空的，各进程按需导入模型子集：只导入 models.switch 的进程
+# （例如某些采集/测试路径）此前根本不会加载 models.ipam。
+# 方向是安全的：models/ipam.py 里引用 Switch 用的是字符串 relationship("Switch")，
+# 不反向 import 本模块，所以这里不构成循环导入。
+from models.ipam import SNMPProfile  # noqa: F401
 
 
 class Switch(Base):
@@ -43,6 +54,20 @@ class Switch(Base):
     snmp_priv_password_encrypted = Column(Text, nullable=True)
     snmp_community = Column(String(100), nullable=True)  # For SNMPv2c
 
+    # 引用的 SNMP 凭据模板。非空时这台交换机的 SNMP 凭据**整体以模板为准**，
+    # 上面的 snmp_username/snmp_auth_protocol/*_encrypted 列被忽略（但保留不动，
+    # 便于随时解绑回退）。目的是让口令只在模板上维护一处 —— 200 多台各存一份时，
+    # 改口令漏改一台的症状是设备侧回 WrongDigest，和「口令配错」完全一样，极难查。
+    snmp_profile_id = Column(
+        Integer,
+        ForeignKey('snmp_profiles.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    # lazy='selectin'：采集/测试都是异步会话，惰性加载会在属性访问的那一刻抛
+    # MissingGreenlet。这里随父对象一起预加载，代价只是一条 JOIN。
+    snmp_profile = relationship('SNMPProfile', lazy='selectin')
+
     # Data collection settings
     auto_collect_arp = Column(Boolean, default=True, nullable=False)  # Auto collect ARP table
     auto_collect_mac = Column(Boolean, default=True, nullable=False)  # Auto collect MAC table
@@ -50,6 +75,7 @@ class Switch(Base):
     last_mac_collection_at = Column(DateTime(timezone=True), nullable=True)  # Last MAC collection time
     last_optical_collection_at = Column(DateTime(timezone=True), nullable=True, index=True)
     last_optical_success_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    last_successful_collection_at = Column(DateTime(timezone=True), nullable=True, index=True)  # Last successful ARP/MAC collection time
     last_collection_status = Column(String(50), nullable=True)  # success, failed, partial
     last_collection_message = Column(Text, nullable=True)  # Collection result message
     last_optical_collection_status = Column(String(50), nullable=True)
@@ -88,5 +114,43 @@ class Switch(Base):
 
     @property
     def has_snmp_credentials(self) -> bool:
-        """True when SNMP is enabled and auth credentials are fully configured."""
-        return bool(self.snmp_enabled and self.snmp_auth_password_encrypted)
+        """
+        SNMP 已启用且凭据可用（本机自带的口令，或引用模板上带的口令）。
+
+        注意不能简化成 `self.snmp_auth_password_encrypted` —— 引用模板的交换机
+        这一列是空的，那样判断会让界面上所有引用模板的交换机都显示「未配置凭据」。
+        """
+        if not self.snmp_enabled:
+            return False
+        if self.snmp_profile_id:
+            profile = _safe_profile(self)
+            return bool(profile and (profile.auth_password_encrypted or profile.community_encrypted))
+        return bool(self.snmp_auth_password_encrypted)
+
+    @property
+    def snmp_profile_name(self) -> Optional[str]:
+        """
+        引用的 SNMP 模板名字，供列表页/详情页显示「凭据来源」。
+
+        只暴露模板**名字**，绝不带口令。关系取不到时返回 None 而不是抛异常 ——
+        刚创建还没 flush 的对象、或走裸 SQL 拿到的行，关系可能尚未加载，异步上下文
+        里直接访问会抛 MissingGreenlet，那会把整个列表接口打挂。
+        """
+        profile = _safe_profile(self)
+        return getattr(profile, 'name', None) if profile is not None else None
+
+
+def _safe_profile(switch: Any) -> Any:
+    """
+    安全地取出交换机引用的 SNMP 模板，取不到一律返回 None。
+
+    关系用 lazy='selectin' 声明，正常查询出来的交换机都是预加载好的；但刚创建还没
+    flush 的对象、或走裸 SQL 拿到的行，关系可能尚未加载，异步上下文里直接访问会抛
+    MissingGreenlet。这里统一兜住，退化成「未引用模板」。
+    """
+    if not getattr(switch, 'snmp_profile_id', None):
+        return None
+    try:
+        return getattr(switch, 'snmp_profile', None)
+    except Exception:
+        return None

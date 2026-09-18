@@ -13,7 +13,12 @@ CREATE TABLE IF NOT EXISTS snmp_profiles (
     auth_password_encrypted TEXT,
 
     -- SNMPv3 Privacy
-    priv_protocol VARCHAR(20) CHECK (priv_protocol IN ('DES', 'AES', 'AES-192', 'AES-256')),
+    -- 取值清单要和前端视图 views/SNMPProfiles.vue 的下拉框、服务层
+    -- services/snmp_service.py 的 PRIV_PROTOCOL_MAP 保持一致。
+    -- 这里原先漏了 AES-128 —— 界面首推的就是它（还标着 Recommended），
+    -- 而 PRIV_PROTOCOL_MAP 本来就同时认 AES 和 AES128，只有约束不认，
+    -- 于是用户在界面上选它就必然撞约束报错。详见迁移 029。
+    priv_protocol VARCHAR(20) CHECK (priv_protocol IN ('DES', 'AES', 'AES-128', 'AES-192', 'AES-256')),
     priv_password_encrypted TEXT,
 
     -- SNMPv2c Community

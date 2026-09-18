@@ -24,6 +24,7 @@ from pysnmp.hlapi.v3arch.asyncio import (
     SnmpEngine, UsmUserData, UdpTransportTarget, ContextData,
     ObjectType, ObjectIdentity, get_cmd, next_cmd, CommunityData,
     usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol, usmHMAC128SHA224AuthProtocol,
+    usmHMAC192SHA256AuthProtocol, usmHMAC256SHA384AuthProtocol, usmHMAC384SHA512AuthProtocol,
     usmDESPrivProtocol, usmAesCfb128Protocol, usmAesCfb192Protocol, usmAesCfb256Protocol
 )
 from pysnmp.proto.rfc1902 import OctetString
@@ -31,6 +32,339 @@ from pysnmp.proto.rfc1905 import EndOfMibView
 import asyncio
 from utils.logger import logger
 from core.security import decrypt_password
+
+
+def normalize_protocol_key(name: Optional[str]) -> str:
+    """
+    协议名归一化：转大写并抹掉连字符、下划线、空格，只留字母数字。
+
+    系统里同一个协议有两种写法 —— snmp_profiles 表按 RFC 7860 的写法存
+    'SHA-256' / 'AES-192'，switches 表按 pysnmp 的写法存 'SHA256' / 'AES192'。
+    此前查表只做 .upper()，'SHA-256' 匹配不上任何键，于是**静默退化成默认的 SHA**：
+    选了 SHA-256 的模板，实际却用 SHA 去认证，设备侧回 WrongDigest，
+    和「口令配错」的症状完全一样。归一化之后两种写法都能命中。
+
+    Args:
+        name: 原始协议名，如 'SHA-256' / 'sha256' / 'AES_192'
+
+    Returns:
+        归一化后的键，如 'SHA256'；name 为空时返回空串
+    """
+    return ''.join(ch for ch in str(name or '').upper() if ch.isalnum())
+
+
+# 认证协议名 -> pysnmp 协议对象。
+# 键是归一化后的形式（全大写、无连字符），查表前必须先过 normalize_protocol_key：
+# 否则库里存 'md5' 这类小写值、或 'SHA-256' 这类带连字符的值时会静默退化成
+# 默认协议 SHA，造成「某个入口用 MD5、另一个入口用 SHA」这种极难察觉的分叉。
+#
+# 注意 SHA224/SHA256/SHA384/SHA512 必须各自对上 RFC 7860 的 HMAC 变体，
+# 尤其 'SHA256' 不能写成 usmHMAC128SHA224AuthProtocol —— 那是 SHA-224，
+# 报文摘要长度都不同，设备侧会直接判 HMAC 失败并回 WrongDigest，
+# 症状和「口令配错」一模一样，极难查。
+AUTH_PROTOCOL_MAP = {
+    'MD5': usmHMACMD5AuthProtocol,
+    'SHA': usmHMACSHAAuthProtocol,
+    'SHA1': usmHMACSHAAuthProtocol,
+    'SHA224': usmHMAC128SHA224AuthProtocol,
+    'SHA256': usmHMAC192SHA256AuthProtocol,
+    'SHA384': usmHMAC256SHA384AuthProtocol,
+    'SHA512': usmHMAC384SHA512AuthProtocol,
+}
+
+# 加密协议名 -> pysnmp 协议对象。同样先过 normalize_protocol_key，
+# 让 'des' / 'AES-128' / 'AES_256' 这些写法都能正确命中。
+PRIV_PROTOCOL_MAP = {
+    'DES': usmDESPrivProtocol,
+    'AES': usmAesCfb128Protocol,
+    'AES128': usmAesCfb128Protocol,
+    'AES192': usmAesCfb192Protocol,
+    'AES256': usmAesCfb256Protocol,
+}
+
+
+def build_snmp_auth(
+    username: Optional[str],
+    auth_protocol: Optional[str],
+    auth_password: Optional[str],
+    priv_protocol: Optional[str] = None,
+    priv_password: Optional[str] = None,
+    snmp_version: Optional[str] = None,
+) -> Any:
+    """
+    构建 SNMP 认证凭据对象 —— 全系统唯一的构造入口。
+
+    SNMPv1/v2c 用 CommunityData（团体字走 auth_password 传入）；
+    SNMPv3 用 UsmUserData；未配置加密口令时退化为 authNoPriv。
+
+    此前连接测试、SNMP 配置测试、设备发现各自内联复制了一份实现，协议名归一化、
+    v1/v2c 分支、默认值互不相同，同一份配置换个入口就可能构造出不同的认证参数。
+    统一到这里之后，任何入口对同一台交换机都生成完全一致的凭据。
+
+    Args:
+        username: SNMPv3 用户名（v1/v2c 时忽略）
+        auth_protocol: 'MD5' / 'SHA' / 'SHA256'（大小写不敏感）
+        auth_password: 认证口令（v1/v2c 时是团体字）
+        priv_protocol: 'DES' / 'AES' / 'AES128' / 'AES192' / 'AES256'（大小写不敏感）
+        priv_password: 加密口令；为空则用 authNoPriv
+        snmp_version: '1'/'2c' -> CommunityData，其它 -> SNMPv3
+
+    Returns:
+        CommunityData 或 UsmUserData
+    """
+    if str(snmp_version or '').lower() in ('1', '2c', 'v1', 'v2c'):
+        # v1/v2c：auth_password 位置放的是解密后的团体字
+        return CommunityData(auth_password, mpModel=1)
+
+    auth_proto = AUTH_PROTOCOL_MAP.get(
+        normalize_protocol_key(auth_protocol), usmHMACSHAAuthProtocol
+    )
+    if not priv_password:
+        return UsmUserData(
+            username,
+            authKey=auth_password,
+            authProtocol=auth_proto
+        )
+
+    priv_proto = PRIV_PROTOCOL_MAP.get(
+        normalize_protocol_key(priv_protocol) or 'AES128', usmAesCfb128Protocol
+    )
+    return UsmUserData(
+        username,
+        authKey=auth_password,
+        privKey=priv_password,
+        authProtocol=auth_proto,
+        privProtocol=priv_proto
+    )
+
+
+# 标准 SNMP 配置字典的字段清单，顺序即 normalize_snmp_config 的输出顺序
+_SNMP_CONFIG_FIELDS = (
+    'snmp_version',
+    'snmp_username',
+    'snmp_auth_protocol',
+    'snmp_auth_password_encrypted',
+    'snmp_priv_protocol',
+    'snmp_priv_password_encrypted',
+    'snmp_port',
+)
+
+
+def _normalize_snmp_version(value: Optional[str]) -> str:
+    """
+    版本号归一化：统一成交换机表的 '3' / '2c' 写法。
+
+    SNMP 模板存的是 'v3' / 'v2c'（snmp_profiles.version），交换机表存的是 '3' / '2c'，
+    两套写法必须收敛到一处，否则「拿模板判断版本」的分支会全部走错。
+    """
+    text = str(value or '').strip().lower()
+    if text.startswith('v'):
+        text = text[1:]
+    return '2c' if text in ('1', '2', '2c') else '3'
+
+
+def _read_snmp_field(config: Any, field_name: str) -> Any:
+    """
+    从一份 SNMP 配置里读字段，dict 和对象两种载体都认，带不带 snmp_ 前缀都认。
+
+    读的顺序是「先带前缀、再裸名」：交换机行的属性叫 snmp_auth_password_encrypted，
+    SNMP 模板的属性叫 auth_password_encrypted，两种载体喂进同一个解析函数，
+    不必在调用点先判断自己拿到的是哪一种。
+    """
+    if config is None:
+        return None
+    bare = field_name[len('snmp_'):] if field_name.startswith('snmp_') else field_name
+    if isinstance(config, dict):
+        if field_name in config:
+            return config[field_name]
+        return config.get(bare)
+    value = getattr(config, field_name, None)
+    if value is None:
+        value = getattr(config, bare, None)
+    return value
+
+
+def normalize_snmp_config(config: Any) -> Dict[str, Any]:
+    """
+    把任意来源的 SNMP 配置统一成内部标准字典（键一律带 snmp_ 前缀）。
+
+    系统里同时存在两种叫法：
+
+    - 交换机行：``snmp_version='3'``、``snmp_auth_password_encrypted=...``
+    - SNMP 模板：``version='v3'``、``auth_password_encrypted=...``、``community_encrypted=...``
+
+    两种写法此前在六七个采集入口里各自内联解析，协议名怎么归一化、v2c 团体字放哪个
+    字段全靠各处自觉。统一到这里之后，模板和交换机行可以互相替换，不会再出现
+    「同一份配置换个入口就构造出不同凭据」。
+
+    v2c 的团体字一律落到 ``snmp_auth_password_encrypted`` —— 这是交换机表的历史约定，
+    采集侧只认这个字段；模板侧的 ``community_encrypted`` 在这里换算过来。
+
+    Args:
+        config: 交换机行、SNMP 模板对象，或它们对应的 dict
+
+    Returns:
+        标准配置字典，键为 _SNMP_CONFIG_FIELDS，可直接交给采集/测试代码使用
+    """
+    version = _normalize_snmp_version(_read_snmp_field(config, 'snmp_version'))
+
+    if version == '2c':
+        # v2c 只认团体字，用户名/协议一律清空，避免残留的 v3 字段误导排查
+        community = (
+            _read_snmp_field(config, 'snmp_auth_password_encrypted')
+            or _read_snmp_field(config, 'snmp_community_encrypted')
+        )
+        return {
+            'snmp_version': '2c',
+            'snmp_username': None,
+            'snmp_auth_protocol': None,
+            'snmp_auth_password_encrypted': community,
+            'snmp_priv_protocol': None,
+            'snmp_priv_password_encrypted': None,
+            'snmp_port': _read_snmp_field(config, 'snmp_port') or 161,
+        }
+
+    priv_password = _read_snmp_field(config, 'snmp_priv_password_encrypted')
+    return {
+        'snmp_version': '3',
+        'snmp_username': _read_snmp_field(config, 'snmp_username'),
+        'snmp_auth_protocol': _read_snmp_field(config, 'snmp_auth_protocol'),
+        'snmp_auth_password_encrypted': _read_snmp_field(config, 'snmp_auth_password_encrypted'),
+        # 没有加密口令就不该留着加密协议，否则界面上显示「AES128」而实际走的是 authNoPriv
+        'snmp_priv_protocol': _read_snmp_field(config, 'snmp_priv_protocol') if priv_password else None,
+        'snmp_priv_password_encrypted': priv_password,
+        'snmp_port': _read_snmp_field(config, 'snmp_port') or 161,
+    }
+
+
+def _load_switch_snmp_profile(switch: Any) -> Any:
+    """
+    安全地取出交换机引用的 SNMP 模板，取不到一律返回 None。
+
+    关系用 lazy='selectin' 声明，正常查询出来的交换机都是预加载好的；但刚创建还没
+    flush 的对象、或走裸 SQL 拿到的行，关系可能尚未加载，异步上下文里直接访问会抛
+    MissingGreenlet。这里统一兜住，退化成「未引用模板」—— 绝不因为取不到模板
+    就把整个采集/连接测试打成异常。
+    """
+    if not getattr(switch, 'snmp_profile_id', None):
+        return None
+    try:
+        return getattr(switch, 'snmp_profile', None)
+    except Exception:
+        return None
+
+
+def build_switch_snmp_config(switch: Any) -> Dict[str, Any]:
+    """
+    取出一台交换机**实际生效**的 SNMP 配置 —— 采集、连接测试、设备发现统一从这里取。
+
+    交换机引用了 SNMP 模板（``snmp_profile_id`` 非空）时**整体以模板为准**，包括端口；
+    没引用模板时用交换机自己那份。两种来源都经 normalize_snmp_config 归一化，
+    所以调用方拿到的永远是同一种形状、同一套协议名。
+
+    注意：整体以模板为准是有意为之 —— 「引用模板」的语义就是这份凭据连同传输参数
+    只在模板上维护一处。界面上选中模板时会把模板的版本/端口一并回写到交换机行，
+    两边显示不会打架。
+
+    Args:
+        switch: Switch 实例（或任何带 snmp_* 字段的对象）
+
+    Returns:
+        标准配置字典，键为 _SNMP_CONFIG_FIELDS
+    """
+    profile = _load_switch_snmp_profile(switch)
+    if profile is not None:
+        return normalize_snmp_config(profile)
+    return normalize_snmp_config(switch)
+
+
+def switch_has_snmp_credentials(switch: Any) -> bool:
+    """
+    判断一台交换机是否有可用的 SNMP 凭据 —— 全系统统一的判定入口。
+
+    此前各处直接写 ``switch.snmp_enabled and switch.snmp_auth_password_encrypted``。
+    交换机改成引用模板之后，自己那份 ``snmp_auth_password_encrypted`` 会是空的，
+    这些判断会**集体静默失效**：采集会跳过 SNMP 而不报错，界面显示「未配置凭据」，
+    但设备其实配得好好的。所以判定必须走这个函数，不能再直接读列。
+
+    Args:
+        switch: Switch 实例
+
+    Returns:
+        SNMP 已启用且解析出的凭据里确有口令/团体字时为 True
+    """
+    if not getattr(switch, 'snmp_enabled', False):
+        return False
+    return bool(build_switch_snmp_config(switch).get('snmp_auth_password_encrypted'))
+
+
+def apply_profile_display_fields(switch: Any, profile: Any) -> None:
+    """
+    把模板上的**非口令**展示字段回填到交换机行，让列表页/详情页显示的就是当前生效值。
+
+    只回填版本、端口、用户名、两个协议名这类可以公开展示的字段。**口令一律不落回
+    交换机行** —— 那正是这次改造要消灭的「同一份凭据抄 200 多份，改口令漏改一台」。
+    真正生效的凭据始终取自模板（见 build_switch_snmp_config），回填纯粹是为了显示。
+
+    注意这里**不动 snmp_enabled**：那是「这台设备到底用不用 SNMP」的开关，属于调用方
+    的决定，不是模板能覆盖的传输参数。
+
+    模板被编辑之后，引用它的交换机由 snmp_profiles 的更新接口统一重新回填；
+    这里不做也无法做自动同步。
+    """
+    if profile is None:
+        return
+    config = normalize_snmp_config(profile)
+    switch.snmp_version = config['snmp_version']
+    switch.snmp_port = config['snmp_port']
+    switch.snmp_username = config['snmp_username']
+    switch.snmp_auth_protocol = config['snmp_auth_protocol']
+    switch.snmp_priv_protocol = config['snmp_priv_protocol']
+
+
+# pysnmp 的 errorIndication 原文 -> 面向运维的中文解释与处置建议。
+# 键是报文里实际出现的子串（小写比较）；查不到时退回通用提示，原文始终保留在 details 里。
+_ERROR_HINTS = (
+    ('wrong snmp pdu digest',
+     '设备拒绝了 SNMPv3 认证（HMAC 校验失败）：设备上存在这个用户名，但认证口令或认证协议与系统里存的不一致。'
+     '请在设备上执行 show snmp user 核对该用户的 auth 协议和口令，或在系统里把该交换机的 SNMP 认证口令改成设备实际值。'),
+    ('unknown usm user',
+     '设备上不存在这个 SNMPv3 用户名。请在设备上执行 show snmp user 确认用户名，或在系统里改成正确的用户名。'),
+    ('not in time window',
+     '设备与服务器的时间偏差超出 SNMPv3 允许窗口（默认 150 秒）。请校准两侧时钟或配置 NTP 同步。'),
+    ('unsupported snmp security level',
+     '设备不支持该安全级别：系统要求认证+加密，但设备侧该用户可能只配了认证。'
+     '请在设备上补齐加密配置，或在系统里清空加密口令改走 authNoPriv。'),
+    ('no such oid',
+     '设备不支持查询该 OID（通常不影响连通性判定，属于采集项缺失）。'),
+    # 注意 pysnmp 的超时原文是 'RequestTimedOut'（没有 'timeout' 这个子串），
+    # 单独列一条，不能只靠下面的 'timeout' 兜住。
+    ('requesttimedout',
+     '设备未在超时时间内响应：可能是 SNMP 未启用、团体字或端口不对，也可能有 ACL 拦截。'),
+    ('timeout', '设备未在超时时间内响应：可能是 SNMP 未启用、团体字或端口不对，也可能有 ACL 拦截。'),
+)
+
+
+def describe_snmp_error(error_indication: Any) -> str:
+    """
+    把 pysnmp 的 errorIndication 翻译成可操作的中文说明。
+
+    只做「解释」，不吞原文 —— 调用方应把本函数的返回值当作给人看的 message，
+    同时把 str(error_indication) 原样放进 details['raw_error']，
+    排障时仍然看得到 pysnmp 的原始英文错误。
+
+    Args:
+        error_indication: pysnmp get_cmd/next_cmd 返回的 errorIndication
+
+    Returns:
+        中文说明；命中已知错误时附带处置建议
+    """
+    text = str(error_indication or '').strip()
+    lowered = text.lower()
+    for needle, hint in _ERROR_HINTS:
+        if needle in lowered:
+            return hint
+    return f'SNMP 请求失败：{text}' if text else 'SNMP 请求失败（设备无响应）'
 
 
 class SNMPService:
@@ -165,52 +499,24 @@ class SNMPService:
         """
         Create SNMP authentication credentials.
 
-        SNMPv1/v2c builds CommunityData from the community string (carried in
-        auth_password, which for v2c is the decrypted community string). SNMPv3
-        builds UsmUserData. Fixes v2c switches failing all SNMP collection.
+        保留这个方法是为了兼容既有的 self._create_snmp_auth(...) 调用点，
+        实际构造逻辑已统一到模块级的 build_snmp_auth()，保证所有入口一致。
 
         Args:
-            username: SNMPv3 username (ignored for v2c)
+            username: SNMPv3 username (ignored for v1/v2c)
             auth_protocol: 'MD5', 'SHA', 'SHA256'
-            auth_password: Authentication password (v2c: decrypted community)
+            auth_password: Authentication password (v1/v2c: decrypted community)
             priv_protocol: 'DES', 'AES', 'AES128', 'AES192', 'AES256'
             priv_password: Privacy password. When omitted, authNoPriv is used.
             snmp_version: '1'/'2c' -> CommunityData, otherwise SNMPv3
         """
-        if snmp_version in ('1', '2c'):
-            return CommunityData(auth_password, mpModel=1)
-
-        # Map protocol names to pysnmp protocol objects
-        auth_map = {
-            'MD5': usmHMACMD5AuthProtocol,
-            'SHA': usmHMACSHAAuthProtocol,
-            'SHA256': usmHMAC128SHA224AuthProtocol,
-        }
-
-        priv_map = {
-            'DES': usmDESPrivProtocol,
-            'AES': usmAesCfb128Protocol,
-            'AES128': usmAesCfb128Protocol,
-            'AES192': usmAesCfb192Protocol,
-            'AES256': usmAesCfb256Protocol,
-        }
-
-        auth_proto = auth_map.get(auth_protocol.upper(), usmHMACSHAAuthProtocol)
-        if not priv_password:
-            return UsmUserData(
-                username,
-                authKey=auth_password,
-                authProtocol=auth_proto
-            )
-
-        priv_proto = priv_map.get((priv_protocol or 'AES128').upper(), usmAesCfb128Protocol)
-
-        return UsmUserData(
-            username,
-            authKey=auth_password,
-            privKey=priv_password,
-            authProtocol=auth_proto,
-            privProtocol=priv_proto
+        return build_snmp_auth(
+            username=username,
+            auth_protocol=auth_protocol,
+            auth_password=auth_password,
+            priv_protocol=priv_protocol,
+            priv_password=priv_password,
+            snmp_version=snmp_version,
         )
 
     @staticmethod

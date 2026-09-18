@@ -4,6 +4,8 @@
       :data="switches"
       v-loading="loading"
       stripe
+      border
+      resizable
       style="width: 100%"
       @selection-change="handleSelectionChange"
       @sort-change="handleSortChange"
@@ -12,7 +14,7 @@
       <el-table-column type="selection" width="45" />
 
       <!-- Name -->
-      <el-table-column prop="name" label="名称" min-width="160">
+      <el-table-column prop="name" label="名称" min-width="150" show-overflow-tooltip>
         <template #default="{ row }">
           <el-link type="primary" @click="goToDetail(row)" underline="never" style="font-weight: 500; cursor: pointer;">
             {{ row.name }}
@@ -21,14 +23,14 @@
       </el-table-column>
 
       <!-- IP Address -->
-      <el-table-column prop="ip_address" label="IP 地址" width="135" sortable="custom">
+      <el-table-column prop="ip_address" label="IP 地址" width="130" sortable="custom">
         <template #default="{ row }">
           <el-tag type="primary" size="small">{{ row.ip_address }}</el-tag>
         </template>
       </el-table-column>
 
       <!-- Vendor + Model combined -->
-      <el-table-column prop="model" label="厂商 / 型号" min-width="160" sortable="custom">
+      <el-table-column prop="model" label="厂商 / 型号" min-width="150" sortable="custom">
         <template #default="{ row }">
           <div>
             <el-tag :type="getVendorTagType(row.vendor)" size="small">
@@ -42,7 +44,7 @@
       </el-table-column>
 
       <!-- Serial Number -->
-      <el-table-column prop="serial_number" label="序列号" width="160">
+      <el-table-column prop="serial_number" label="序列号" width="130">
         <template #default="{ row }">
           <span v-if="row.serial_number" style="font-size: 12px; font-family: monospace;">
             {{ row.serial_number }}
@@ -52,7 +54,7 @@
       </el-table-column>
 
       <!-- 采集媒介: SSH/SNMP method tags -->
-      <el-table-column label="采集媒介" width="145">
+      <el-table-column label="采集媒介" width="130">
         <template #default="{ row }">
           <div style="display: flex; gap: 4px; flex-wrap: wrap;">
             <el-tooltip :content="getCliTooltip(row)" placement="top">
@@ -76,7 +78,7 @@
       </el-table-column>
 
       <!-- 自动采集: ARP + MAC -->
-      <el-table-column label="自动采集" width="100">
+      <el-table-column label="自动采集" width="95">
         <template #default="{ row }">
           <div style="display: flex; gap: 4px;">
             <el-tooltip content="ARP 自动采集" placement="top">
@@ -89,7 +91,7 @@
         </template>
       </el-table-column>
 
-      <el-table-column label="Trunk 识别" width="140">
+      <el-table-column label="Trunk 识别" width="130">
         <template #default="{ row }">
           <div style="font-size: 12px;">
             <el-tag :type="row.trunk_review_completed ? 'success' : 'warning'" size="small">
@@ -106,7 +108,7 @@
       </el-table-column>
 
       <!-- 上次采集 -->
-      <el-table-column label="上次采集" width="110" column-key="last_collection_time" sortable="custom">
+      <el-table-column label="上次采集" width="130" column-key="last_collection_time" sortable="custom">
         <template #default="{ row }">
           <div v-if="row.last_collection_status" style="font-size: 12px;">
             <el-tag
@@ -115,8 +117,11 @@
             >
               {{ row.last_collection_status }}
             </el-tag>
-            <div v-if="row.last_arp_collection_at || row.last_mac_collection_at" style="color: #909399; margin-top: 2px; font-size: 12px;">
-              {{ formatCollectionTime(row) }}
+            <div v-if="row.last_successful_collection_at" style="color: #909399; margin-top: 2px; font-size: 12px;">
+              上次成功: {{ formatCollectionTime(row.last_successful_collection_at) }}
+            </div>
+            <div v-else-if="row.last_arp_collection_at || row.last_mac_collection_at" style="color: #909399; margin-top: 2px; font-size: 12px;">
+              {{ formatCollectionTime(row.last_arp_collection_at || row.last_mac_collection_at) }}
             </div>
           </div>
           <span v-else style="color: #909399; font-size: 12px;">-</span>
@@ -124,7 +129,7 @@
       </el-table-column>
 
       <!-- Ping 状态 + 响应时间 combined -->
-      <el-table-column prop="is_reachable" column-key="connection_status" label="连接状态" width="120" sortable="custom">
+      <el-table-column prop="is_reachable" column-key="connection_status" label="连接状态" width="112" sortable="custom">
         <template #default="{ row }">
           <div v-if="row.is_reachable === true">
             <el-tag type="success" size="small" effect="dark">
@@ -153,7 +158,7 @@
       </el-table-column>
 
       <!-- 操作 -->
-      <el-table-column label="操作" width="150" fixed="right">
+      <el-table-column label="操作" width="84">
         <template #default="{ row }">
           <el-space :size="5">
             <!-- Primary Action: View Details (on name click) + Test -->
@@ -240,22 +245,18 @@ const getVendorTagType = (vendor: string) => {
   return types[vendor] || 'info'
 }
 
-const formatCollectionTime = (row: Switch) => {
-  if (row.last_arp_collection_at || row.last_mac_collection_at) {
-    const time = row.last_arp_collection_at || row.last_mac_collection_at
-    if (!time) return '-'
+const formatCollectionTime = (time: string | null | undefined) => {
+  if (!time) return '-'
 
-    const date = new Date(time)
-    const now = new Date()
-    const diffMs = now.getTime() - date.getTime()
-    const diffMins = Math.floor(diffMs / 60000)
+  const date = new Date(time)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
 
-    if (diffMins < 1) return '刚刚'
-    if (diffMins < 60) return `${diffMins}分钟前`
-    if (diffMins < 1440) return `${Math.floor(diffMins / 60)}小时前`
-    return `${Math.floor(diffMins / 1440)}天前`
-  }
-  return '-'
+  if (diffMins < 1) return '刚刚'
+  if (diffMins < 60) return `${diffMins}分钟前`
+  if (diffMins < 1440) return `${Math.floor(diffMins / 60)}小时前`
+  return `${Math.floor(diffMins / 1440)}天前`
 }
 
 const formatRelativeTime = (time: string) => {
@@ -298,5 +299,11 @@ const handleAction = (command: string, row: Switch) => {
 <style scoped>
 .switch-list {
   width: 100%;
+}
+
+/* 让长内容自动换行而不是被截断（配合 min-width），保证所有列都能显示 */
+.el-table .cell {
+  word-break: break-all;
+  white-space: normal;
 }
 </style>
