@@ -86,6 +86,69 @@ export async function exportToExcel(
   downloadBlob(blob, `${filename}.xlsx`)
 }
 
+export interface ExcelSheetSpec {
+  /** Sheet name shown in Excel */
+  name: string
+  /** One object per row; keys of the first row become the header */
+  data: Record<string, any>[]
+}
+
+/**
+ * Export several sheets into a single .xlsx file.
+ * Each sheet uses the same header/data styling as exportToExcel.
+ */
+export async function exportMultiSheetExcel(sheets: ExcelSheetSpec[], filename: string) {
+  const validSheets = (sheets || []).filter(s => s && s.name)
+
+  if (validSheets.length === 0) {
+    console.warn('No data to export')
+    return
+  }
+
+  const workbook = new ExcelJS.Workbook()
+
+  validSheets.forEach(spec => {
+    const worksheet = workbook.addWorksheet(spec.name)
+    const data = spec.data || []
+
+    if (data.length === 0) {
+      const row = worksheet.addRow(['无数据'])
+      styleDataRow(row, 1, true)
+      return
+    }
+
+    const headers = Object.keys(data[0])
+
+    const headerRow = worksheet.addRow(headers)
+    styleHeader(headerRow, headers.length)
+
+    data.forEach((item, index) => {
+      const values = headers.map(h => item[h] ?? '')
+      const row = worksheet.addRow(values)
+      styleDataRow(row, headers.length, index % 2 === 0)
+    })
+
+    worksheet.columns = headers.map((header, colIdx) => {
+      const dataMaxLen = Math.max(...data.map(row => {
+        const val = row[header]
+        return val != null ? String(val).length : 0
+      }))
+      const headerLen = String(header).length * 2 // CJK chars are ~2x width
+      return {
+        header,
+        key: String(colIdx),
+        width: Math.min(Math.max(headerLen, dataMaxLen * 1.1) + 4, 40)
+      }
+    })
+
+    worksheet.views = [{ state: 'frozen', ySplit: 1 }]
+  })
+
+  const buffer = await workbook.xlsx.writeBuffer()
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+  downloadBlob(blob, `${filename}.xlsx`)
+}
+
 /**
  * Export data to CSV file (plain text, UTF-8 with BOM).
  */

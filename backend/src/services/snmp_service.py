@@ -36,21 +36,42 @@ from core.security import decrypt_password
 
 def normalize_protocol_key(name: Optional[str]) -> str:
     """
-    协议名归一化：转大写并抹掉连字符、下划线、空格，只留字母数字。
+    协议名归一化：转大写、抹掉连字符/下划线/空格，再把同义写法折叠到同一个键。
 
-    系统里同一个协议有两种写法 —— snmp_profiles 表按 RFC 7860 的写法存
-    'SHA-256' / 'AES-192'，switches 表按 pysnmp 的写法存 'SHA256' / 'AES192'。
-    此前查表只做 .upper()，'SHA-256' 匹配不上任何键，于是**静默退化成默认的 SHA**：
-    选了 SHA-256 的模板，实际却用 SHA 去认证，设备侧回 WrongDigest，
-    和「口令配错」的症状完全一样。归一化之后两种写法都能命中。
+    第一层（去标点）解决的是**格式**差异：系统里同一个协议有两种写法 ——
+    snmp_profiles 表按 RFC 7860 的写法存 'SHA-256' / 'AES-192'，switches 表按
+    pysnmp 的写法存 'SHA256' / 'AES192'。此前查表只做 .upper()，'SHA-256'
+    匹配不上任何键，于是**静默退化成默认的 SHA**：选了 SHA-256 的模板，实际却用
+    SHA 去认证，设备侧回 WrongDigest，和「口令配错」的症状完全一样。
+
+    第二层（折叠同义）解决的是**命名**差异：'AES' 和 'AES-128' / 'AES128'
+    是同一个算法的三种写法，去标点之后仍然得到 'AES' 和 'AES128' 两个不同的键。
+    只做第一层的话，这两个值在 _credential_mismatch 里会被判成「协议不同」——
+    而它们指向的协议对象是同一个。已实测：模板存 'AES'、239 台交换机存
+    'AES128'，干跑 adopt 会把其中 237 台误报成「加密协议不同」，于是这批设备
+    永远挂不上模板。折叠之后两者等价，模板不需要为了迁就写法去改。
 
     Args:
-        name: 原始协议名，如 'SHA-256' / 'sha256' / 'AES_192'
+        name: 原始协议名，如 'SHA-256' / 'sha256' / 'AES_192' / 'AES'
 
     Returns:
-        归一化后的键，如 'SHA256'；name 为空时返回空串
+        归一化并折叠后的键，如 'SHA256' / 'AES128'；name 为空时返回空串
     """
-    return ''.join(ch for ch in str(name or '').upper() if ch.isalnum())
+    key = ''.join(ch for ch in str(name or '').upper() if ch.isalnum())
+    return PROTOCOL_SYNONYMS.get(key, key)
+
+
+# 同义协议名折叠表：值是「代表性写法」，必须同时是 AUTH_PROTOCOL_MAP 或
+# PRIV_PROTOCOL_MAP 的键，否则折叠之后反而查不到表。
+#
+# 只收**确凿等价**的写法，也就是两张映射表里已经指向同一个协议对象的那几组：
+#   'AES' 与 'AES128'  -> usmAesCfb128Protocol
+#   'SHA' 与 'SHA1'    -> usmHMACSHAAuthProtocol
+# 不做 128/192/256 之间的折叠 —— 那是不同的算法，摘要/密钥长度都不同。
+PROTOCOL_SYNONYMS = {
+    'AES': 'AES128',
+    'SHA1': 'SHA',
+}
 
 
 # 认证协议名 -> pysnmp 协议对象。

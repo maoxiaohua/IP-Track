@@ -320,6 +320,7 @@ import apiClient from '@/api/index'
 import { ipamApi, type IPAMScanStatus } from '@/api/ipam'
 import IPDetailDrawer from '@/components/IPDetailDrawer.vue'
 import { useIPAMScanMonitor } from '@/composables/useIPAMScanMonitor'
+import { formatLastResponse, formatDateTime } from '@/utils/time'
 
 interface IPAddress {
   id: number
@@ -683,59 +684,8 @@ const scanSubnet = async () => {
   }
 }
 
-// Get Last Response (CRITICAL FUNCTION!)
-const getLastResponse = (ip: IPAddress): string => {
-  // ONLY use last_seen_at - this is when IP actually responded
-  // Do NOT fallback to last_scan_at (that's just when we scanned, not when it responded)
-  const dateStr = ip.last_seen_at
-
-  if (!dateStr) {
-    return ''
-  }
-
-  try {
-    const date = new Date(dateStr)
-    const now = new Date()
-
-    // Calculate difference
-    const diffMs = now.getTime() - date.getTime()
-    const diffMins = Math.floor(diffMs / 60000)
-    const diffHours = Math.floor(diffMs / 3600000)
-    const diffDays = Math.floor(diffMs / 86400000)
-
-    // Today
-    if (diffDays === 0) {
-      if (diffMins < 1) return 'Just now'
-      if (diffMins < 60) return `${diffMins} min ago`
-      if (diffHours < 2) return `${diffHours} hour ago`
-      return 'Today'
-    }
-
-    // Yesterday
-    if (diffDays === 1) return 'Yesterday'
-
-    // Within a week
-    if (diffDays < 7) return `${diffDays} days ago`
-
-    // Within a month
-    if (diffDays < 30) {
-      const weeks = Math.floor(diffDays / 7)
-      return `${weeks} week${weeks > 1 ? 's' : ''} ago`
-    }
-
-    // Within a year
-    if (diffDays < 365) {
-      const months = Math.floor(diffDays / 30)
-      return `${months} month${months > 1 ? 's' : ''} ago`
-    }
-
-    // More than a year
-    const years = Math.floor(diffDays / 365)
-    return `${years} year${years > 1 ? 's' : ''} ago`
-  } catch {
-    return 'Unknown'
-  }
-}
+// Get Last Response (CRITICAL FUNCTION!) — shared with the IPAM Excel export
+const getLastResponse = (ip: IPAddress): string => formatLastResponse(ip.last_seen_at)
 
 // Get color for Last Response
 const getLastResponseColor = (ip: IPAddress): string => {
@@ -774,21 +724,7 @@ const getStatusTooltip = (ip: IPAddress): string => {
   return 'Available - IP is not in use'
 }
 
-// Format datetime
-const formatDateTime = (dateStr?: string | null): string => {
-  if (!dateStr) return '-'
-  try {
-    return new Date(dateStr).toLocaleString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    })
-  } catch {
-    return dateStr
-  }
-}
+// Format datetime: see @/utils/time (shared with the IPAM Excel export)
 
 onMounted(() => {
   loadSubnet()

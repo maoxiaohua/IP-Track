@@ -5,7 +5,7 @@
         <div style="display: flex; justify-content: space-between; align-items: center">
           <h2 style="margin: 0">IP Address Management</h2>
           <div style="display: flex; gap: 10px">
-            <el-button type="primary" @click="exportToExcel">
+            <el-button type="primary" :loading="exportLoading" @click="exportToExcel">
               <el-icon><Download /></el-icon>
               导出 Excel
             </el-button>
@@ -500,6 +500,7 @@ import { Plus, Upload, Download, Search } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
 import { ipamApi, type IPAMScanStatus, type IPAddressDetail } from '@/api/ipam'
 import { useIPAMScanMonitor } from '@/composables/useIPAMScanMonitor'
+import { formatLastResponse, formatDateTime as formatAbsoluteDateTime } from '@/utils/time'
 import Chart from '@/components/Chart.vue'
 
 interface Subnet {
@@ -520,6 +521,7 @@ interface Subnet {
 const router = useRouter()
 const subnets = ref<Subnet[]>([])
 const loading = ref(false)
+const exportLoading = ref(false)
 const initialLoading = ref(true)
 const refreshing = ref(false)
 const scanning = ref<Record<number, boolean>>({})
@@ -1280,29 +1282,131 @@ const downloadTemplate = async () => {
   }
 }
 
-// Export to Excel
+// Export to Excel: Sheet1 = subnet list, Sheet2 = per-IP details of every subnet
 const exportToExcel = async () => {
   if (subnets.value.length === 0) {
     ElMessage.warning('没有数据可导出')
     return
   }
+  if (exportLoading.value) return
 
-  const { exportToExcel: exportXlsx } = await import('@/utils/export')
-  const exportData = subnets.value.map(subnet => ({
-    '子网名称': subnet.subnet_name,
-    '网络地址': subnet.network,
-    'VLAN ID': subnet.vlan_id || '',
-    '网关': subnet.gateway || '',
-    '总IP数': subnet.total_ips,
-    '已使用': subnet.used_ips,
-    '可用': subnet.available_ips,
-    '保留': subnet.reserved_ips,
-    '利用率(%)': subnet.utilization_percent?.toFixed(2) || '0.00',
-    '最后扫描': subnet.last_scan_at ? formatDateTime(subnet.last_scan_at) : '从未扫描'
-  }))
-  const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
-  await exportXlsx(exportData, `IPAM子网列表_${timestamp}`, '子网列表')
-  ElMessage.success('数据导出成功')
+  exportLoading.value = true
+  try {
+    const { exportMultiSheetExcel } = await import('@/utils/export')
+
+    // Sheet 1: 子网列表
+    const exportData = subnets.value.map(subnet => ({
+      '子网名称': subnet.subnet_name,
+      '网络地址': subnet.network,
+      'VLAN ID': subnet.vlan_id || '',
+      '网关': subnet.gateway || '',
+      '总IP数': subnet.total_ips,
+      '已使用': subnet.used_ips,
+      '可用': subnet.available_ips,
+      '保留': subnet.reserved_ips,
+      '利用率(%)': subnet.utilization_percent?.toFixed(2) || '0.00',
+      '最后扫描': subnet.last_scan_at ? formatDateTime(subnet.last_scan_at) : '从未扫描'
+    }))
+
+    // Sheet 2: 每个子网下每个 IP 的明细（不受页面筛选影响）
+    const PAGE_SIZE = 10000
+    // 并发子网数：既明显缩短导出耗时，又不会给后端造成压力
+    const SUBNET_CONCURRENCY = 6
+
+    const fetchSubnetIpRows = async (subnet: Subnet): Promise<Record<string, any>[]> => {
+      const rows: Record<string, any>[] = []
+      let skip = 0
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const result = await ipamApi.getIPAddresses({
+          subnet_id: subnet.subnet_id,
+          skip,
+          limit: PAGE_SIZE
+        })
+        const items = result.items || []
+
+        items.forEach(ip => {
+          rows.push({
+            '所属子网': subnet.subnet_name,
+            '网段': subnet.network,
+            'Status': ip.is_reachable ? 'Reachable' : 'Unreachable',
+            'IP Address': ip.ip_address,
+            'Last Response': formatLastResponse(ip.last_seen_at),
+            'Response Time': ip.response_time != null ? `${ip.response_time} ms` : '',
+            'DNS': ip.dns_name || ip.hostname || '',
+            'System Name': ip.system_name || '',
+            'Machine Type': ip.machine_type || '',
+            'Vendor': ip.vendor || '',
+            'Switch': ip.switch_name || '',
+            'Port': ip.switch_port || '',
+            'OS Type': ip.os_type || '',
+            'OS Name': ip.os_name || '',
+            'OS Version': ip.os_version || '',
+            'Last Boot Time': ip.last_boot_time ? formatAbsoluteDateTime(ip.last_boot_time) : '',
+            'MAC 地址': ip.mac_address || '',
+            'VLAN ID': ip.vlan_id ?? '',
+            '备注/描述': ip.description || '',
+            '最近扫描时间': ip.last_scan_at ? formatAbsoluteDateTime(ip.last_scan_at) : ''
+          })
+        })
+
+        skip += items.length
+        if (items.length < PAGE_SIZE || skip >= (result.total || 0)) break
+      }
+      return rows
+    }
+
+    // 按子网下标存放结果，保证导出的行顺序与子网列表一致
+    const rowsBySubnet: Record<string, any>[][] = new Array(subnets.value.length)
+    let failedSubnets = 0
+    let cursor = 0
+    const worker = async () => {
+      while (cursor < subnets.value.length) {
+        const index = cursor
+        cursor += 1
+        const subnet = subnets.value[index]
+        try {
+          rowsBySubnet[index] = await fetchSubnetIpRows(subnet)
+        } catch (error) {
+          console.error(`导出子网 ${subnet.network} 的 IP 明细失败:`, error)
+          rowsBySubnet[index] = []
+          failedSubnets += 1
+        }
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(SUBNET_CONCURRENCY, subnets.value.length) }, () => worker())
+    )
+
+    const ipRows: Record<string, any>[] = rowsBySubnet.flat()
+
+    // Excel 单个工作表最多 1048576 行（含表头），超出部分 Excel 无法打开
+    const EXCEL_MAX_DATA_ROWS = 1048575
+    if (ipRows.length > EXCEL_MAX_DATA_ROWS) {
+      ElMessage.error(`IP 明细共 ${ipRows.length} 条，超过 Excel 单表上限，无法导出`)
+      return
+    }
+
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-')
+    await exportMultiSheetExcel(
+      [
+        { name: '子网列表', data: exportData },
+        { name: 'IP明细', data: ipRows }
+      ],
+      `IPAM子网列表_${timestamp}`
+    )
+
+    if (failedSubnets > 0) {
+      ElMessage.warning(`已导出，但 ${failedSubnets} 个子网的 IP 明细获取失败`)
+    } else {
+      ElMessage.success(`数据导出成功（含 ${ipRows.length} 条 IP 明细）`)
+    }
+  } catch (error) {
+    console.error('导出失败:', error)
+    ElMessage.error('导出失败')
+  } finally {
+    exportLoading.value = false
+  }
 }
 
 // OS type chart click handler
