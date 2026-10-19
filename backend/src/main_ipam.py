@@ -6,10 +6,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.v1 import ipam
+from api.v1 import ipam, subnet_probe
 from services.network_scheduler import start_ipam_scheduler, stop_ipam_scheduler
 from services.ip_scan import ip_scan_service
 from services.ip_lookup import ip_lookup_service
+from services.subnet_probe_service import subnet_probe_service
 
 
 @asynccontextmanager
@@ -27,6 +28,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     print("🛑 Stopping IPAM Service...")
     await stop_ipam_scheduler()
+    await subnet_probe_service.shutdown()
     await ip_scan_service.shutdown()
     await ip_lookup_service.shutdown()
 
@@ -51,6 +53,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(ipam.router, prefix=settings.API_V1_PREFIX)
+app.include_router(subnet_probe.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 async def health():

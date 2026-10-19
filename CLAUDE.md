@@ -215,7 +215,8 @@ const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-col
 │   │   │   │   ├── collection.py        # 采集任务队列
 │   │   │   │   ├── settings.py          # 系统设置
 │   │   │   │   ├── bmc.py              # BMC 管理
-│   │   │   │   └── ipam.py             # IPAM API
+│   │   │   │   ├── ipam.py             # IPAM API
+│   │   │   │   └── subnet_probe.py     # 子网存活探测 API（独立工具，不属于 IPAM）
 │   │   │   └── routes/
 │   │   │       ├── network.py           # 端口分析等网络相关路由
 │   │   │       └── snmp_config.py       # SNMP 配置路由
@@ -229,6 +230,7 @@ const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-col
 │   │   │   ├── ip_lookup.py              # IP 定位引擎 (缓存+在线查询)
 │   │   │   ├── ip_scan.py                # IP 扫描
 │   │   │   ├── ipam_service.py           # IPAM 核心逻辑
+│   │   │   ├── subnet_probe_service.py   # 子网存活探测（并发 ping、内存任务表，不落库）
 │   │   │   ├── alarm_service.py          # 告警服务
 │   │   │   ├── port_analysis_service.py  # 端口分析
 │   │   │   ├── ip_location_engine.py     # IP 位置匹配引擎
@@ -280,6 +282,7 @@ const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-col
 │   │   │   ├── collection.py
 │   │   │   ├── ipam.py
 │   │   │   ├── bmc.py
+│   │   │   ├── subnet_probe.py
 │   │   │   └── settings.py
 │   │   ├── config/
 │   │   │   └── collection_strategy.py    # 采集策略 (CLI/SNMP 优先级)
@@ -310,6 +313,7 @@ const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-col
 │   │   │   ├── snmp.ts          # SNMP 配置 API
 │   │   │   ├── snmpProfiles.ts  # SNMP 模板 API
 │   │   │   ├── commandTemplates.ts # 命令模板 API
+│   │   │   ├── subnetProbe.ts   # 子网存活探测 API
 │   │   │   └── settings.ts      # 设置 API
 │   │   ├── views/               # 页面组件
 │   │   │   ├── Home.vue         # 首页
@@ -326,7 +330,8 @@ const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-col
 │   │   │   ├── SubnetDetail_SolarWinds.vue # 子网详情
 │   │   │   ├── OSTypeIPList.vue # OS 类型 IP 列表
 │   │   │   ├── BMCReset.vue     # BMC 重置管理
-│   │   │   └── OpticalModules.vue # 光模块单独页
+│   │   │   ├── OpticalModules.vue # 光模块单独页
+│   │   │   └── SubnetProbe.vue  # 子网存活快速探测（临时工具，独立于 IPAM）
 │   │   ├── components/          # 可复用组件
 │   │   │   ├── SwitchList.vue   # 交换机卡片列表
 │   │   │   ├── IPLookupForm.vue # IP 查询表单
@@ -366,5 +371,6 @@ const backendCollector = env.VITE_PROXY_COLLECTOR || 'http://iptrack-backend-col
 | 前端交换机页面 | `frontend/src/views/Switches.vue` | `frontend` |
 | 前端交换机详情 | `frontend/src/views/SwitchDetail.vue` | `frontend` |
 | 前端 API 调用 | `frontend/src/api/switches.ts` | `frontend` |
+| 子网存活探测 | `backend/src/services/subnet_probe_service.py` | `backend-ipam` + 前端 |
 | 数据库模型 | `backend/src/models/*.py` | 所有后端 + 执行迁移 SQL |
 | 环境变量 | `.env` | `docker compose down && docker compose up -d` |

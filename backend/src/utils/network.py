@@ -2,17 +2,78 @@
 Network utilities for ping and connectivity checks
 """
 import asyncio
+import ipaddress
 import platform
 from typing import Any, Dict, Optional
 
 
-async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, Any]:
+# 这些字样说明收到的是中间设备回送的 ICMP 差错报文（TTL 超时/目标不可达），
+# 只证明目标地址可路由，不能证明目标主机存活。
+_ICMP_NON_ECHO_MARKERS = (
+    "time to live exceeded",    # Linux: "From <router> icmp_seq=1 Time to live exceeded"
+    "ttl expired in transit",   # Windows: "Reply from <router>: TTL expired in transit"
+    "time exceeded",            # 其他 iputils/ping 版本的写法
+    "unreachable",              # Destination host/net/port unreachable
+    "request timed out",
+)
+
+
+def _is_echo_reply_from_host(output: str, host: str) -> bool:
+    """回包必须来自目标本身（Echo Reply）才判定存活。
+
+    只看退出码不够：Windows 的 ping 在收到中间路由器回送的
+    "TTL expired in transit" 时，退出码仍然是 0。
+    """
+    text = (output or "").lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _ICMP_NON_ECHO_MARKERS):
+        return False
+
+    target = host.strip().lower()
+    # 只看成功的回包行，避免被 "PING <ip> (<ip>)" 头部行误命中
+    reply_lines = [
+        line for line in text.splitlines()
+        if "bytes from" in line or "reply from" in line
+    ]
+    # Linux: "64 bytes from 10.1.2.3: icmp_seq=1 ..."
+    # Linux 反解主机名: "64 bytes from sw1.corp (10.1.2.3): ..."
+    # Windows: "Reply from 10.1.2.3: bytes=32 ..."
+    if any(f"from {target}" in line or f"({target})" in line for line in reply_lines):
+        return True
+    try:
+        ipaddress.ip_address(target)
+    except ValueError:
+        # 目标是主机名时 ping 只回显解析后的地址，无法按字面比对，放宽为"确有回包即存活"
+        return bool(reply_lines)
+    return False
+
+
+async def _terminate_process(process) -> None:
+    """Kill a ping subprocess and reap it, so no orphan/zombie is left behind."""
+    if process.returncode is not None:
+        return
+    try:
+        process.kill()
+    except ProcessLookupError:
+        return
+    except Exception:
+        pass
+    try:
+        await process.communicate()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
+async def ping_host(host: str, timeout: float = 2, count: int = 1) -> Dict[str, Any]:
     """
     Ping a host to check if it's reachable
 
     Args:
         host: IP address or hostname to ping
-        timeout: Timeout in seconds
+        timeout: Timeout in seconds (fractions allowed, e.g. 0.5)
         count: Number of ping packets to send
 
     Returns:
@@ -22,7 +83,7 @@ async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, An
     system = platform.system().lower()
 
     if system == "windows":
-        ping_cmd = ["ping", "-n", str(count), "-w", str(timeout * 1000), host]
+        ping_cmd = ["ping", "-n", str(count), "-w", str(int(timeout * 1000)), host]
     else:  # Linux, macOS, etc.
         ping_cmd = ["ping", "-c", str(count), "-W", str(timeout), host]
 
@@ -40,8 +101,8 @@ async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, An
         )
 
         # Check if ping was successful
-        if process.returncode == 0:
-            output = stdout.decode()
+        output = stdout.decode()
+        if process.returncode == 0 and _is_echo_reply_from_host(output, host):
 
             # Parse response time (basic parsing)
             response_time = None
@@ -76,11 +137,16 @@ async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, An
             }
 
     except asyncio.TimeoutError:
+        await _terminate_process(process)
         return {
             "reachable": False,
             "response_time_ms": None,
             "packet_loss": 100
         }
+    except asyncio.CancelledError:
+        # Caller cancelled (e.g. scan aborted): never leave the ping child running
+        await _terminate_process(process)
+        raise
     except Exception as e:
         return {
             "reachable": False,
@@ -92,7 +158,7 @@ async def ping_host(host: str, timeout: int = 2, count: int = 1) -> Dict[str, An
 
 async def ping_multiple_hosts(
     hosts: list[str],
-    timeout: int = 2,
+    timeout: float = 2,
     concurrency: int = 50
 ) -> Dict[str, Dict[str, Any]]:
     """

@@ -69,6 +69,9 @@
                 <el-dropdown-item command="/bmc-reset">
                   <el-icon><Connection /></el-icon> BMC Reset
                 </el-dropdown-item>
+                <el-dropdown-item command="/subnet-probe">
+                  <el-icon><Search /></el-icon> 子网存活探测
+                </el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>

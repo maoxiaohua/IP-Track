@@ -77,6 +77,12 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false
         },
+        // 子网存活探测挂在 backend-ipam；必须排在 '/api' 兜底之前，端口用容器内 8100
+        '/api/v1/subnet-probe': {
+          target: backendIpam,
+          changeOrigin: true,
+          secure: false
+        },
         '/api': {
           target: backendCore,
           changeOrigin: true,

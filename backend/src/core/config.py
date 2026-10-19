@@ -140,6 +140,56 @@ class Settings(BaseSettings):
         description="Number of history rows per bulk INSERT statement"
     )
 
+    # Subnet Probe Tool (temporary one-off "is this /24 still used?" sweeper, independent from IPAM)
+    SUBNET_PROBE_MAX_SUBNETS: int = Field(
+        default=5000,
+        ge=1,
+        le=20000,
+        description="Maximum number of subnets accepted in a single subnet probe run"
+    )
+    SUBNET_PROBE_MAX_TOTAL_HOSTS: int = Field(
+        default=300000,
+        ge=256,
+        le=2000000,
+        description="Maximum total expanded host addresses accepted in a single subnet probe run"
+    )
+    SUBNET_PROBE_MIN_PREFIX: int = Field(
+        default=16,
+        ge=8,
+        le=30,
+        description="Reject subnets broader than this (smaller prefix = bigger subnet), e.g. 16 rejects 10.0.0.0/8"
+    )
+    SUBNET_PROBE_DEFAULT_CONCURRENCY: int = Field(
+        default=200,
+        ge=1,
+        le=500,
+        description="Default number of in-flight pings for a subnet probe run"
+    )
+    SUBNET_PROBE_MAX_CONCURRENCY: int = Field(
+        default=500,
+        ge=1,
+        le=2000,
+        description="Upper bound for the concurrency the UI may request"
+    )
+    SUBNET_PROBE_DEFAULT_TIMEOUT: float = Field(
+        default=1.0,
+        ge=0.2,
+        le=10.0,
+        description="Default per-ping timeout in seconds for a subnet probe run"
+    )
+    SUBNET_PROBE_CHUNK_SIZE: int = Field(
+        default=32,
+        ge=1,
+        le=256,
+        description="Hosts probed per batch inside a subnet; enables early exit once a live host is found"
+    )
+    SUBNET_PROBE_MAX_TASKS: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description="Number of finished subnet probe tasks kept in memory for the UI"
+    )
+
     # IP Scan Timeouts (seconds)
     IP_SCAN_DNS_TIMEOUT: int = Field(
         default=5,
