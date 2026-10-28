@@ -11,6 +11,7 @@ from services.network_scheduler import start_ipam_scheduler, stop_ipam_scheduler
 from services.ip_scan import ip_scan_service
 from services.ip_lookup import ip_lookup_service
 from services.subnet_probe_service import subnet_probe_service
+from core.auth import ReadOnlyGuestMiddleware
 
 
 @asynccontextmanager
@@ -41,6 +42,9 @@ app = FastAPI(
 )
 
 from core.config import settings
+
+# Guests are read-only: write requests without a token get HTTP 401.
+app.add_middleware(ReadOnlyGuestMiddleware)
 
 # CORS middleware
 app.add_middleware(

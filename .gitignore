@@ -30,6 +30,9 @@ ENV/
 .env.local
 .env.*.local
 
+# Local credential inventory (never commit)
+credentials.local.*
+
 # Backup files (prevent accidental commits)
 *.bak
 *.bak2

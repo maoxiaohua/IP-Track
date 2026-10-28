@@ -16,6 +16,7 @@ const SNMPConfig = () => import('@/views/SNMPConfig.vue')
 const Settings = () => import('@/views/Settings.vue')
 const BMCReset = () => import('@/views/BMCReset.vue')
 const SubnetProbe = () => import('@/views/SubnetProbe.vue')
+const Login = () => import('@/views/Login.vue')
 
 const router = createRouter({
   history: createWebHistory(),
@@ -118,6 +119,13 @@ const router = createRouter({
       name: 'SubnetProbe',
       component: SubnetProbe,
       meta: { title: '子网存活快速探测', icon: 'Search' }
+    },
+    {
+      // Login (and temporary-password change). Browsing stays open to guests.
+      path: '/login',
+      name: 'Login',
+      component: Login,
+      meta: { title: '登录' }
     }
   ]
 })

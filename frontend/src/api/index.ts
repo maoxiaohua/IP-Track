@@ -46,12 +46,43 @@ const apiClient = axios.create({
 // Export API base URL for SSE connections
 export const API_BASE_URL = getApiBaseUrl()
 
+// Auth storage keys (shared with the auth store)
+export const TOKEN_STORAGE_KEY = 'iptrack_token'
+export const USER_STORAGE_KEY = 'iptrack_user'
+
+export const getStoredToken = (): string => localStorage.getItem(TOKEN_STORAGE_KEY) || ''
+
+// Turn FastAPI's `detail` (string | object | validation array) into readable text
+export const formatApiDetail = (detail: unknown): string => {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item: any) => {
+        const field = Array.isArray(item?.loc) ? item.loc.slice(1).join('.') : ''
+        const msg = item?.msg || item?.message || ''
+        return field ? `${field}: ${msg}` : msg
+      })
+      .filter(Boolean)
+      .join('；')
+  }
+  if (detail && typeof detail === 'object') {
+    const obj = detail as any
+    if (typeof obj.message === 'string') return obj.message
+    return JSON.stringify(detail)
+  }
+  return ''
+}
+
 // Log the API base URL for debugging
 console.log('API Base URL initialized:', API_BASE_URL)
 
-// Request interceptor
+// Request interceptor: attach the login token (guests have none)
 apiClient.interceptors.request.use(
   (config) => {
+    const token = getStoredToken()
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
     return config
   },
   (error) => {
@@ -70,7 +101,18 @@ apiClient.interceptors.response.use(
     }
 
     if (error.response) {
-      const message = error.response.data?.detail || 'An error occurred'
+      const status = error.response.status
+      const url: string = error.config?.url || ''
+      const isLoginRequest = url.includes('/auth/login')
+
+      if (status === 401 && !isLoginRequest) {
+        // Token missing or expired: drop stale state and let the shell offer login.
+        localStorage.removeItem(TOKEN_STORAGE_KEY)
+        localStorage.removeItem(USER_STORAGE_KEY)
+        window.dispatchEvent(new CustomEvent('iptrack:unauthorized'))
+      }
+
+      const message = formatApiDetail(error.response.data?.detail) || 'An error occurred'
       ElMessage.error(message)
     } else if (error.request) {
       ElMessage.error('Network error. Please check your connection.')

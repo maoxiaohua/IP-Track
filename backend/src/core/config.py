@@ -50,6 +50,25 @@ class Settings(BaseSettings):
     # Security
     ENCRYPTION_KEY: str  # Required - generate with Fernet
 
+    # Authentication (write operations require login; browsing stays read-only)
+    AUTH_ALGORITHM: str = "HS256"
+    AUTH_TOKEN_EXPIRE_MINUTES: int = 720
+    AUTH_PASSWORD_MIN_LENGTH: int = 8
+    # Optional explicit JWT secret. When empty it is derived from ENCRYPTION_KEY,
+    # so existing deployments work without touching .env.
+    AUTH_SECRET_KEY: str = ""
+    INITIAL_ADMIN_USERNAME: str = "admin"
+    # Used only when the users table is empty. Leave empty to auto-generate a
+    # one-time password printed once in the core service log.
+    INITIAL_ADMIN_PASSWORD: str = ""
+
+    @property
+    def JWT_SECRET(self) -> str:
+        if self.AUTH_SECRET_KEY:
+            return self.AUTH_SECRET_KEY
+        import hashlib
+        return hashlib.sha256(f"iptrack-auth:{self.ENCRYPTION_KEY}".encode()).hexdigest()
+
     # Collection Scheduler
     COLLECTION_ENABLED: bool = True
     COLLECTION_INTERVAL_MINUTES: int = 120

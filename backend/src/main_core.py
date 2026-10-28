@@ -6,12 +6,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.v1 import switches, lookup, history, alarms, snmp_profiles, command_templates, snmp_oid_overrides, settings as settings_module, bmc
+from api.v1 import switches, lookup, history, alarms, snmp_profiles, command_templates, snmp_oid_overrides, settings as settings_module, bmc, auth
 from api.routes import snmp_config
 from services.status_checker import switch_status_checker
 from services.ip_lookup import ip_lookup_service
 from services.bmc_reset_scheduler import start_bmc_scheduler, stop_bmc_scheduler
+from services.auth_service import ensure_initial_admin
+from core.auth import ReadOnlyGuestMiddleware
 from core.config import settings
+from core.database import AsyncSessionLocal
 
 
 @asynccontextmanager
@@ -19,6 +22,13 @@ async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown"""
     # Startup
     print("🚀 Starting Core API Service...")
+
+    # Bootstrap the first admin account (no-op once any user exists)
+    try:
+        async with AsyncSessionLocal() as session:
+            await ensure_initial_admin(session)
+    except Exception as e:
+        print(f"⚠️ 初始管理员检查失败（请确认已执行 database/migrations/030_add_users.sql）: {e}")
 
     # Start background status checker
     if settings.FEATURE_STATUS_CHECKER:
@@ -51,6 +61,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Guests are read-only: write requests without a token get HTTP 401.
+# Added before CORS so CORS stays outermost and headers are present on 401s.
+app.add_middleware(ReadOnlyGuestMiddleware)
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +75,7 @@ app.add_middleware(
 )
 
 # Register routers
+app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
 app.include_router(switches.router, prefix=settings.API_V1_PREFIX)
 app.include_router(lookup.router, prefix=settings.API_V1_PREFIX)
 app.include_router(history.router, prefix=settings.API_V1_PREFIX)

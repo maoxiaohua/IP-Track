@@ -11,6 +11,7 @@ from api.routes import network
 from services.network_scheduler import start_collection_scheduler, stop_collection_scheduler
 from services.collection_worker import worker_pool
 from services.switch_discovery import switch_discovery_service
+from core.auth import ReadOnlyGuestMiddleware
 
 
 @asynccontextmanager
@@ -44,6 +45,9 @@ app = FastAPI(
 )
 
 from core.config import settings
+
+# Guests are read-only: write requests without a token get HTTP 401.
+app.add_middleware(ReadOnlyGuestMiddleware)
 
 # CORS middleware
 app.add_middleware(
