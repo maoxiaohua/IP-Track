@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, cast, String
 from sqlalchemy.orm import selectinload
 
+from core.config import settings
 from core.database import AsyncSessionLocal
 from core.security import credential_encryption
 from models.bmc_server import BMCServer
@@ -40,6 +41,22 @@ def _schedule_bg(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+# Process-wide gate for IPMI probes (fru / mc info). Created lazily so it binds
+# to the running event loop. Limit is configurable via BMC_IPMI_CONCURRENCY so
+# no environment-specific value is hard-coded.
+_ipmi_semaphore: "Optional[asyncio.Semaphore]" = None
+
+
+def _get_ipmi_semaphore() -> asyncio.Semaphore:
+    """Return the shared IPMI concurrency gate, creating it on first use."""
+    global _ipmi_semaphore
+    if _ipmi_semaphore is None:
+        limit = max(1, int(settings.BMC_IPMI_CONCURRENCY))
+        _ipmi_semaphore = asyncio.Semaphore(limit)
+        logger.info(f"IPMI concurrency gate initialised (limit={limit})")
+    return _ipmi_semaphore
 
 
 class BMCService:
@@ -753,21 +770,16 @@ class BMCService:
             return f"{prefix}: {short}"
         return prefix
 
-    async def query_bmc_info(
-        self, db: AsyncSession, server_id: int
+    async def _probe_ipmi(
+        self, host: str, username: str, password: str, timeout: int
     ) -> Dict[str, Any]:
-        """Query BMC for serial number (FRU) and firmware version (MC Info).
+        """Read FRU and MC Info over IPMI and parse the results.
 
-        On success, sets verified=True, serial_number, bmc_firmware_version.
-        On failure, sets verified=False with a human-readable verify_error.
+        Deliberately performs no database work: callers release their pooled
+        connection first. Callers must hold _get_ipmi_semaphore() around the
+        whole operation (DB read + probe + write) so that a sweep over hundreds
+        of servers neither floods IPMI nor holds pooled connections while queued.
         """
-        server = await self.get_server(db, server_id)
-        if not server:
-            raise ValueError("Server not found")
-
-        username, password = await self._get_credentials(db, server)
-        timeout = int(await settings_service.get_setting(db, "bmc_reset_timeout_seconds", default=30))
-
         serial_number = None
         product_name = None
         manufacturer = None
@@ -780,7 +792,7 @@ class BMCService:
         # Query FRU for serial number — try all combos
         for interface, privilege, cipher_suite in self.IPMI_COMBOS:
             exit_code, stdout, stderr = await self._run_ipmi_command(
-                server.host, username, password, interface, privilege,
+                host, username, password, interface, privilege,
                 ["fru"], min(timeout, 5), cipher_suite=cipher_suite
             )
             if stdout:
@@ -810,7 +822,7 @@ class BMCService:
         # Query MC Info for firmware version — try all combos
         for interface, privilege, cipher_suite in self.IPMI_COMBOS:
             exit_code, stdout, stderr = await self._run_ipmi_command(
-                server.host, username, password, interface, privilege,
+                host, username, password, interface, privilege,
                 ["mc", "info"], min(timeout, 5), cipher_suite=cipher_suite
             )
             if stdout:
@@ -826,12 +838,24 @@ class BMCService:
                 last_error_stderr = stderr
                 last_error_category = self._classify_error(stderr)
 
-        # Update server record
-        if fru_raw or mc_info_raw:
+        return {
+            "serial_number": serial_number,
+            "bmc_firmware_version": bmc_firmware_version,
+            "product_name": product_name,
+            "manufacturer": manufacturer,
+            "fru_raw": fru_raw,
+            "mc_info_raw": mc_info_raw,
+            "last_error_category": last_error_category,
+            "last_error_stderr": last_error_stderr,
+        }
+
+    def _apply_probe_result(self, server: BMCServer, probe: Dict[str, Any]) -> None:
+        """Write a probe result onto a server row (no I/O, caller commits)."""
+        if probe["fru_raw"] or probe["mc_info_raw"]:
             # Success: got IPMI data back
-            if serial_number or bmc_firmware_version:
-                server.serial_number = serial_number
-                server.bmc_firmware_version = bmc_firmware_version
+            if probe["serial_number"] or probe["bmc_firmware_version"]:
+                server.serial_number = probe["serial_number"]
+                server.bmc_firmware_version = probe["bmc_firmware_version"]
                 server.bmc_info_updated_at = func.now()
             server.verified = True
             server.verify_error = None
@@ -839,19 +863,42 @@ class BMCService:
             # Failure: no response from any combo
             server.verified = False
             server.verify_error = self._friendly_error(
-                last_error_category or "timeout", last_error_stderr
+                probe["last_error_category"] or "timeout", probe["last_error_stderr"]
             )
+
+    async def query_bmc_info(
+        self, db: AsyncSession, server_id: int
+    ) -> Dict[str, Any]:
+        """Query BMC for serial number (FRU) and firmware version (MC Info).
+
+        On success, sets verified=True, serial_number, bmc_firmware_version.
+        On failure, sets verified=False with a human-readable verify_error.
+        """
+        server = await self.get_server(db, server_id)
+        if not server:
+            raise ValueError("Server not found")
+
+        host = server.host
+        username, password = await self._get_credentials(db, server)
+        timeout = int(await settings_service.get_setting(db, "bmc_reset_timeout_seconds", default=30))
+
+        # Return the pooled connection while the (slow) IPMI probe runs.
+        await db.commit()
+
+        probe = await self._probe_ipmi(host, username, password, timeout)
+
+        self._apply_probe_result(server, probe)
         await db.commit()
         await db.refresh(server)
 
         return {
             "server_id": server.id,
-            "serial_number": serial_number,
-            "bmc_firmware_version": bmc_firmware_version,
-            "product_name": product_name,
-            "manufacturer": manufacturer,
-            "fru_raw": fru_raw,
-            "mc_info_raw": mc_info_raw,
+            "serial_number": probe["serial_number"],
+            "bmc_firmware_version": probe["bmc_firmware_version"],
+            "product_name": probe["product_name"],
+            "manufacturer": probe["manufacturer"],
+            "fru_raw": probe["fru_raw"],
+            "mc_info_raw": probe["mc_info_raw"],
         }
 
     async def _bg_collect_info(self, server_id: int) -> None:
@@ -859,10 +906,15 @@ class BMCService:
 
         Runs within 60s. Sets verified=True on success, or verified=False with
         a human-readable verify_error on failure.
+
+        The IPMI gate is taken BEFORE the DB session is opened, so a large
+        fan-out (periodic verify / reverify-stale) only ever has ~BMC_IPMI_CONCURRENCY
+        pooled connections in flight instead of one per queued task.
         """
         try:
-            async with AsyncSessionLocal() as bg_db:
-                await self.query_bmc_info(bg_db, server_id)
+            async with _get_ipmi_semaphore():
+                async with AsyncSessionLocal() as bg_db:
+                    await self.query_bmc_info(bg_db, server_id)
         except ValueError:
             pass  # server deleted before we could collect
         except Exception as e:
@@ -878,65 +930,14 @@ class BMCService:
         Commits changes to the given session (caller owns the session).
         """
         timeout = int(await settings_service.get_setting(db, "bmc_reset_timeout_seconds", default=30))
-        serial_number = None
-        bmc_firmware_version = None
-        fru_raw = None
-        mc_info_raw = None
-        last_error_category = None
-        last_error_stderr = ""
+        host = server.host
 
-        # Query FRU for serial number
-        for interface, privilege, cipher_suite in self.IPMI_COMBOS:
-            exit_code, stdout, stderr = await self._run_ipmi_command(
-                server.host, username, password, interface, privilege,
-                ["fru"], min(timeout, 5), cipher_suite=cipher_suite
-            )
-            if stdout:
-                fru_raw = stdout[:2000]
-                for line in stdout.split("\n"):
-                    if "Product Serial" in line:
-                        parts = line.split(":", 1)
-                        if len(parts) == 2:
-                            val = parts[1].strip()
-                            if val and val != "N/A" and val != "Unknown":
-                                serial_number = val
-                                break
-                break
-            if stderr:
-                last_error_stderr = stderr
-                last_error_category = self._classify_error(stderr)
+        # Return the pooled connection while the (slow) IPMI probe runs.
+        await db.commit()
 
-        # Query MC Info for firmware version
-        for interface, privilege, cipher_suite in self.IPMI_COMBOS:
-            exit_code, stdout, stderr = await self._run_ipmi_command(
-                server.host, username, password, interface, privilege,
-                ["mc", "info"], min(timeout, 5), cipher_suite=cipher_suite
-            )
-            if stdout:
-                mc_info_raw = stdout[:2000]
-                for line in stdout.split("\n"):
-                    if "Firmware Revision" in line:
-                        parts = line.split(":", 1)
-                        if len(parts) == 2:
-                            bmc_firmware_version = parts[1].strip()
-                            break
-                break
-            if stderr:
-                last_error_stderr = stderr
-                last_error_category = self._classify_error(stderr)
+        probe = await self._probe_ipmi(host, username, password, timeout)
 
-        if fru_raw or mc_info_raw:
-            if serial_number or bmc_firmware_version:
-                server.serial_number = serial_number
-                server.bmc_firmware_version = bmc_firmware_version
-                server.bmc_info_updated_at = func.now()
-            server.verified = True
-            server.verify_error = None
-        else:
-            server.verified = False
-            server.verify_error = self._friendly_error(
-                last_error_category or "timeout", last_error_stderr
-            )
+        self._apply_probe_result(server, probe)
         await db.commit()
 
     # ── Batch Import ──────────────────────────────────────────────
@@ -948,22 +949,25 @@ class BMCService:
         async with AsyncSessionLocal() as bg_db:
             for server_id in server_ids:
                 try:
-                    server = await bg_db.get(BMCServer, server_id)
-                    if not server:
-                        continue
-                    v_user, v_pass = await self._get_credentials(bg_db, server)
-                    # Fallback to the credentials provided in the import request
-                    if not v_user:
-                        v_user = data.username
-                        v_pass = data.password or ""
-                    if not v_user:
-                        server.verified = False
-                        server.verify_error = "No IPMI credentials configured"
-                        await bg_db.commit()
-                    else:
-                        # Use query_bmc_info for full collection (SN + firmware + verify)
-                        # It handles its own commit and error classification
-                        await self._collect_bmc_info_for_server(bg_db, server, v_user, v_pass)
+                    # Gate per server so batch imports share the same IPMI/DB
+                    # budget as every other collection path.
+                    async with _get_ipmi_semaphore():
+                        server = await bg_db.get(BMCServer, server_id)
+                        if not server:
+                            continue
+                        v_user, v_pass = await self._get_credentials(bg_db, server)
+                        # Fallback to the credentials provided in the import request
+                        if not v_user:
+                            v_user = data.username
+                            v_pass = data.password or ""
+                        if not v_user:
+                            server.verified = False
+                            server.verify_error = "No IPMI credentials configured"
+                            await bg_db.commit()
+                        else:
+                            # Use query_bmc_info for full collection (SN + firmware + verify)
+                            # It handles its own commit and error classification
+                            await self._collect_bmc_info_for_server(bg_db, server, v_user, v_pass)
                 except Exception as e:
                     logger.warning(f"Background verify failed for server {server_id}: {e}")
                     try:

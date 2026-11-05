@@ -318,7 +318,6 @@ async def update_schedule_settings(
         "bmc_monthly_reset_day": "integer",
         "bmc_monthly_reset_hour": "integer",
         "bmc_reset_timeout_seconds": "integer",
-        "bmc_verify_interval_hours": "integer",
     }
     for key, value in data.items():
         if key not in allowed_keys:

@@ -281,6 +281,17 @@ class Settings(BaseSettings):
     # BMC Reset
     BMC_RESET_TIMEOUT_SECONDS: int = 30
 
+    # BMC IPMI info probing (fru / mc info). Probes run in subprocesses and can
+    # take ~60s each, so cap how many run at once. Without a cap a periodic
+    # sweep over hundreds of servers exhausts the DB connection pool and takes
+    # the whole API down (switches / IP lookup included).
+    BMC_IPMI_CONCURRENCY: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="Maximum concurrent IPMI info probes across all BMC servers"
+    )
+
     # Port Analysis Thresholds
     PORT_SINGLE_MAC_CONFIDENCE: int = 95
     PORT_TRUNK_THRESHOLD: int = 10
