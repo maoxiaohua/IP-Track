@@ -6,6 +6,7 @@ from core.security import credential_encryption
 from core.config import settings
 from utils.logger import logger
 import ipaddress
+import itertools
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
@@ -830,7 +831,12 @@ class SwitchDiscoveryService:
             if '/' in ip_range:
                 try:
                     network = ipaddress.ip_network(ip_range, strict=False)
-                    ip_list = [str(ip) for ip in network.hosts()]
+                    max_ips = 1024
+                    ip_list = [str(ip) for ip in itertools.islice(network.hosts(), max_ips)]
+                    if network.num_addresses > max_ips + 2:
+                        logger.warning(
+                            f"CIDR {ip_range} too large ({network.num_addresses} addresses), limiting to {max_ips}"
+                        )
                     if not ip_list:  # Empty network (like /32 or /31)
                         ip_list = [str(network.network_address)]
                     return ip_list

@@ -416,10 +416,22 @@ async def update_subnet(
             db=db,
             subnet_id=subnet_id,
             name=update_data.name,
-            description=update_data.description,
+            description=(
+                update_data.description if update_data.description is not None
+                else "" if "description" in update_data.model_fields_set
+                else None
+            ),
             vlan_id=update_data.vlan_id,
-            gateway=str(update_data.gateway) if update_data.gateway else None,
-            dns_servers=update_data.dns_servers,
+            gateway=(
+                str(update_data.gateway) if update_data.gateway is not None
+                else "" if "gateway" in update_data.model_fields_set
+                else None
+            ),
+            dns_servers=(
+                update_data.dns_servers if update_data.dns_servers is not None
+                else "" if "dns_servers" in update_data.model_fields_set
+                else None
+            ),
             enabled=update_data.enabled,
             auto_scan=update_data.auto_scan,
             scan_interval=update_data.scan_interval
@@ -789,20 +801,20 @@ async def start_scan_stream(
             detail="scan-stream 仅支持子网扫描，请提供 subnet_id"
         )
 
-    if network_scheduler.is_ipam_scan_running():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=network_scheduler.get_ipam_scan_busy_message()
-        )
-
     subnet = await ipam_service.get_subnet(db, scan_request.subnet_id)
     if not subnet:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Subnet {scan_request.subnet_id} not found"
         )
+    if network_scheduler.is_ipam_scan_running():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=network_scheduler.get_ipam_scan_busy_message()
+        )
 
     subnet_label = str(subnet.network)
+    # 检查与加锁之间不能有 await，否则并发请求会同时通过检查
     await network_scheduler._ipam_scan_lock.acquire()
 
     async def run_manual_scan() -> None:

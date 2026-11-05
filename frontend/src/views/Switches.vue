@@ -477,12 +477,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch, h } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch, h } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus, Refresh, Check, Close, Setting, Delete, Monitor, Search, Download, ArrowDown } from '@element-plus/icons-vue'
 import { switchesApi, type Switch, type SwitchCreate } from '@/api/switches'
 import SwitchList from '@/components/SwitchList.vue'
-import { API_BASE_URL } from '@/api/index'
+import { API_BASE_URL, getStoredToken } from '@/api/index'
+
+// 刷新任务用的是 SSE，连接不随组件卸载自动关闭，必须手动收掉
+let hostnameEventSource: EventSource | null = null
+let deviceInfoEventSource: EventSource | null = null
 // 已保存的 SNMP 凭据模板，用于新增/编辑/批量配置时的「凭据来源」下拉。
 // 集中在一个 store 里，模板页改完名字这里调 load(true) 就能同步。
 import { useSNMPProfilesStore } from '@/stores/snmpProfiles'
@@ -657,7 +661,11 @@ const batchSnmpRules = computed<FormRules>(() => {
   }
 })
 
+// 翻页/筛选很快时只采用最后一次请求的结果，防止旧响应覆盖新页
+let loadSwitchesSeq = 0
+
 const loadSwitches = async () => {
+  const seq = ++loadSwitchesSeq
   loading.value = true
   try {
     const params = {
@@ -670,12 +678,14 @@ const loadSwitches = async () => {
       sort_order: sortBy.value ? sortOrder.value : undefined
     }
     const result = await switchesApi.list(params)
+    if (seq !== loadSwitchesSeq) return
     switches.value = result.items
     totalSwitches.value = result.total
   } catch (error) {
+    if (seq !== loadSwitchesSeq) return
     ElMessage.error('Failed to load switches')
   } finally {
-    loading.value = false
+    if (seq === loadSwitchesSeq) loading.value = false
   }
 }
 
@@ -956,6 +966,10 @@ const handleTest = async (switchItem: Switch) => {
 }
 
 const refreshHostnames = async () => {
+  if (!getStoredToken()) {
+    ElMessage.warning('请先登录后再执行该操作')
+    return
+  }
   try {
     await ElMessageBox.confirm(
       '这将通过 SNMP 连接到所有启用且配置了 SNMP 的交换机并更新它们的 hostname，可能需要几分钟时间。是否继续？',
@@ -973,7 +987,8 @@ const refreshHostnames = async () => {
 
     try {
       // 使用 EventSource 接收 SSE 实时进度
-      eventSource = new EventSource(`${API_BASE_URL}/api/v1/discovery/refresh-hostnames`)
+      eventSource = new EventSource(`${API_BASE_URL}/api/v1/discovery/refresh-hostnames?token=${encodeURIComponent(getStoredToken())}`)
+      hostnameEventSource = eventSource
 
       eventSource.onmessage = async (event) => {
         try {
@@ -1124,6 +1139,10 @@ ${data.failed > 0 ? `❌ 失败: ${data.failed} 个` : ''}`
 }
 
 const refreshDeviceInfo = async () => {
+  if (!getStoredToken()) {
+    ElMessage.warning('请先登录后再执行该操作')
+    return
+  }
   try {
     await ElMessageBox.confirm(
       '这将通过 SNMP 连接所有已配置 SNMP 的交换机，更新主机名、厂商和型号信息，可能需要几分钟。是否继续？',
@@ -1136,7 +1155,8 @@ const refreshDeviceInfo = async () => {
     let eventSource: EventSource | null = null
 
     try {
-      eventSource = new EventSource(`${API_BASE_URL}/api/v1/discovery/refresh-device-info`)
+      eventSource = new EventSource(`${API_BASE_URL}/api/v1/discovery/refresh-device-info?token=${encodeURIComponent(getStoredToken())}`)
+      deviceInfoEventSource = eventSource
 
       eventSource.onmessage = async (event) => {
         try {
@@ -1531,6 +1551,13 @@ onMounted(() => {
   // 预取凭据模板列表，免得打开对话框时下拉框先空一下再冒出来。
   // store 内部有缓存，这个页面来回切也只请求一次。
   snmpProfileStore.load()
+})
+
+onUnmounted(() => {
+  hostnameEventSource?.close()
+  deviceInfoEventSource?.close()
+  hostnameEventSource = null
+  deviceInfoEventSource = null
 })
 </script>
 

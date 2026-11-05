@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     API_PORT: int = 8100
     API_V1_PREFIX: str = "/api/v1"
     BACKEND_CORS_ORIGINS: str = '["http://localhost:8001","http://localhost:3000"]'
+    # Swagger/ReDoc are closed by default; enable explicitly for local debugging.
+    API_DOCS_ENABLED: bool = False
 
     # Database
     DATABASE_USER: str
@@ -54,6 +56,8 @@ class Settings(BaseSettings):
     AUTH_ALGORITHM: str = "HS256"
     AUTH_TOKEN_EXPIRE_MINUTES: int = 720
     AUTH_PASSWORD_MIN_LENGTH: int = 8
+    # Roles allowed to perform write operations (comma separated).
+    AUTH_WRITE_ROLES: str = "admin"
     # Optional explicit JWT secret. When empty it is derived from ENCRYPTION_KEY,
     # so existing deployments work without touching .env.
     AUTH_SECRET_KEY: str = ""
@@ -342,11 +346,16 @@ class Settings(BaseSettings):
 
     # Logging
     LOG_FILE_ENABLED: bool = True
-    LOG_FILE_PATH: str = "logs/iptrack.log"
+    # Absolute path inside the backend container (./backend/logs is mounted there).
+    LOG_FILE_PATH: str = "/app/logs/iptrack.log"
     LOG_FILE_MAX_BYTES: int = 10485760  # 10MB
     LOG_FILE_BACKUP_COUNT: int = 5
 
     # Parse JSON strings for CORS origins
+    @property
+    def WRITE_ROLES(self) -> List[str]:
+        return [role.strip() for role in self.AUTH_WRITE_ROLES.split(",") if role.strip()]
+
     @property
     def CORS_ORIGINS(self) -> List[str]:
         if isinstance(self.BACKEND_CORS_ORIGINS, str):

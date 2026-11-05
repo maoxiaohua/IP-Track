@@ -56,6 +56,8 @@ async def lookup_ip_address(
                 error=result.get('message', 'IP address not found')
             )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error during IP lookup: {str(e)}")
         raise HTTPException(

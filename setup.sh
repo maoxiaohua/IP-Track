@@ -88,22 +88,40 @@ for i in {1..30}; do
     sleep 2
 done
 
-# Apply incremental migrations before the backends start (the users table comes
-# only from migrations; without it the initial admin cannot be created).
-HAS_USERS=$($DOCKER_COMPOSE_CMD exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT to_regclass('public.users')" 2>/dev/null | tr -d '[:space:]')
-if [ -z "$HAS_USERS" ]; then
-    echo "🗄️  Applying database migrations..."
-    for sql in $(ls database/migrations/*.sql | sort); do
-        echo "   ▶ $sql"
-        if ! $DOCKER_COMPOSE_CMD exec -T postgres psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" < "$sql" > /dev/null; then
-            echo "❌ Migration failed: $sql"
-            exit 1
-        fi
-    done
-    echo "✅ Migrations applied"
-else
-    echo "ℹ️  Database already initialized, skipping migrations..."
+# Apply pending migrations before the backends start. schema_migrations tracks
+# what has run, so later migrations are never skipped again.
+echo "🗄️  Checking database migrations..."
+HAS_VERSION_TABLE=$($DOCKER_COMPOSE_CMD exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT to_regclass('public.schema_migrations')" 2>/dev/null | tr -d '[:space:]')
+
+if [ -z "$HAS_VERSION_TABLE" ]; then
+    $DOCKER_COMPOSE_CMD exec -T postgres psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" -c \
+        "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());" > /dev/null
+
+    # Legacy install (already has users) was fully migrated by the old script.
+    HAS_USERS=$($DOCKER_COMPOSE_CMD exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT to_regclass('public.users')" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$HAS_USERS" ]; then
+        for sql in $(ls database/migrations/*.sql | sort); do
+            name=$(basename "$sql")
+            $DOCKER_COMPOSE_CMD exec -T postgres psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" -c \
+                "INSERT INTO schema_migrations(filename) VALUES ('$name') ON CONFLICT DO NOTHING;" > /dev/null
+        done
+        echo "ℹ️  Existing database: marked previous migrations as applied"
+    fi
 fi
+
+for sql in $(ls database/migrations/*.sql | sort); do
+    name=$(basename "$sql")
+    applied=$($DOCKER_COMPOSE_CMD exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT 1 FROM schema_migrations WHERE filename='$name'" | tr -d '[:space:]')
+    [ -n "$applied" ] && continue
+    echo "   ▶ $name"
+    if ! $DOCKER_COMPOSE_CMD exec -T postgres psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" < "$sql" > /dev/null; then
+        echo "❌ Migration failed: $sql"
+        exit 1
+    fi
+    $DOCKER_COMPOSE_CMD exec -T postgres psql -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" -c \
+        "INSERT INTO schema_migrations(filename) VALUES ('$name') ON CONFLICT DO NOTHING;" > /dev/null
+done
+echo "✅ Migrations up to date"
 
 echo ""
 echo "=========================================="
@@ -152,7 +170,6 @@ echo "   Frontend:  http://localhost:8001"
 echo "   Core API:  http://localhost:8101"
 echo "   IPAM API:  http://localhost:8102"
 echo "   Collector: http://localhost:8103"
-echo "   API Docs:  http://localhost:8101/docs"
 echo ""
 echo "📝 Next steps:"
 echo "   1. Open http://localhost:8001 in your browser"

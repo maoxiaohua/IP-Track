@@ -12,6 +12,8 @@ from services.network_scheduler import start_collection_scheduler, stop_collecti
 from services.collection_worker import worker_pool
 from services.switch_discovery import switch_discovery_service
 from core.auth import ReadOnlyGuestMiddleware
+from core.config import settings
+from core.health import check_health
 
 
 @asynccontextmanager
@@ -37,14 +39,15 @@ async def lifespan(app: FastAPI):
     await switch_discovery_service.shutdown()
 
 
+_DOCS = {} if settings.API_DOCS_ENABLED else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
 app = FastAPI(
     title="IP-Track Collection Service",
     description="Network Data Collection and Discovery",
     version="2.3.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    **_DOCS,
 )
-
-from core.config import settings
 
 # Guests are read-only: write requests without a token get HTTP 401.
 app.add_middleware(ReadOnlyGuestMiddleware)
@@ -66,18 +69,13 @@ app.include_router(snmp_oid_overrides.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "collector",
-        "version": "2.3.0"
-    }
+    """Health check endpoint (probes the database)"""
+    return await check_health("collector", "2.3.0")
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
         "message": "IP-Track Collection Service",
-        "docs": "/docs",
         "health": "/health"
     }

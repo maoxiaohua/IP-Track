@@ -103,7 +103,7 @@
         </div>
       </el-header>
       <el-main>
-        <router-view />
+        <router-view :key="route.path" />
       </el-main>
     </el-container>
   </div>

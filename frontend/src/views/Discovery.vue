@@ -350,7 +350,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, nextTick, onMounted } from 'vue'
+import { ref, reactive, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus, Delete, Loading } from '@element-plus/icons-vue'
@@ -830,6 +830,14 @@ onMounted(async () => {
     }
   } catch {
     sessionStorage.removeItem('discovery_session_id')
+  }
+})
+
+// 离开页面时关掉扫描进度 SSE，否则连接会一直挂着
+onUnmounted(() => {
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
   }
 })
 </script>

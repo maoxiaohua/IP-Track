@@ -676,7 +676,11 @@ const loadSwitchGroups = async () => {
   }
 }
 
+// 翻页/筛选很快时只采用最后一次请求的结果，防止旧响应覆盖新页
+let loadAlarmsSeq = 0
+
 const loadAlarms = async () => {
+  const seq = ++loadAlarmsSeq
   loading.value = true
   try {
     const params = {
@@ -687,14 +691,16 @@ const loadAlarms = async () => {
       source_type: filters.value.source_type || undefined
     }
     const result = await alarmsApi.list(params)
+    if (seq !== loadAlarmsSeq) return
     alarms.value = result.items
     totalAlarms.value = result.total
     await loadAlarmStats()
     await loadSwitchGroups()
   } catch (error) {
+    if (seq !== loadAlarmsSeq) return
     ElMessage.error('加载告警失败')
   } finally {
-    loading.value = false
+    if (seq === loadAlarmsSeq) loading.value = false
   }
 }
 

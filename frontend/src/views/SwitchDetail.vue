@@ -1739,7 +1739,7 @@ onMounted(async () => {
   color: #1f2937 !important;
 }
 
-:deep(.el-card__header *:not(.el-button)) {
+:deep(.el-card__header *:not(.el-button):not(.el-button *)) {
   color: #1f2937 !important;
 }
 

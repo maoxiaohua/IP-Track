@@ -21,6 +21,25 @@ import asyncio
 import ctypes
 import gc
 
+# Upper bound when listing hosts of a subnet that is not managed in IPAM.
+MAX_UNMANAGED_HOSTS = 65536
+
+
+def _usable_ends(net) -> tuple:
+    """Return (first, last) usable host without materialising the whole network."""
+    if net.num_addresses <= 2:
+        return net.network_address, net.broadcast_address
+    if isinstance(net, ipaddress.IPv4Network):
+        return net.network_address + 1, net.broadcast_address - 1
+    return net.network_address + 1, net.broadcast_address
+
+
+def _usable_host_count(net) -> int:
+    """Number of usable hosts, matching len(list(net.hosts()))."""
+    if net.num_addresses <= 2:
+        return net.num_addresses
+    return net.num_addresses - (2 if isinstance(net, ipaddress.IPv4Network) else 1)
+
 
 class IPAMService:
     """Service for IP Address Management"""
@@ -354,25 +373,41 @@ class IPAMService:
         """
         from sqlalchemy.dialects.postgresql import insert
 
-        ip_addresses = []
-        for ip in network.hosts():
-            ip_addresses.append({
+        # PostgreSQL allows at most 32767 bind parameters per statement; a /16
+        # has ~65k hosts, so insert in bounded batches instead of one huge INSERT.
+        BATCH_SIZE = 1000
+        generated = 0
+        inserted_total = 0
+
+        def _rows(batch):
+            return [{
                 'subnet_id': subnet.id,
                 'ip_address': str(ip),
                 'status': IPStatus.AVAILABLE.value,
                 'is_reachable': False,
                 'scan_count': 0
-            })
+            } for ip in batch]
 
-        if ip_addresses:
-            # Use INSERT ... ON CONFLICT DO NOTHING to handle duplicate IPs
-            stmt = insert(IPAddress).values(ip_addresses)
+        batch = []
+        for ip in network.hosts():
+            batch.append(ip)
+            if len(batch) >= BATCH_SIZE:
+                stmt = insert(IPAddress).values(_rows(batch))
+                stmt = stmt.on_conflict_do_nothing(index_elements=['ip_address'])
+                result = await db.execute(stmt)
+                inserted_total += result.rowcount if result.rowcount else 0
+                generated += len(batch)
+                batch = []
+
+        if batch:
+            stmt = insert(IPAddress).values(_rows(batch))
             stmt = stmt.on_conflict_do_nothing(index_elements=['ip_address'])
-
             result = await db.execute(stmt)
-            inserted_count = result.rowcount if result.rowcount else 0
+            inserted_total += result.rowcount if result.rowcount else 0
+            generated += len(batch)
 
-            logger.info(f"Generated {len(ip_addresses)} IP addresses for subnet {subnet.id}, {inserted_count} new IPs inserted (others already exist)")
+        if generated:
+            logger.info(f"Generated {generated} IP addresses for subnet {subnet.id}, {inserted_total} new IPs inserted (others already exist)")
         else:
             logger.warning(f"No IP addresses to generate for subnet {subnet.id}")
 
@@ -406,13 +441,13 @@ class IPAMService:
         if name is not None:
             subnet.name = name
         if description is not None:
-            subnet.description = description
+            subnet.description = description or None
         if vlan_id is not None:
             subnet.vlan_id = vlan_id
         if gateway is not None:
-            subnet.gateway = gateway
+            subnet.gateway = gateway or None
         if dns_servers is not None:
-            subnet.dns_servers = dns_servers
+            subnet.dns_servers = dns_servers or None
         if enabled is not None:
             subnet.enabled = enabled
         if auto_scan is not None:
@@ -1323,7 +1358,7 @@ class IPAMService:
                 # Check for IP address conflicts (overlapping subnets)
                 # Check if any IP in this new subnet already exists
                 try:
-                    first_ip = str(list(net.hosts())[0] if net.num_addresses > 2 else net.network_address)
+                    first_ip = str(_usable_ends(net)[0])
                     # Use text cast to compare INET with string
                     ip_check = await db.execute(
                         select(IPAddress).where(func.host(IPAddress.ip_address) == first_ip)
@@ -1901,8 +1936,13 @@ class IPAMService:
                     'last_seen_at': ip_addr.last_seen_at
                 })
         else:
-            # Network not in IPAM - generate list of all IPs
-            for ip in net.hosts():
+            # Network not in IPAM - generate list of all IPs (bounded)
+            for idx, ip in enumerate(net.hosts()):
+                if idx >= MAX_UNMANAGED_HOSTS:
+                    logger.warning(
+                        f"Network {net} has too many hosts, list truncated to {MAX_UNMANAGED_HOSTS}"
+                    )
+                    break
                 ips_data.append({
                     'ip_address': str(ip),
                     'status': IPStatus.AVAILABLE,
@@ -1919,9 +1959,9 @@ class IPAMService:
         network_address = str(net.network_address)
         broadcast_address = str(net.broadcast_address)
         netmask = str(net.netmask)
-        hosts = list(net.hosts())
-        first_usable = str(hosts[0]) if hosts else network_address
-        last_usable = str(hosts[-1]) if hosts else network_address
+        first_host, last_host = _usable_ends(net)
+        first_usable = str(first_host)
+        last_usable = str(last_host)
 
         return {
             'network': str(net),
@@ -1929,7 +1969,7 @@ class IPAMService:
             'broadcast_address': broadcast_address,
             'netmask': netmask,
             'total_ips': net.num_addresses,
-            'usable_ips': len(hosts),
+            'usable_ips': _usable_host_count(net),
             'first_usable': first_usable,
             'last_usable': last_usable,
             'ips': ips_data,
@@ -1985,9 +2025,9 @@ def calculate_subnet_info(ip_address: str, netmask: Optional[str] = None) -> Dic
         raise ValueError(f"Invalid network: {str(e)}")
 
     # Calculate network information
-    hosts = list(net.hosts())
-    first_usable = str(hosts[0]) if hosts else str(net.network_address)
-    last_usable = str(hosts[-1]) if hosts else str(net.network_address)
+    first_host, last_host = _usable_ends(net)
+    first_usable = str(first_host)
+    last_usable = str(last_host)
 
     # Determine IP class (IPv4 only)
     ip_class = "N/A"
@@ -2031,7 +2071,7 @@ def calculate_subnet_info(ip_address: str, netmask: Optional[str] = None) -> Dic
         'first_usable_ip': first_usable,
         'last_usable_ip': last_usable,
         'total_hosts': net.num_addresses,
-        'usable_hosts': len(hosts),
+        'usable_hosts': _usable_host_count(net),
         'ip_class': ip_class,
         'is_private': is_private,
         'binary_netmask': binary_netmask,

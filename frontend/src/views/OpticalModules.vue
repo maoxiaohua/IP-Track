@@ -199,9 +199,9 @@
       </template>
 
       <el-table
+        v-loading="loading"
         :data="searchResults.modules"
         stripe
-        :loading="loading"
         style="width: 100%"
         @row-click="handleRowClick"
       >

@@ -36,11 +36,17 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 PUBLIC_PATHS = frozenset({
     "/",
     "/health",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
     f"{settings.API_V1_PREFIX}/auth/login",
 })
+
+# GET endpoints that change state - guests must not be able to trigger them.
+WRITE_GET_PATHS = frozenset({
+    f"{settings.API_V1_PREFIX}/discovery/refresh-hostnames",
+    f"{settings.API_V1_PREFIX}/discovery/refresh-device-info",
+})
+
+# Paths whose GET variants also require a login.
+WRITE_PATH_PREFIXES = (f"{settings.API_V1_PREFIX}/auth/",)
 
 # Read-only work done through POST (query / compute only, no state change).
 PUBLIC_READ_POST_PATHS = frozenset({
@@ -122,10 +128,7 @@ def extract_token(request: Request) -> Optional[str]:
 
 
 def _is_public_path(path: str) -> bool:
-    normalized = path.rstrip("/") or "/"
-    if normalized in PUBLIC_PATHS:
-        return True
-    return normalized.startswith("/docs") or normalized.startswith("/redoc")
+    return (path.rstrip("/") or "/") in PUBLIC_PATHS
 
 
 class ReadOnlyGuestMiddleware(BaseHTTPMiddleware):
@@ -137,10 +140,10 @@ class ReadOnlyGuestMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         method = request.method.upper()
-        if method in SAFE_METHODS:
+        normalized = path.rstrip("/") or "/"
+        if method in SAFE_METHODS and normalized not in WRITE_GET_PATHS:
             return await call_next(request)
 
-        normalized = path.rstrip("/") or "/"
         if method == "POST" and normalized in PUBLIC_READ_POST_PATHS:
             return await call_next(request)
 
@@ -150,6 +153,17 @@ class ReadOnlyGuestMiddleware(BaseHTTPMiddleware):
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "当前为只读访客模式，请先登录后再执行该操作"},
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # Role-based check for write operations (auth endpoints stay self-service).
+        if (
+            settings.WRITE_ROLES
+            and not normalized.startswith(WRITE_PATH_PREFIXES)
+            and payload.get("role") not in settings.WRITE_ROLES
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "当前账号无权执行该操作"},
             )
 
         request.state.user = payload

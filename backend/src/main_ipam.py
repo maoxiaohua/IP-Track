@@ -12,6 +12,8 @@ from services.ip_scan import ip_scan_service
 from services.ip_lookup import ip_lookup_service
 from services.subnet_probe_service import subnet_probe_service
 from core.auth import ReadOnlyGuestMiddleware
+from core.config import settings
+from core.health import check_health
 
 
 @asynccontextmanager
@@ -34,14 +36,15 @@ async def lifespan(app: FastAPI):
     await ip_lookup_service.shutdown()
 
 
+_DOCS = {} if settings.API_DOCS_ENABLED else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
 app = FastAPI(
     title="IP-Track IPAM Service",
     description="IP Address Management and Subnet Scanning",
     version="2.3.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    **_DOCS,
 )
-
-from core.config import settings
 
 # Guests are read-only: write requests without a token get HTTP 401.
 app.add_middleware(ReadOnlyGuestMiddleware)
@@ -61,18 +64,13 @@ app.include_router(subnet_probe.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "ipam",
-        "version": "2.3.0"
-    }
+    """Health check endpoint (probes the database)"""
+    return await check_health("ipam", "2.3.0")
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
         "message": "IP-Track IPAM Service",
-        "docs": "/docs",
         "health": "/health"
     }

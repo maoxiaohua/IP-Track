@@ -3,6 +3,7 @@ import { bmcApi, type BMCResetStatus } from '@/api/bmc'
 
 interface UseBMCResetMonitorOptions {
   onStatus?: (status: BMCResetStatus, previous: BMCResetStatus | null) => void
+  onUnavailable?: () => void
 }
 
 export const useBMCResetMonitor = (options: UseBMCResetMonitorOptions = {}) => {
@@ -13,6 +14,9 @@ export const useBMCResetMonitor = (options: UseBMCResetMonitorOptions = {}) => {
   let reconnectTimer: number | null = null
   let rafId: number | null = null
   let pendingStatus: BMCResetStatus | null = null
+  // 连续连接失败次数，避免 SSE 一直连不上时页面永远等不到状态
+  let connectFailures = 0
+  const MAX_CONNECT_FAILURES = 3
 
   const applyStatus = (status: BMCResetStatus) => {
     const previous = resetStatus.value
@@ -60,6 +64,7 @@ export const useBMCResetMonitor = (options: UseBMCResetMonitorOptions = {}) => {
     eventSource = new EventSource(bmcApi.getResetEventsUrl())
 
     eventSource.onmessage = (event) => {
+      connectFailures = 0
       try {
         pendingStatus = JSON.parse(event.data) as BMCResetStatus
         if (rafId === null) {
@@ -78,6 +83,13 @@ export const useBMCResetMonitor = (options: UseBMCResetMonitorOptions = {}) => {
 
     eventSource.onerror = () => {
       disconnect()
+      connectFailures += 1
+      if (connectFailures >= MAX_CONNECT_FAILURES) {
+        // 无法建立实时连接时通知页面，避免按钮一直卡在 loading
+        monitorSupported.value = false
+        options.onUnavailable?.()
+        return
+      }
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null
         connect()

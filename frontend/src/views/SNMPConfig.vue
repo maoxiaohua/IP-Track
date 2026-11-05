@@ -310,8 +310,11 @@ const handleEdit = async (switchItem: SwitchSNMPStatus) => {
 };
 
 // 保存配置
-const handleSaveConfig = async (config: SNMPConfig) => {
-  if (!currentSwitch.value) return;
+const handleSaveConfig = async (config: SNMPConfig, done?: () => void) => {
+  if (!currentSwitch.value) {
+    done?.();
+    return;
+  }
 
   try {
     await updateSNMPConfig(currentSwitch.value.id, config);
@@ -320,6 +323,8 @@ const handleSaveConfig = async (config: SNMPConfig) => {
     await loadSwitches();
   } catch (error: any) {
     ElMessage.error(`保存失败: ${error.response?.data?.detail || error.message || '未知错误'}`);
+  } finally {
+    done?.();
   }
 };
 
@@ -357,9 +362,10 @@ const handleBatchConfig = () => {
 };
 
 // 批量保存
-const handleBatchSave = async (config: SNMPConfig) => {
+const handleBatchSave = async (config: SNMPConfig, done?: () => void) => {
   if (selectedSwitches.value.length === 0) {
     ElMessage.warning('请先选择要配置的交换机');
+    done?.();
     return;
   }
 
@@ -371,6 +377,8 @@ const handleBatchSave = async (config: SNMPConfig) => {
     await loadSwitches();
   } catch (error: any) {
     ElMessage.error(`批量配置失败: ${error.response?.data?.detail || error.message || '未知错误'}`);
+  } finally {
+    done?.();
   }
 };
 

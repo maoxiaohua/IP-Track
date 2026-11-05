@@ -286,7 +286,7 @@
       </el-form>
       <template #footer>
         <el-button @click="showAddSubnetDialog = false">取消</el-button>
-        <el-button type="primary" @click="handleSubmitSubnet">
+        <el-button type="primary" :loading="submitting" :disabled="submitting" @click="handleSubmitSubnet">
           {{ editMode ? '保存' : '确定' }}
         </el-button>
       </template>
@@ -528,6 +528,7 @@ const scanning = ref<Record<number, boolean>>({})
 const showAddSubnetDialog = ref(false)
 const showBatchImportDialog = ref(false)
 const editMode = ref(false)
+const submitting = ref(false)
 const editingSubnetId = ref<number | null>(null)
 const subnetFormRef = ref()
 const batchImporting = ref(false)
@@ -918,6 +919,8 @@ const refreshSubnetsInBackground = async () => {
 
 // Add/Edit subnet
 const handleSubmitSubnet = async () => {
+  if (submitting.value) return
+  submitting.value = true
   try {
     if (editMode.value && editingSubnetId.value) {
       // Edit existing subnet - exclude 'network' field (not allowed to modify)
@@ -953,6 +956,8 @@ const handleSubmitSubnet = async () => {
   } catch (error: any) {
     console.error('Subnet submit error:', error.response?.data)
     ElMessage.error(error.response?.data?.detail || (editMode.value ? '更新子网失败' : '添加子网失败'))
+  } finally {
+    submitting.value = false
   }
 }
 

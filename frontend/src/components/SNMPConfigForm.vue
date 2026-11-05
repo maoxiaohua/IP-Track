@@ -179,6 +179,7 @@
           <el-button
             type="success"
             :loading="saving"
+            :disabled="saving"
             @click="handleSave"
           >
             <el-icon><Check /></el-icon>
@@ -268,7 +269,7 @@ interface Props {
 
 const props = defineProps<Props>();
 const emit = defineEmits<{
-  save: [config: SNMPConfig];
+  save: [config: SNMPConfig, done: () => void];
   cancel: [];
 }>();
 
@@ -516,18 +517,20 @@ const handleTest = async () => {
 
 // 保存配置
 const handleSave = async () => {
-  if (!formRef.value) return;
+  if (!formRef.value || saving.value) return;
 
   try {
     await formRef.value.validate();
-
-    saving.value = true;
-    emit('save', { ...formData });
   } catch {
     ElMessage.warning('请填写完整的表单信息');
-  } finally {
-    saving.value = false;
+    return;
   }
+
+  // 保存由父组件真正发请求，等它回调 done 再关掉 loading
+  saving.value = true;
+  emit('save', { ...formData }, () => {
+    saving.value = false;
+  });
 };
 
 // 取消

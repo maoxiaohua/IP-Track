@@ -871,10 +871,17 @@ const showErrorLog = ref(false)
 
 const {
   resetStatus,
+  monitorSupported,
   connect: connectSSE,
   disconnect: disconnectSSE,
   loadInitialStatus,
 } = useBMCResetMonitor({
+  onUnavailable() {
+    // SSE 连不上时收不到完成事件，兜底复位按钮并刷新一次状态
+    resetRunning.value = false
+    ElMessage.warning('无法连接实时进度服务，已刷新状态，请手动确认重置结果')
+    void loadInitialStatus()
+  },
   onStatus(status: BMCResetStatus) {
     if (!status.running && (status.current_phase === 'completed' || status.current_phase === 'error')) {
       resetRunning.value = false
@@ -914,6 +921,12 @@ async function startReset() {
     const res = await bmcApi.startReset(selectedServers.value)
     ElMessage.success(res.message)
     await loadInitialStatus()
+    if (!monitorSupported.value) {
+      // 服务端不支持进度推送，不能一直卡在 loading
+      resetRunning.value = false
+      ElMessage.warning(`${res.message}（无法获取实时进度，请稍后刷新确认结果）`)
+      return
+    }
     connectSSE()
   } catch (e: any) {
     resetRunning.value = false

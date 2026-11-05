@@ -15,6 +15,7 @@ from services.auth_service import ensure_initial_admin
 from core.auth import ReadOnlyGuestMiddleware
 from core.config import settings
 from core.database import AsyncSessionLocal
+from core.health import check_health
 
 
 @asynccontextmanager
@@ -54,11 +55,14 @@ async def lifespan(app: FastAPI):
     await ip_lookup_service.shutdown()
 
 
+_DOCS = {} if settings.API_DOCS_ENABLED else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
 app = FastAPI(
     title="IP-Track Core API",
     description="Switches, IP Lookup, History, Alarms, SNMP Profiles",
     version="2.3.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    **_DOCS,
 )
 
 # Guests are read-only: write requests without a token get HTTP 401.
@@ -89,18 +93,13 @@ app.include_router(bmc.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "core-api",
-        "version": "2.3.0"
-    }
+    """Health check endpoint (probes the database)"""
+    return await check_health("core-api", "2.3.0")
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
         "message": "IP-Track Core API",
-        "docs": "/docs",
         "health": "/health"
     }
