@@ -150,6 +150,10 @@ async function loadData() {
     if (searchText.value.trim()) {
       params.search = searchText.value.trim()
     }
+    // Keep list counts consistent with the distribution chart's archived toggle
+    if (route.query.include_archived === '1') {
+      params.include_archived = true
+    }
     const response = await ipamApi.getIPAddresses(params)
     ipList.value = response.items || []
     total.value = response.total || 0

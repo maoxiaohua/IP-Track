@@ -1,220 +1,304 @@
-# IP Track System - 手动部署指南（无 Docker）
+# Manual Deployment —— 无 Docker 部署指南（systemd + Nginx）
 
-本指南适用于没有 Docker 的 Linux 服务器（如内网环境）。
+> 适用对象：服务器**不能/不想使用 Docker**（典型场景：内网离线服务器），需要把 IP-Track 的三个后端服务与前端直接跑在宿主机上的工程师。
+>
+> 如果你能用 Docker，请优先使用 [QUICK_START.md](QUICK_START.md)，那是最省事、最不容易出错的路径。
 
-## 系统要求
+---
 
-- **操作系统**: CentOS 7+, Ubuntu 18.04+, 或其他 Linux 发行版
-- **Python**: 3.11+
-- **Node.js**: 18+
-- **PostgreSQL**: 14+
-- **Redis**: 6+
-- **内存**: 至少 2GB
-- **磁盘**: 至少 10GB
+## 0. 部署后的形态
 
-## 一、安装依赖
+| 进程 | 代码入口 | 监听地址 | 职责 |
+|---|---|---|---|
+| `iptrack-backend-core` | `main_core:app` | `127.0.0.1:8101` | 交换机、IP 查询、历史、告警、SNMP、BMC、登录 |
+| `iptrack-backend-ipam` | `main_ipam:app` | `127.0.0.1:8102` | IPAM、子网扫描、子网存活探测 |
+| `iptrack-backend-collector` | `main_collector:app` | `127.0.0.1:8103` | ARP/MAC/光模块采集、自动发现 |
+| Nginx | 静态文件 + 反向代理 | `0.0.0.0:8001` | 提供前端页面，并把 `/api/*` 分发到三个后端 |
 
-### 1.1 安装 Python 3.11
+> 手动部署时三个后端各自监听 8101/8102/8103（与 Docker 不同：容器内部统一 8100，这里没有容器，直接按端口区分）。
+> **唯一对外入口是 Nginx 的 8001**，后端不要直接暴露到公网。
+
+---
+
+## 1. 服务器要求
+
+| 项目 | 要求 |
+|---|---|
+| 操作系统 | CentOS/RHEL 7+ 或 Ubuntu/Debian 20.04+ |
+| Python | 3.11（3.10 可能可用但未验证） |
+| Node.js | 18+（仅构建前端用，构建完可不需要） |
+| PostgreSQL | 14+，推荐 16 |
+| Redis | 6+（可无密码，建议设密码） |
+| 内存 / 磁盘 | ≥ 4GB / ≥ 20GB |
+| 系统工具 | `curl`、`ping`、`arp-scan`、`ipmitool`、`net-tools` |
+| 网络 | 能访问被管理交换机的 TCP 22/23、UDP 161、ICMP |
+
+> `nmap` **不需要安装**。当前扫描流程用 ping 的 TTL 值判断 OS 类型（必要时由 SNMP `sysDescr` 修正），不会调用 nmap；`install_nmap.sh` 脚本已失效，请勿执行。详见 [QUICK_START_GUIDE.md §1](QUICK_START_GUIDE.md#1-关于-nmap当前版本不参与扫描)。
+
+---
+
+## 2. 安装系统依赖
+
+### 2.1 网络工具（**必须**）
 
 ```bash
-# CentOS/RHEL
-sudo yum install -y python3.11 python3.11-pip python3.11-devel
-
-# Ubuntu/Debian
+# Ubuntu / Debian
 sudo apt update
-sudo apt install -y python3.11 python3.11-venv python3.11-dev
+sudo apt install -y iputils-ping arp-scan ipmitool net-tools curl
 
-# 验证安装
-python3.11 --version
+# CentOS / RHEL
+sudo yum install -y iputils arp-scan ipmitool net-tools curl
+
+# 不要安装 nmap：扫描流程不会调用它（OS 类型用 TTL 判断）
 ```
 
-### 1.2 安装 Node.js 18+
+### 2.2 Python 3.11
 
 ```bash
-# 使用 NodeSource 仓库
+# Ubuntu 22.04+ 自带的 python3 通常已是 3.10/3.11，先检查
+python3 --version
+
+# Ubuntu/Debian
+sudo apt install -y python3 python3-venv python3-dev build-essential
+
+# CentOS/RHEL
+sudo yum install -y python3 python3-devel gcc
+```
+
+如果发行版自带版本低于 3.11，请用发行版提供的 `python3.11` 包或 pyenv 安装，不要用源码乱编。
+
+### 2.3 Node.js 18+
+
+```bash
+# Ubuntu/Debian
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# CentOS/RHEL
 curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
 sudo yum install -y nodejs
 
-# 或者 Ubuntu/Debian
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt-get install -y nodejs
-
-# 验证安装
-node --version
+node --version    # 应 >= v18
 npm --version
 ```
 
-### 1.3 安装 PostgreSQL 16
+> 内网无法访问 nodesource 时，使用公司内部镜像源或离线 Node 压缩包；构建完成后宿主机不再需要 Node。
+
+### 2.4 PostgreSQL 16
 
 ```bash
+# Ubuntu/Debian（发行版仓库版本可能较低，够用即可）
+sudo apt install -y postgresql postgresql-contrib
+sudo systemctl enable --now postgresql
+
 # CentOS/RHEL
-sudo yum install -y postgresql16-server postgresql16-contrib
-sudo postgresql-16-setup initdb
-sudo systemctl enable postgresql-16
-sudo systemctl start postgresql-16
-
-# Ubuntu/Debian
-sudo apt install -y postgresql-16 postgresql-contrib-16
-sudo systemctl enable postgresql
-sudo systemctl start postgresql
-
-# 验证安装
-sudo -u postgres psql --version
+sudo yum install -y postgresql-server postgresql-contrib
+sudo postgresql-setup --initdb
+sudo systemctl enable --now postgresql
 ```
 
-### 1.4 安装 Redis
+### 2.5 Redis
 
 ```bash
-# CentOS/RHEL
-sudo yum install -y redis
-sudo systemctl enable redis
-sudo systemctl start redis
-
 # Ubuntu/Debian
 sudo apt install -y redis-server
-sudo systemctl enable redis-server
-sudo systemctl start redis-server
+sudo systemctl enable --now redis-server
 
-# 验证安装
-redis-cli ping  # 应该返回 PONG
+# CentOS/RHEL
+sudo yum install -y redis
+sudo systemctl enable --now redis
+
+redis-cli ping    # PONG
 ```
 
-## 二、下载代码
+---
+
+## 3. 放置代码
 
 ```bash
-# 克隆仓库（替换 YOUR_USERNAME）
-cd /opt
-git clone https://github.com/YOUR_USERNAME/IP-TRACK.git
-cd IP-TRACK
+sudo mkdir -p /opt/IP-Track
+# git clone YOUR_REPO_URL /opt/IP-Track   （或解压离线包）
+cd /opt/IP-Track
+ls backend/src/main_core.py database/migrations frontend/package.json
 ```
 
-## 三、配置数据库
+后文统一使用 `/opt/IP-Track` 作为代码目录；如果你的路径不同，替换系统服务与 Nginx 中的对应路径。
 
-### 3.1 创建数据库和用户
+---
+
+## 4. 初始化数据库
+
+### 4.1 创建用户与库
 
 ```bash
-sudo -u postgres psql << EOF
-CREATE USER iptrack WITH PASSWORD 'YOUR_SECURE_PASSWORD';
+sudo -u postgres psql <<'SQL'
+CREATE USER iptrack WITH PASSWORD 'YOUR_DB_PASSWORD';
 CREATE DATABASE iptrack OWNER iptrack;
-GRANT ALL PRIVILEGES ON DATABASE iptrack TO iptrack;
-\q
-EOF
+SQL
 ```
 
-### 3.2 初始化数据库表
+> `YOUR_DB_PASSWORD` 请替换成强密码，并同步写进第 5 节的 `.env`。
+
+### 4.2 执行建表脚本（**只在新库上执行一次**）
+
+顺序很重要：先执行 `database/init/`，再执行 `database/migrations/`，都按文件名排序。
 
 ```bash
-sudo -u postgres psql -U iptrack -d iptrack -f database/init/01_create_tables.sql
+cd /opt/IP-Track
+
+export PGPASSWORD='YOUR_DB_PASSWORD'
+PSQL="psql -h 127.0.0.1 -U iptrack -d iptrack -v ON_ERROR_STOP=1"
+
+# 1) 基础表结构（init 脚本带 IF NOT EXISTS，只应在新库上跑）
+for f in $(ls database/init/*.sql | sort); do
+  echo "▶ $f"
+  $PSQL -f "$f"
+done
+
+# 2) 增量迁移，并用 schema_migrations 记录，避免重复执行
+$PSQL -c "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());"
+
+for f in $(ls database/migrations/*.sql | sort); do
+  name=$(basename "$f")
+  applied=$($PSQL -tAc "SELECT 1 FROM schema_migrations WHERE filename='$name'" | tr -d '[:space:]')
+  [ -n "$applied" ] && continue
+  echo "▶ $name"
+  $PSQL -f "$f"
+  $PSQL -c "INSERT INTO schema_migrations(filename) VALUES ('$name') ON CONFLICT DO NOTHING;"
+done
+
+$PSQL -c "SELECT count(*) AS migrations FROM schema_migrations;"
 ```
 
-### 3.3 配置 PostgreSQL 允许本地连接
+> ⚠️ 排序是字符串排序（`09_...` 会排在 `010_...` 前面），这是历史遗留结构，**不要手工调整顺序或跳着执行**。
+> 迁移中 `030_add_users.sql` 会创建登录用户表；没有它，初始管理员无法创建，页面写操作全部不可用。
 
-编辑 `/var/lib/pgsql/16/data/pg_hba.conf`（路径可能不同）：
+### 4.3 允许本地密码登录
 
-```bash
-# 添加以下行
-host    iptrack         iptrack         127.0.0.1/32            md5
+编辑 `pg_hba.conf`（路径示例：`/etc/postgresql/16/main/pg_hba.conf` 或 `/var/lib/pgsql/data/pg_hba.conf`），确保有：
+
+```
+host    iptrack    iptrack    127.0.0.1/32    scram-sha-256
 ```
 
-重启 PostgreSQL：
+然后重启：
+
 ```bash
-sudo systemctl restart postgresql-16
+sudo systemctl restart postgresql     # CentOS: postgresql
 ```
 
-## 四、部署后端
-
-### 4.1 创建 Python 虚拟环境
+验证：
 
 ```bash
-cd /opt/IP-TRACK/backend
-python3.11 -m venv venv
+PGPASSWORD='YOUR_DB_PASSWORD' psql -h 127.0.0.1 -U iptrack -d iptrack -c 'select 1;'
+```
+
+---
+
+## 5. 部署后端
+
+### 5.1 创建虚拟环境并安装依赖
+
+```bash
+cd /opt/IP-Track/backend
+python3 -m venv venv
 source venv/bin/activate
-```
-
-### 4.2 安装 Python 依赖
-
-```bash
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 4.3 配置环境变量
+> 内网需要 pip 镜像/代理：`pip install -i https://YOUR_MIRROR/simple -r requirements.txt`。
+> `asyncpg` 若需要编译，先装好 `python3-dev` 与 `gcc`。
+
+### 5.2 准备 `.env`（**关键**）
+
+后端配置读取的是**进程工作目录下的 `.env`**。本指南把工作目录固定为 `/opt/IP-Track/backend`，因此 `.env` 必须放在那里。
+
+必须使用**仓库根目录**的 `.env.example`（组件式配置），不要用旧的 `DATABASE_URL=...` 写法：
 
 ```bash
-# 复制示例配置
-cp .env.example .env
+cd /opt/IP-Track
+cp .env.example backend/.env
 
-# 生成加密密钥
-ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+# 生成加密密钥（用于加密设备密码、签发登录令牌）
+python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
 
-# 编辑 .env 文件
-cat > .env << EOF
-# Application Settings
-APP_NAME=IP Track System
-APP_VERSION=1.0.0
-DEBUG=false
-
-# API Configuration
-API_V1_PREFIX=/api/v1
-BACKEND_CORS_ORIGINS=["http://localhost:8001","http://YOUR_SERVER_IP:8001"]
-
-# Database Configuration
-DATABASE_URL=postgresql+asyncpg://iptrack:YOUR_SECURE_PASSWORD@localhost:5432/iptrack
-
-# Redis Configuration
-REDIS_URL=redis://localhost:6379/0
-REDIS_CACHE_TTL=300
-
-# Security Configuration
-ENCRYPTION_KEY=$ENCRYPTION_KEY
-
-# Switch Connection Settings
-DEFAULT_SSH_TIMEOUT=30
-MAX_CONCURRENT_CONNECTIONS=10
-EOF
+# 生成 Redis 密码（可选）
+python3 -c "import secrets; print(secrets.token_hex(24))"
 ```
 
-**重要**: 替换 `YOUR_SERVER_IP` 为你的服务器 IP 地址。
-
-### 4.4 测试后端
+编辑 `/opt/IP-Track/backend/.env`，至少修改以下项：
 
 ```bash
-cd /opt/IP-TRACK/backend
+# 数据库（手动部署在本机）
+DATABASE_HOST=127.0.0.1
+DATABASE_PORT=5432
+DATABASE_USER=iptrack
+DATABASE_PASSWORD=YOUR_DB_PASSWORD
+DATABASE_NAME=iptrack
+
+# Redis（本机）
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_PASSWORD=            # 若 Redis 配了 requirepass，这里必须填同样的值
+REDIS_BIND=127.0.0.1
+
+# 安全：把上面生成的密钥填进来
+ENCRYPTION_KEY=YOUR_GENERATED_KEY
+
+# 允许浏览器访问来源（前端地址）
+BACKEND_CORS_ORIGINS=["http://localhost:8001","http://YOUR_SERVER_IP:8001"]
+
+# 可选：不设置则系统随机生成一次性管理员密码并打印到日志
+# INITIAL_ADMIN_PASSWORD=YOUR_TEMP_ADMIN_PASSWORD
+```
+
+权限收紧：
+
+```bash
+chmod 600 /opt/IP-Track/backend/.env
+```
+
+> **`ENCRYPTION_KEY` 一旦确定就不要更换**，它用于解密数据库中已保存的交换机/SNMP/BMC 密码；更换会导致所有已保存凭据无法解密。备份数据库时必须一起备份这个文件。
+
+### 5.3 先手工试跑
+
+```bash
+cd /opt/IP-Track/backend
 source venv/bin/activate
-export PYTHONPATH=/opt/IP-TRACK/backend/src
+export PYTHONPATH=/opt/IP-Track/backend/src
 
-# Core API（交换机、查询、历史、告警、SNMP）
-uvicorn main_core:app --host 127.0.0.1 --port 8101
-
-# 另开终端测试 IPAM 服务
-uvicorn main_ipam:app --host 127.0.0.1 --port 8102
-
-# 另开终端测试采集服务
+# 三个终端分别执行
+uvicorn main_core:app      --host 127.0.0.1 --port 8101
+uvicorn main_ipam:app      --host 127.0.0.1 --port 8102
 uvicorn main_collector:app --host 127.0.0.1 --port 8103
 ```
 
-验证方式：
-
-- `http://127.0.0.1:8101/health`
-- `http://127.0.0.1:8102/health`
-- `http://127.0.0.1:8103/health`
-
-按 Ctrl+C 停止测试。
-
-### 4.5 创建后端 systemd 服务
+验证：
 
 ```bash
-sudo tee /etc/systemd/system/iptrack-backend-core.service > /dev/null << 'EOF'
+curl -s http://127.0.0.1:8101/health
+curl -s http://127.0.0.1:8102/health
+curl -s http://127.0.0.1:8103/health
+```
+
+三个都返回 200 后按 Ctrl+C 停止，交给 systemd 托管。
+
+### 5.4 配置 systemd
+
+```bash
+sudo tee /etc/systemd/system/iptrack-backend-core.service >/dev/null <<'EOF'
 [Unit]
 Description=IP Track Backend Core API
-After=network.target postgresql-16.service redis.service
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/IP-TRACK/backend
-Environment="PYTHONPATH=/opt/IP-TRACK/backend/src"
-ExecStart=/opt/IP-TRACK/backend/venv/bin/uvicorn main_core:app --host 127.0.0.1 --port 8101
+WorkingDirectory=/opt/IP-Track/backend
+Environment="PYTHONPATH=/opt/IP-Track/backend/src"
+ExecStart=/opt/IP-Track/backend/venv/bin/uvicorn main_core:app --host 127.0.0.1 --port 8101
 Restart=always
 RestartSec=10
 
@@ -222,17 +306,18 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-sudo tee /etc/systemd/system/iptrack-backend-ipam.service > /dev/null << 'EOF'
+sudo tee /etc/systemd/system/iptrack-backend-ipam.service >/dev/null <<'EOF'
 [Unit]
 Description=IP Track Backend IPAM API
-After=network.target postgresql-16.service redis.service
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/IP-TRACK/backend
-Environment="PYTHONPATH=/opt/IP-TRACK/backend/src"
-ExecStart=/opt/IP-TRACK/backend/venv/bin/uvicorn main_ipam:app --host 127.0.0.1 --port 8102
+WorkingDirectory=/opt/IP-Track/backend
+Environment="PYTHONPATH=/opt/IP-Track/backend/src"
+ExecStart=/opt/IP-Track/backend/venv/bin/uvicorn main_ipam:app --host 127.0.0.1 --port 8102
 Restart=always
 RestartSec=10
 
@@ -240,17 +325,18 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-sudo tee /etc/systemd/system/iptrack-backend-collector.service > /dev/null << 'EOF'
+sudo tee /etc/systemd/system/iptrack-backend-collector.service >/dev/null <<'EOF'
 [Unit]
 Description=IP Track Backend Collector API
-After=network.target postgresql-16.service redis.service
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/IP-TRACK/backend
-Environment="PYTHONPATH=/opt/IP-TRACK/backend/src"
-ExecStart=/opt/IP-TRACK/backend/venv/bin/uvicorn main_collector:app --host 127.0.0.1 --port 8103
+WorkingDirectory=/opt/IP-Track/backend
+Environment="PYTHONPATH=/opt/IP-Track/backend/src"
+ExecStart=/opt/IP-Track/backend/venv/bin/uvicorn main_collector:app --host 127.0.0.1 --port 8103
 Restart=always
 RestartSec=10
 
@@ -258,301 +344,289 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-# 启动三个服务
 sudo systemctl daemon-reload
-sudo systemctl enable iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
-sudo systemctl start iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
-
-# 检查状态
-sudo systemctl status iptrack-backend-core
-sudo systemctl status iptrack-backend-ipam
-sudo systemctl status iptrack-backend-collector
+sudo systemctl enable --now iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
+systemctl status iptrack-backend-core --no-pager
 ```
 
-## 五、部署前端
+> CentOS 的 Redis 服务名可能是 `redis` 而非 `redis-server`；如果 `systemctl status` 提示找不到依赖，把 `After/Wants` 中的名字改成实际服务名。
 
-### 5.1 安装依赖
+### 5.5 取管理员临时密码
 
 ```bash
-cd /opt/IP-TRACK/frontend
-npm install
+sudo journalctl -u iptrack-backend-core --no-pager | grep 初始管理员
 ```
 
-### 5.2 配置环境变量
+输出示例（密码只出现一次）：
 
-```bash
-cat > .env.production << EOF
-VITE_API_BASE_URL=
-EOF
+```
+已创建初始管理员账户，请立即登录并修改密码：
+  用户名: admin
+  临时密码: XXXXXXXXXXXX
 ```
 
-说明：生产环境推荐让前端与 `/api/*` 走同源 Nginx 反向代理，因此这里保持为空即可。
+如果 `.env` 中设置了 `INITIAL_ADMIN_PASSWORD`，日志只显示“密码来自 INITIAL_ADMIN_PASSWORD”，请使用该值登录。
 
-### 5.3 构建前端
+首次登录会强制修改密码（至少 8 位）。**未登录状态是只读访客**，可浏览查询，不可增删改。
+
+---
+
+## 6. 部署前端
+
+### 6.1 安装依赖并构建
 
 ```bash
-npm run build
+cd /opt/IP-Track/frontend
+npm ci            # 有 package-lock.json，使用 ci 保证依赖一致
+npm run build     # 等价于 vue-tsc && vite build
+ls dist/          # 构建产物
 ```
 
-构建完成后，生成的文件在 `dist/` 目录。
+> 内网 npm：`npm ci --registry https://YOUR_NPM_MIRROR` 或配置 `.npmrc`。
+> `npm run build` 会先做 TypeScript 检查；如果历史代码有类型告警导致构建失败，请勿删检查，先看报错。
 
-### 5.4 安装 Nginx
+前端**不需要** `.env.production`：页面通过同源 `/api/*` 访问后端，由 Nginx 代理，`VITE_API_BASE_URL` 保持为空即可。
 
-```bash
-# CentOS/RHEL
-sudo yum install -y nginx
-
-# Ubuntu/Debian
-sudo apt install -y nginx
-
-sudo systemctl enable nginx
-```
-
-### 5.5 配置 Nginx
+### 6.2 安装 Nginx 并配置
 
 ```bash
-sudo tee /etc/nginx/conf.d/iptrack.conf > /dev/null << 'EOF'
+sudo apt install -y nginx      # CentOS: sudo yum install -y nginx
+sudo tee /etc/nginx/conf.d/iptrack.conf >/dev/null <<'EOF'
 server {
     listen 8001;
     server_name _;
 
-    root /opt/IP-TRACK/frontend/dist;
+    root /opt/IP-Track/frontend/dist;
     index index.html;
 
-    # Gzip compression
     gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+    gzip_types text/plain text/css application/json application/javascript application/xml;
 
+    # 前端单页应用
     location / {
         try_files $uri $uri/ /index.html;
     }
 
-    # API 反向代理
-    location /api/v1/ipam/ {
-        proxy_pass http://127.0.0.1:8102;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
+    # 代理公共头
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 320s;      # IPAM 扫描/光模块采集耗时较长
 
-    location /api/v1/network/ {
-        proxy_pass http://127.0.0.1:8103;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
+    # IPAM 服务
+    location /api/v1/ipam/          { proxy_pass http://127.0.0.1:8102; }
+    location /api/v1/subnet-probe/  { proxy_pass http://127.0.0.1:8102; }
 
-    location /api/v1/discovery/ {
-        proxy_pass http://127.0.0.1:8103;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
+    # 采集 / 发现服务
+    location /api/v1/network/           { proxy_pass http://127.0.0.1:8103; }
+    location /api/v1/discovery/         { proxy_pass http://127.0.0.1:8103; }
+    location /api/v1/command-templates/ { proxy_pass http://127.0.0.1:8103; }
 
-    location /api/v1/command-templates/ {
-        proxy_pass http://127.0.0.1:8103;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8101;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
+    # 其余 API 走 Core
+    location /api/ { proxy_pass http://127.0.0.1:8101; }
 }
 EOF
 
-# 测试配置
 sudo nginx -t
-
-# 启动 Nginx
-sudo systemctl start nginx
-sudo systemctl status nginx
+sudo systemctl enable --now nginx
+sudo systemctl reload nginx
 ```
 
-## 六、配置防火墙
+> 前缀与顺序必须和前端 `vite.config.ts` 的代理规则一致；`/api/v1/subnet-probe/` 若遗漏，子网存活探测页面会 404/500。
+> `/api/v1/command-templates/` 在 core 与 collector 中都有注册，这里按前端既有规则指向 collector 即可。
+
+---
+
+## 7. 防火墙
 
 ```bash
-# CentOS/RHEL (firewalld)
+# CentOS firewalld
 sudo firewall-cmd --permanent --add-port=8001/tcp
 sudo firewall-cmd --reload
 
-# Ubuntu/Debian (ufw)
+# Ubuntu ufw
 sudo ufw allow 8001/tcp
 sudo ufw reload
 ```
 
-如需从外部直接访问后端服务，再按需开放 `8101/tcp`、`8102/tcp`、`8103/tcp`。
+**不要**对公网开放 5432、6379、8101/8102/8103。
 
-## 七、验证部署
+---
 
-### 7.1 检查所有服务状态
+## 8. 验证部署
 
 ```bash
-# 检查后端
-sudo systemctl status iptrack-backend-core
-sudo systemctl status iptrack-backend-ipam
-sudo systemctl status iptrack-backend-collector
+# 系统服务
+systemctl status iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector nginx --no-pager
 
-# 检查 Nginx
-sudo systemctl status nginx
+# 后端健康
+curl -s -o /dev/null -w "core %{http_code}\n"      http://127.0.0.1:8101/health
+curl -s -o /dev/null -w "ipam %{http_code}\n"      http://127.0.0.1:8102/health
+curl -s -o /dev/null -w "collector %{http_code}\n" http://127.0.0.1:8103/health
 
-# 检查 PostgreSQL
-sudo systemctl status postgresql-16
+# 经 Nginx 的只读接口（应 200）
+curl -s -o /dev/null -w "switches %{http_code}\n" http://127.0.0.1:8001/api/v1/switches?limit=1
 
-# 检查 Redis
-sudo systemctl status redis
+# 登录态接口未登录应为 401
+curl -s -o /dev/null -w "auth/me %{http_code}\n" http://127.0.0.1:8001/api/v1/auth/me
+
+# 前端页面
+curl -s -o /dev/null -w "frontend %{http_code}\n" http://127.0.0.1:8001/
 ```
 
-### 7.2 访问系统
+浏览器访问 `http://YOUR_SERVER_IP:8001`，登录后按 [QUICK_START.md 第 4 节](QUICK_START.md#4-第一次使用从空库到查出-ip-在哪台交换机的哪个口) 完成“加交换机 → 测试 → 采集 → 查询 IP”的闭环。
 
-- **前端**: http://YOUR_SERVER_IP:8001
-- **API 文档**: http://YOUR_SERVER_IP:8001/api/docs
-- **Core 健康检查**: http://127.0.0.1:8101/health
-- **IPAM 健康检查**: http://127.0.0.1:8102/health
-- **Collector 健康检查**: http://127.0.0.1:8103/health
+### 接口文档
 
-## 八、日常维护
-
-### 8.1 查看日志
+默认关闭（`/docs` 返回 404）。需要时在 `/opt/IP-Track/backend/.env` 加：
 
 ```bash
-# 后端日志
+API_DOCS_ENABLED=true
+```
+
+然后 `sudo systemctl restart iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector`，访问 `http://127.0.0.1:8101/docs` 等。生产用完请关闭。
+
+---
+
+## 9. 日常维护
+
+### 9.1 日志
+
+```bash
 sudo journalctl -u iptrack-backend-core -f
 sudo journalctl -u iptrack-backend-ipam -f
 sudo journalctl -u iptrack-backend-collector -f
-
-# Nginx 日志
-sudo tail -f /var/log/nginx/access.log
-sudo tail -f /var/log/nginx/error.log
+sudo tail -f /var/log/nginx/access.log /var/log/nginx/error.log
 ```
 
-### 8.2 重启服务
+### 9.2 重启 / 停止
 
 ```bash
-# 重启后端
-sudo systemctl restart iptrack-backend-core
-sudo systemctl restart iptrack-backend-ipam
-sudo systemctl restart iptrack-backend-collector
-
-# 重启前端
-sudo systemctl restart nginx
+sudo systemctl restart iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
+sudo systemctl reload nginx
+# 停止
+sudo systemctl stop iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
 ```
 
-### 8.3 更新代码
+### 9.3 更新代码
 
 ```bash
-# 1. 拉取最新代码
-cd /opt/IP-TRACK
-git pull
+cd /opt/IP-Track
 
-# 2. 更新后端
-cd backend
-source venv/bin/activate
-pip install -r requirements.txt
-sudo systemctl restart iptrack-backend-core
-sudo systemctl restart iptrack-backend-ipam
-sudo systemctl restart iptrack-backend-collector
+# 1) 数据库迁移（幂等：已执行的会跳过；新增迁移会自动执行）
+export PGPASSWORD='YOUR_DB_PASSWORD'
+PSQL="psql -h 127.0.0.1 -U iptrack -d iptrack -v ON_ERROR_STOP=1"
+for f in $(ls database/migrations/*.sql | sort); do
+  name=$(basename "$f")
+  applied=$($PSQL -tAc "SELECT 1 FROM schema_migrations WHERE filename='$name'" | tr -d '[:space:]')
+  [ -n "$applied" ] && continue
+  echo "▶ $name"; $PSQL -f "$f" || break
+  $PSQL -c "INSERT INTO schema_migrations(filename) VALUES ('$name') ON CONFLICT DO NOTHING;"
+done
 
-# 3. 更新前端
-cd ../frontend
-npm install
-npm run build
-sudo systemctl restart nginx
+# 2) 后端依赖
+cd backend && source venv/bin/activate && pip install -r requirements.txt && cd ..
+
+# 3) 前端
+cd frontend && npm ci && npm run build && cd ..
+
+# 4) 重启
+sudo systemctl restart iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
+sudo systemctl reload nginx
 ```
 
-## 九、故障排查
-
-### 9.1 后端无法启动
+### 9.4 备份与恢复
 
 ```bash
-# 检查日志
-sudo journalctl -u iptrack-backend-core -n 50
-sudo journalctl -u iptrack-backend-ipam -n 50
-sudo journalctl -u iptrack-backend-collector -n 50
+# 备份数据库 + .env（.env 内含 ENCRYPTION_KEY，必须一起备份）
+sudo mkdir -p /backup/iptrack
+PGPASSWORD='YOUR_DB_PASSWORD' pg_dump -h 127.0.0.1 -U iptrack -d iptrack \
+  > /backup/iptrack/iptrack_$(date +%F).sql
+sudo cp /opt/IP-Track/backend/.env /backup/iptrack/env_$(date +%F).bak
+sudo chmod 600 /backup/iptrack/*
 
-# 检查数据库连接
-psql -U iptrack -d iptrack -h localhost
-
-# 检查 Redis 连接
-redis-cli ping
+# 恢复
+sudo systemctl stop iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
+PGPASSWORD='YOUR_DB_PASSWORD' psql -h 127.0.0.1 -U iptrack -d iptrack < iptrack_YYYY-MM-DD.sql
+sudo cp env_YYYY-MM-DD.bak /opt/IP-Track/backend/.env
+sudo systemctl start iptrack-backend-core iptrack-backend-ipam iptrack-backend-collector
 ```
 
-### 9.2 前端无法访问
+（恢复时如果 `.env` 中的 `ENCRYPTION_KEY` 与备份时不同，已保存的设备密码将无法解密。）
 
+---
+
+## 10. 常见问题
+
+### 10.1 后端启动即退出
 ```bash
-# 检查 Nginx 配置
+sudo journalctl -u iptrack-backend-core -n 80 --no-pager
+```
+常见原因：
+- 找不到模块 → `PYTHONPATH` 未设置（必须是 `/opt/IP-Track/backend/src`）；
+- 读不到 `.env` → `WorkingDirectory` 不等于 `.env` 所在目录；
+- 数据库连接失败 → `DATABASE_HOST/PASSWORD` 错误，或 `pg_hba.conf` 未允许 127.0.0.1 密码登录；
+- Redis 认证失败 → `.env` 的 `REDIS_PASSWORD` 与 `redis.conf` 的 `requirepass` 不一致。
+
+### 10.2 页面打开但接口 500 / 404
+```bash
 sudo nginx -t
-
-# 检查 Nginx 日志
-sudo tail -f /var/log/nginx/error.log
-
-# 检查端口占用
-sudo netstat -tlnp | grep 8001
+sudo tail -n 100 /var/log/nginx/error.log
 ```
+逐条核对第 6.2 节的 `location` 前缀；缺 `/api/v1/subnet-probe/` 会导致探测功能异常。
 
-### 9.3 CORS 错误
+### 10.3 CORS 报错
+在 `/opt/IP-Track/backend/.env` 的 `BACKEND_CORS_ORIGINS` 中加入实际访问地址（JSON 数组），重启三个后端。
 
-编辑 `/opt/IP-TRACK/backend/.env`，添加你的服务器 IP 到 CORS 列表：
+### 10.4 登录不了 / 提示初始管理员检查失败
+- 确认迁移 `030_add_users.sql` 已执行：
+  ```bash
+  PGPASSWORD='YOUR_DB_PASSWORD' psql -h 127.0.0.1 -U iptrack -d iptrack \
+    -c "select filename from schema_migrations order by filename;"
+  ```
+- 确认日志中有“已创建初始管理员账户”：
+  ```bash
+  sudo journalctl -u iptrack-backend-core --no-pager | grep 初始管理员
+  ```
 
+### 10.5 状态一直显示离线
+状态检查间隔为 **300 秒**，启动后请等待 5 分钟。排查连通性：
 ```bash
-BACKEND_CORS_ORIGINS=["http://localhost:8001","http://YOUR_SERVER_IP:8001"]
+ping -c 3 SWITCH_IP
+nc -zv SWITCH_IP 22          # 或 telnet SWITCH_IP 22
+snmpwalk -v3 -l authPriv ... # 若使用 SNMPv3
 ```
+并确认运行用户对 `arp-scan`、`ipmitool` 有执行权限（`arp-scan` 需要 root 或 `CAP_NET_RAW`）。
 
-重启后端：
-```bash
-sudo systemctl restart iptrack-backend-core
-sudo systemctl restart iptrack-backend-ipam
-sudo systemctl restart iptrack-backend-collector
-```
+### 10.6 `arp-scan` 提示权限不足
+systemd 单元以 `User=root` 运行即可；若要降权，需额外配置 capabilities，属于非必须优化。
 
-## 十、安全建议
+---
 
-1. **修改默认密码**: 更改数据库密码和加密密钥
-2. **使用 HTTPS**: 配置 SSL 证书（Let's Encrypt）
-3. **限制访问**: 使用防火墙限制只允许内网访问
-4. **定期备份**: 备份数据库和配置文件
-5. **更新系统**: 定期更新系统和依赖包
+## 11. 安全建议
 
-## 十一、备份和恢复
+1. `.env` 权限 `600`，包含数据库密码与 `ENCRYPTION_KEY`；
+2. 只对外开放 8001，前端前置 HTTPS（Nginx + 证书）；
+3. 初始管理员登录后立即修改密码，并删除/替换 `INITIAL_ADMIN_PASSWORD`；
+4. 定期备份数据库 + `.env`；
+5. 接口文档默认关闭，排障时临时打开，用完关闭；
+6. 交换机凭据按最小权限配置（只读账号优先）。
 
-### 备份数据库
+---
 
-```bash
-pg_dump -U iptrack iptrack > /backup/iptrack_$(date +%Y%m%d).sql
-```
+## 12. 与其他文档的关系
 
-### 恢复数据库
+| 文档 | 内容 |
+|---|---|
+| [QUICK_START.md](QUICK_START.md) | Docker 部署 + 首次使用（推荐首选） |
+| **MANUAL_DEPLOYMENT.md（本文）** | 无 Docker 的 systemd + Nginx 部署 |
+| [QUICK_START_GUIDE.md](QUICK_START_GUIDE.md) | SNMP / Last Boot Time / OS 识别专项排障 |
+| [INTERNAL_DEPLOYMENT.md](INTERNAL_DEPLOYMENT.md) | 备份恢复、监控、性能调优、故障处置 |
 
-```bash
-psql -U iptrack iptrack < /backup/iptrack_20260131.sql
-```
+---
 
-## 支持
+**验证状态**：本文命令与 `docker-compose.yml`、`setup.sh`、`backend/src/core/config.py`、`main_*.py`、`vite.config.ts`、`backend/Dockerfile` 的配置方式逐一核对；系统工具清单取自 `backend/Dockerfile`。**未验证**：在真实无 Docker 主机上完整执行一遍（含 PostgreSQL/Redis 具体版本差异、systemd 服务名差异、Nginx 配置加载、`npm run build` 类型检查结果）。
 
-如有问题，请查看：
-- GitHub Issues: https://github.com/YOUR_USERNAME/IP-TRACK/issues
-- API 文档: http://YOUR_SERVER_IP:8001/api/docs
+**最后更新**：2026-11-05

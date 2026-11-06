@@ -821,32 +821,54 @@ class IPAMService:
             }
             quick_finished_at = datetime.now(timezone.utc)
 
-            for ip_str, scan_result in quick_results_by_ip.items():
-                ip_addr = ip_records_by_str.get(ip_str)
-                if not ip_addr:
-                    continue
+            # Blind-round guard: when a round suddenly sees almost none of the
+            # hosts that were reachable before, the collector's own network is
+            # probably down (not the devices). Skip state transitions so a
+            # server outage does not mass-mark every device offline.
+            previous_reachable = sum(1 for ip in ip_addresses if ip.is_reachable)
+            current_reachable = sum(1 for r in quick_results if r.get('is_reachable'))
+            blind_round = previous_reachable > 0 and (
+                current_reachable == 0
+                or (
+                    previous_reachable >= settings.IPAM_BLIND_ROUND_MIN_PREVIOUS
+                    and current_reachable / previous_reachable
+                    < settings.IPAM_BLIND_ROUND_MAX_REACHABLE_RATIO
+                )
+            )
 
-                ip_addr.is_reachable = scan_result['is_reachable']
-                ip_addr.response_time = scan_result['response_time']
-                ip_addr.last_scan_at = quick_finished_at
-                ip_addr.scan_count += 1
+            if blind_round:
+                logger.warning(
+                    f"Blind scan round for subnet {subnet_id}: previous reachable="
+                    f"{previous_reachable}, current reachable={current_reachable}. "
+                    "Keeping previous IP states (collector network may be down)."
+                )
+            else:
+                for ip_str, scan_result in quick_results_by_ip.items():
+                    ip_addr = ip_records_by_str.get(ip_str)
+                    if not ip_addr:
+                        continue
 
-                if scan_result['is_reachable']:
-                    ip_addr.last_seen_at = quick_finished_at
-                    if ip_addr.status in [IPStatus.AVAILABLE.value, IPStatus.OFFLINE.value]:
-                        ip_addr.status = IPStatus.USED.value
-                else:
-                    if ip_addr.last_seen_at:
-                        time_since_last_seen = quick_finished_at - ip_addr.last_seen_at
-                        offline_threshold_hours = settings.IPAM_OFFLINE_THRESHOLD_HOURS
+                    ip_addr.is_reachable = scan_result['is_reachable']
+                    ip_addr.response_time = scan_result['response_time']
+                    ip_addr.last_scan_at = quick_finished_at
+                    ip_addr.scan_count += 1
 
-                        if time_since_last_seen.total_seconds() > offline_threshold_hours * 3600:
-                            if ip_addr.status == IPStatus.USED.value:
-                                ip_addr.status = IPStatus.OFFLINE.value
-                                logger.info(
-                                    f"Marking {ip_str} as OFFLINE "
-                                    f"(not seen for {time_since_last_seen.total_seconds()/3600:.1f} hours)"
-                                )
+                    if scan_result['is_reachable']:
+                        ip_addr.last_seen_at = quick_finished_at
+                        if ip_addr.status in [IPStatus.AVAILABLE.value, IPStatus.OFFLINE.value]:
+                            ip_addr.status = IPStatus.USED.value
+                    else:
+                        if ip_addr.last_seen_at:
+                            time_since_last_seen = quick_finished_at - ip_addr.last_seen_at
+                            offline_threshold_hours = settings.IPAM_OFFLINE_THRESHOLD_HOURS
+
+                            if time_since_last_seen.total_seconds() > offline_threshold_hours * 3600:
+                                if ip_addr.status == IPStatus.USED.value:
+                                    ip_addr.status = IPStatus.OFFLINE.value
+                                    logger.info(
+                                        f"Marking {ip_str} as OFFLINE "
+                                        f"(not seen for {time_since_last_seen.total_seconds()/3600:.1f} hours)"
+                                    )
 
             subnet.last_scan_at = quick_finished_at
             await db.commit()
@@ -865,6 +887,7 @@ class IPAMService:
                     'total_ips_scanned': len(quick_results),
                     'reachable_ips': len(reachable_ip_list),
                     'unreachable_ips': len(quick_results) - len(reachable_ip_list),
+                    'blind_round': blind_round,
                 }
             )
 
@@ -916,7 +939,12 @@ class IPAMService:
                 old_state = previous_state[ip_addr.id]
 
                 # Detect reachability changes against the pre-scan snapshot.
-                status_changed = old_state['is_reachable'] != scan_result['is_reachable']
+                # In a blind round every host looks unreachable while its state is
+                # intentionally kept, so skip change accounting and history.
+                status_changed = (
+                    not blind_round
+                    and old_state['is_reachable'] != scan_result['is_reachable']
+                )
 
                 if scan_result['is_reachable'] and not old_state['last_seen_at']:
                     new_devices += 1
@@ -1022,7 +1050,10 @@ class IPAMService:
                     status_changed, hostname_changed, os_changed,
                     mac_changed, switch_changed, port_changed
                 ])
-                record_history = settings.IP_SCAN_HISTORY_RECORD_ALL or has_change
+                record_history = (
+                    not blind_round
+                    and (settings.IP_SCAN_HISTORY_RECORD_ALL or has_change)
+                )
 
                 if record_history:
                     history_rows.append({
@@ -1066,7 +1097,8 @@ class IPAMService:
                 'unreachable': len(ordered_scan_results) - reachable,
                 'new_devices': new_devices,
                 'changed_devices': changed_devices,
-                'scan_duration': elapsed
+                'scan_duration': elapsed,
+                'blind_round': blind_round,
             }
 
             if include_results:

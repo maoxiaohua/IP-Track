@@ -523,6 +523,7 @@ async def list_ip_addresses(
     is_reachable: Optional[bool] = Query(None),
     os_type: Optional[str] = Query(None),
     vendor: Optional[str] = Query(None),
+    include_archived: bool = Query(False, description="Include devices unseen beyond retention"),
     search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=10000),
@@ -547,8 +548,15 @@ async def list_ip_addresses(
         Switch, IPAddress.switch_id == Switch.id
     )
 
+    # Same freshness semantics as the distribution charts
+    ref_subq = _subnet_scan_reference()
+    freshness_bucket = _freshness_bucket(ref_subq, settings.IPAM_FRESHNESS_STALE_DAYS)
+    query = query.outerjoin(ref_subq, ref_subq.c.subnet_id == IPAddress.subnet_id)
+
     # Apply filters
     conditions = []
+    if not include_archived:
+        conditions.append(freshness_bucket != "archived")
     if subnet_id:
         conditions.append(IPAddress.subnet_id == subnet_id)
     if status:
@@ -558,7 +566,7 @@ async def list_ip_addresses(
     if os_type:
         conditions.append(IPAddress.os_type == os_type)
     if vendor:
-        conditions.append(IPAddress.vendor.ilike(f'%{vendor}%'))
+        conditions.append(func.lower(IPAddress.vendor) == vendor.lower())
     if search:
         conditions.append(
             or_(
@@ -579,7 +587,9 @@ async def list_ip_addresses(
         query = query.where(and_(*conditions))
 
     # Get total count before pagination
-    count_query = select(func.count(IPAddress.id))
+    count_query = select(func.count(IPAddress.id)).select_from(IPAddress).outerjoin(
+        ref_subq, ref_subq.c.subnet_id == IPAddress.subnet_id
+    )
     if conditions:
         count_query = count_query.where(and_(*conditions))
 
@@ -992,40 +1002,125 @@ async def scan_ips(
         )
 
 
-# OS type statistics endpoint
-@router.get("/statistics/os-type", response_model=OSTypeStatisticsResponse)
-async def get_os_type_statistics(
-    subnet_id: Optional[int] = Query(None),
-    db: AsyncSession = Depends(get_db)
-):
-    """Get IP count grouped by OS type (windows, linux, network, etc.)"""
-    from sqlalchemy import select, func, and_
+def _subnet_scan_reference():
+    """Per-subnet observation clock: latest applied (non-blind) scan round.
 
-    conditions = [IPAddress.os_type.isnot(None)]
+    ``IPAddress.last_scan_at`` is only advanced by healthy scan rounds, so a
+    collector outage freezes this clock instead of ageing every device out.
+    """
+    from sqlalchemy import select
+
+    return (
+        select(
+            IPAddress.subnet_id.label("subnet_id"),
+            func.max(IPAddress.last_scan_at).label("ref_time"),
+        )
+        .where(IPAddress.last_scan_at.isnot(None))
+        .group_by(IPAddress.subnet_id)
+        .subquery()
+    )
+
+
+def _freshness_bucket(ref_subq, stale_days: int):
+    """active = answered in latest round; stale = seen within retention; else archived.
+
+    Only hosts that were actually seen before are eligible for archiving, so
+    never-scanned subnets and imported entries are not hidden.
+    """
+    from sqlalchemy import and_, case, or_
+    from datetime import timedelta
+
+    cutoff = ref_subq.c.ref_time - timedelta(days=stale_days)
+    return case(
+        (IPAddress.is_reachable.is_(True), "active"),
+        (IPAddress.last_seen_at.is_(None), "stale"),
+        (
+            or_(
+                ref_subq.c.ref_time.is_(None),
+                and_(
+                    IPAddress.last_seen_at.isnot(None),
+                    IPAddress.last_seen_at >= cutoff,
+                ),
+            ),
+            "stale",
+        ),
+        else_="archived",
+    )
+
+
+async def _grouped_distribution(
+    db: AsyncSession,
+    column,
+    subnet_id: Optional[int],
+    include_archived: bool
+):
+    """Group a classification column, split by data freshness."""
+    from sqlalchemy import select, and_
+
+    ref = _subnet_scan_reference()
+    bucket = _freshness_bucket(ref, settings.IPAM_FRESHNESS_STALE_DAYS)
+    conditions = [column.isnot(None)]
     if subnet_id:
         conditions.append(IPAddress.subnet_id == subnet_id)
 
     query = (
-        select(IPAddress.os_type, func.count(IPAddress.id))
+        select(column, bucket.label("bucket"), func.count(IPAddress.id))
+        .outerjoin(ref, ref.c.subnet_id == IPAddress.subnet_id)
         .where(and_(*conditions))
-        .group_by(IPAddress.os_type)
-        .order_by(func.count(IPAddress.id).desc())
+        .group_by(column, bucket)
     )
-    result = await db.execute(query)
-    rows = result.all()
+    rows = (await db.execute(query)).all()
 
-    os_types = []
-    total = 0
-    for os_type, count in rows:
-        if os_type:
-            total += count
-            os_types.append(OSTypeStatItem(
-                os_type=os_type,
-                count=count,
-                label=_get_os_type_label(os_type),
-            ))
+    counts = {"active": 0, "stale": 0, "archived": 0}
+    per_value: dict = {}
+    for value, bucket_name, count in rows:
+        if not value:
+            continue
+        counts[bucket_name] += count
+        if bucket_name != "archived" or include_archived:
+            per_value[value] = per_value.get(value, 0) + count
 
-    return OSTypeStatisticsResponse(os_types=os_types, total_classified=total)
+    data_as_of_query = select(func.max(IPAddress.last_scan_at))
+    if subnet_id:
+        data_as_of_query = data_as_of_query.where(IPAddress.subnet_id == subnet_id)
+    data_as_of = (await db.execute(data_as_of_query)).scalar()
+
+    return counts, per_value, data_as_of
+
+
+# OS type statistics endpoint
+@router.get("/statistics/os-type", response_model=OSTypeStatisticsResponse)
+async def get_os_type_statistics(
+    subnet_id: Optional[int] = Query(None),
+    include_archived: bool = Query(False, description="Include devices unseen beyond retention"),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get IP count grouped by OS type (windows, linux, network, etc.)"""
+    counts, per_value, data_as_of = await _grouped_distribution(
+        db, IPAddress.os_type, subnet_id, include_archived
+    )
+
+    os_types = [
+        OSTypeStatItem(
+            os_type=value,
+            count=count,
+            label=_get_os_type_label(value),
+        )
+        for value, count in sorted(per_value.items(), key=lambda item: item[1], reverse=True)
+    ]
+    total = counts["active"] + counts["stale"]
+    if include_archived:
+        total += counts["archived"]
+
+    return OSTypeStatisticsResponse(
+        os_types=os_types,
+        total_classified=total,
+        active_classified=counts["active"],
+        stale_classified=counts["stale"],
+        archived_classified=counts["archived"],
+        include_archived=include_archived,
+        data_as_of=data_as_of,
+    )
 
 
 def _get_os_type_label(os_type: str) -> str:
@@ -1046,36 +1141,31 @@ def _get_os_type_label(os_type: str) -> str:
 @router.get("/statistics/vendor", response_model=OSTypeStatisticsResponse)
 async def get_vendor_statistics(
     subnet_id: Optional[int] = Query(None),
+    include_archived: bool = Query(False, description="Include devices unseen beyond retention"),
     db: AsyncSession = Depends(get_db)
 ):
     """Get IP count grouped by vendor (from MAC OUI lookup)."""
-    from sqlalchemy import select, func, and_
-
-    conditions = [IPAddress.vendor.isnot(None)]
-    if subnet_id:
-        conditions.append(IPAddress.subnet_id == subnet_id)
-
-    query = (
-        select(IPAddress.vendor, func.count(IPAddress.id))
-        .where(and_(*conditions))
-        .group_by(IPAddress.vendor)
-        .order_by(func.count(IPAddress.id).desc())
+    counts, per_value, data_as_of = await _grouped_distribution(
+        db, IPAddress.vendor, subnet_id, include_archived
     )
-    result = await db.execute(query)
-    rows = result.all()
 
-    os_types = []
-    total = 0
-    for vendor_name, count in rows:
-        if vendor_name:
-            total += count
-            os_types.append(OSTypeStatItem(
-                os_type=vendor_name,
-                count=count,
-                label=vendor_name,
-            ))
+    os_types = [
+        OSTypeStatItem(os_type=value, count=count, label=value)
+        for value, count in sorted(per_value.items(), key=lambda item: item[1], reverse=True)
+    ]
+    total = counts["active"] + counts["stale"]
+    if include_archived:
+        total += counts["archived"]
 
-    return OSTypeStatisticsResponse(os_types=os_types, total_classified=total)
+    return OSTypeStatisticsResponse(
+        os_types=os_types,
+        total_classified=total,
+        active_classified=counts["active"],
+        stale_classified=counts["stale"],
+        archived_classified=counts["archived"],
+        include_archived=include_archived,
+        data_as_of=data_as_of,
+    )
 
 
 # Dashboard endpoint

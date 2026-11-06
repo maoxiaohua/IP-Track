@@ -62,6 +62,9 @@ export interface IPAMScanSummary {
   new_devices?: number
   changed_devices?: number
   scan_duration?: number
+  // True when the round was skipped because the collector likely lost its own
+  // network (previous IP states kept, charts intentionally unchanged)
+  blind_round?: boolean
 }
 
 export interface IPAMScanStatus {
@@ -112,6 +115,11 @@ export interface OSTypeStatItem {
 export interface OSTypeStatisticsResponse {
   os_types: OSTypeStatItem[]
   total_classified: number
+  active_classified?: number
+  stale_classified?: number
+  archived_classified?: number
+  include_archived?: boolean
+  data_as_of?: string | null
 }
 
 export interface IPAddressListResponse {
@@ -201,14 +209,16 @@ export const ipamApi = {
     return response.data
   },
 
-  async getOSTypeStatistics(subnetId?: number): Promise<OSTypeStatisticsResponse> {
-    const params = subnetId ? { subnet_id: subnetId } : {}
+  async getOSTypeStatistics(subnetId?: number, includeArchived = false): Promise<OSTypeStatisticsResponse> {
+    const params: Record<string, any> = { include_archived: includeArchived }
+    if (subnetId) params.subnet_id = subnetId
     const response = await apiClient.get('/api/v1/ipam/statistics/os-type', { params })
     return response.data
   },
 
-  async getVendorStatistics(subnetId?: number): Promise<OSTypeStatisticsResponse> {
-    const params = subnetId ? { subnet_id: subnetId } : {}
+  async getVendorStatistics(subnetId?: number, includeArchived = false): Promise<OSTypeStatisticsResponse> {
+    const params: Record<string, any> = { include_archived: includeArchived }
+    if (subnetId) params.subnet_id = subnetId
     const response = await apiClient.get('/api/v1/ipam/statistics/vendor', { params })
     return response.data
   }

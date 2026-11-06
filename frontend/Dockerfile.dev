@@ -1,12 +1,25 @@
-FROM docker.m.daocloud.io/library/node:20-alpine
+# Base image is configurable so mirrored / air-gapped networks can override it:
+#   NODE_IMAGE=docker.m.daocloud.io/library/node:20-alpine
+ARG NODE_IMAGE=node:20-alpine
+FROM ${NODE_IMAGE}
 
 WORKDIR /app
 
 # Copy package files
 COPY package.json ./
 
+# Optional network settings for restricted networks, supplied from .env through
+# docker-compose build args. Leave empty to use the default npm registry and no proxy.
+ARG NPM_REGISTRY=
+ARG NPM_PROXY=
+
 # Install dependencies
-RUN npm install --proxy http://87.254.212.121:8080
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi; \
+    if [ -n "$NPM_PROXY" ]; then \
+      npm config set proxy "$NPM_PROXY"; \
+      npm config set https-proxy "$NPM_PROXY"; \
+    fi; \
+    npm install
 
 # Copy application code
 COPY . .

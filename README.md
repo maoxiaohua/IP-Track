@@ -12,7 +12,7 @@ A production-ready, open-source network monitoring platform for tracking IP addr
 ## ✨ Features
 
 - **IP Address Lookup**: Track IP addresses to switch ports with cache and realtime modes, powered by a weighted IP-location matching engine
-- **Multi-Vendor Support**: Cisco (IOS/NX-OS), Dell (Force10/OS10), Alcatel/Nokia (SR OS / SR Linux), Juniper (JunOS), plus Arista, HPE, Huawei via configurable CLI command templates
+- **Multi-Vendor Support**: Cisco (IOS/NX-OS), Dell (Force10/OS10), Alcatel/Nokia (SR OS / SR Linux) selectable in the UI; command templates for Juniper/Arista/HPE/Huawei exist in `collection_strategy.py` but are not exposed in the UI yet
 - **Hybrid CLI/SNMP Collection**: Per-vendor collection strategy — CLI primary with SNMP fallback, or fully configurable per switch
 - **IPAM**: IP Address Management with automated subnet scanning
   - **Large-scale subnet support**: batch create, Excel import, template download — designed for **1000+ subnets**
@@ -24,13 +24,14 @@ A production-ready, open-source network monitoring platform for tracking IP addr
 - **Port Analysis**: Intelligent trunk/access port classification with confidence scoring and per-switch lookup-policy overrides
 - **Optical Modules**: Monitor SFP/SFP+ module health (temperature, power, wavelength)
 - **Alarm Management**: Comprehensive alerting with acknowledge / resolve / auto-resolve and configurable retention
-- **Status Checker**: Real-time switch connectivity monitoring (ICMP ping every 30 seconds)
+- **Status Checker**: Periodic switch connectivity monitoring (ICMP ping every 300 seconds by default)
 - **Switch Discovery**: Batch discovery of switches across network ranges via SNMP, with duplicate detection
 - **BMC Reset Management**: Manage BMC servers, credential profiles, and reset history with verification workflows
 - **Data Freshness**: Per-switch collection freshness indicators for port analysis, lookup, and optical inventory
 - **Query History**: Persistent lookup history with revisiting and export
 - **Modern UI**: Vue 3 + TypeScript frontend with Element Plus, ECharts, and Pinia state management
-- **RESTful API**: FastAPI backend with automatic OpenAPI documentation
+- **RESTful API**: FastAPI backend; OpenAPI docs are **disabled by default** (`API_DOCS_ENABLED=true` to enable `/docs`)
+- **Authentication**: JWT login with admin/viewer roles; unauthenticated access is read-only
 
 ## 🏗️ Architecture
 
@@ -76,7 +77,7 @@ A production-ready, open-source network monitoring platform for tracking IP addr
 
 IP-Track runs several automated background tasks:
 
-1. **Status Checker** (every 30 seconds)
+1. **Status Checker** (every 300 seconds by default, `STATUS_CHECK_INTERVAL_SECONDS`)
    - ICMP ping all enabled switches
    - Updates reachability, response time, last-check timestamp
 
@@ -86,7 +87,7 @@ IP-Track runs several automated background tasks:
    - Updates the IP location database
    - Retry / backoff / queued job handling via a collection worker pool
 
-3. **IPAM Auto-Scan** (default every 60 minutes)
+3. **IPAM Auto-Scan** (default every 60 minutes via `IPAM_SCAN_INTERVAL_MINUTES`; code default 30)
    - Scans configured subnets and updates IP reachability
    - Enriches IPs with hostname / machine type / vendor / last boot time
    - Tracks IP lifecycle and preserves IP identity across empty scans
@@ -110,88 +111,99 @@ IP-Track runs several automated background tasks:
 
 ### Installation (Docker — Recommended)
 
+> Full walkthrough with screenshots-free step-by-step and first-use flow: **[QUICK_START.md](QUICK_START.md)**.
+> No Docker available? See **[MANUAL_DEPLOYMENT.md](MANUAL_DEPLOYMENT.md)**.
+
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/your-org/ip-track.git
-   cd ip-track
+   sudo mkdir -p /opt/IP-Track
+   git clone https://github.com/your-org/ip-track.git /opt/IP-Track
+   cd /opt/IP-Track
    ```
 
-2. **Initialize configuration**
+2. **Build the backend image (required — compose only references the image)**
    ```bash
-   chmod +x scripts/init_config.sh
-   ./scripts/init_config.sh
+   docker build -t ip-track-backend:latest ./backend
+   ```
+
+3. **Run the setup script**
+   ```bash
+   chmod +x setup.sh
+   ./setup.sh
    ```
    This script:
    - Creates `.env` from `.env.example`
-   - Generates a secure Fernet encryption key
-   - Generates a random database password
-   - Sets up all required configuration
+   - Generates `ENCRYPTION_KEY`, `DATABASE_PASSWORD`, `REDIS_PASSWORD`
+   - Starts PostgreSQL/Redis, applies `database/migrations/*.sql` (idempotent)
+   - Starts all 6 containers and waits for health checks
 
-3. **Review and customize `.env`** (optional)
-   ```bash
-   nano .env
-   ```
-   Key settings to review:
-   - `COLLECTION_INTERVAL_MINUTES` — how often to collect network data (default: 120)
-   - `COLLECTION_WORKERS` — concurrent switch collectors (default: 10)
-   - `BACKEND_CORS_ORIGINS` — add your frontend URLs if not using defaults
+   > If the frontend image fails to build (unreachable Node base image, npm registry or a required proxy), set `NODE_IMAGE` / `NPM_REGISTRY` / `NPM_PROXY` in `.env` — no Dockerfile edit needed — then run `docker compose up -d --build frontend`. See [QUICK_START.md §2](QUICK_START.md#第-3-步运行安装脚本).
 
-4. **Start all services**
-   ```bash
-   docker compose up -d
-   ```
-
-5. **Verify services are running**
+4. **Verify services are running**
    ```bash
    docker compose ps
    ```
-   Expected output:
-   ```
-   NAME                        STATUS             PORTS
-   iptrack-postgres            Up X minutes       0.0.0.0:5432->5432/tcp
-   iptrack-redis               Up X minutes       0.0.0.0:6379->6379/tcp
-   iptrack-backend-core        Up X minutes       0.0.0.0:8101->8100/tcp
-   iptrack-backend-ipam        Up X minutes       0.0.0.0:8102->8100/tcp
-   iptrack-backend-collector   Up X minutes       0.0.0.0:8103->8100/tcp
-   iptrack-frontend            Up X minutes       0.0.0.0:8001->5173/tcp
+   Expected: 6 containers — `iptrack-postgres`, `iptrack-redis`, `iptrack-backend-core`, `iptrack-backend-ipam`, `iptrack-backend-collector`, `iptrack-frontend`.
+   Default bindings are host-local only: `127.0.0.1:5432/6379/8101/8102/8103`, frontend on `0.0.0.0:8001`.
+
+   ```bash
+   for p in 8101 8102 8103; do
+     printf "backend %s " $p
+     curl --noproxy '*' -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:$p/health
+   done
+   curl --noproxy '*' -s -o /dev/null -w "frontend %{http_code}\n" http://127.0.0.1:8001/
    ```
 
+5. **Get the initial admin password** (printed once to the core log)
+   ```bash
+   docker compose logs backend-core | grep 初始管理员
+   ```
+   Unauthenticated users are read-only; creating/modifying/deleting requires login.
+   First login forces a password change (min. 8 characters).
+
 6. **Access the application**
-   - **Frontend UI**: http://localhost:8001
-   - **API Documentation**: http://localhost:8101/api/docs (interactive Swagger UI)
-   - **API Base URL**: http://localhost:8101/api/v1
-   - **Health checks**: http://localhost:8102/health (IPAM), http://localhost:8103/health (collector)
+   - **Frontend UI**: http://YOUR_SERVER_IP:8001
+   - **Health checks**: `:8101/health` (core), `:8102/health` (IPAM), `:8103/health` (collector)
+   - **API base URL**: http://YOUR_SERVER_IP:8101/api/v1
+   - **API docs**: disabled by default; set `API_DOCS_ENABLED=true` in `.env`, then `docker compose up -d`
 
 ### First Steps
 
-1. **Open the web UI** at http://localhost:8001
+1. **Open the web UI** at http://YOUR_SERVER_IP:8001 and **log in** with `admin` / the temporary password from step 5
 2. **Add your first switch**:
-   - Navigate to **Switches → Add Switch**
+   - Navigate to **Switches → 新增交换机**
    - Fill in switch details:
      - Name (e.g., `core-sw-01`)
      - IP Address (e.g., `192.0.2.10` — documentation range)
-     - Vendor (Cisco / Dell / Alcatel / Juniper / Arista / HPE / Huawei)
+     - Vendor (the UI currently offers **Cisco / Dell / Alcatel-Lucent**)
      - Model
-     - SSH username and password
+     - CLI protocol (SSH/Telnet), username and password
      - Enable password (if required by the vendor)
-   - Click **Test Connection** to verify, then **Create**
-3. **Enable auto-collection** or trigger a manual collection
+     - SNMP (optional): credentials source — a profile from **More → SNMP Profiles**, or inline
+   - Click **测试** to verify, then **保存**
+3. **Enable auto-collection** or trigger a manual collection (collect first — lookup reads the cache)
 4. **Start using IP Lookup** to locate devices on the network (e.g., look up `203.0.113.50`)
 
 ## 📖 Documentation
 
-- **Quick Start Guide**: [QUICK_START.md](QUICK_START.md)
-- **Quick Start (condensed)**: [QUICK_START_GUIDE.md](QUICK_START_GUIDE.md)
+**Deploy / operate**
+- **[QUICK_START.md](QUICK_START.md)** — Docker 首次部署 + 首次使用（首选）
+- **[MANUAL_DEPLOYMENT.md](MANUAL_DEPLOYMENT.md)** — 没有 Docker，用 systemd + Nginx 部署
+- **[INTERNAL_DEPLOYMENT.md](INTERNAL_DEPLOYMENT.md)** — 运维、备份恢复、监控、性能调优、故障排查
+- **[QUICK_START_GUIDE.md](QUICK_START_GUIDE.md)** — 主机名 / OS 类型 / Last Boot Time 专项排障
+
+**Design / reference**
+- **Microservices Architecture**: [MICROSERVICES_ARCHITECTURE.md](MICROSERVICES_ARCHITECTURE.md)
 - **IPAM Feature Guide**: [IPAM_FEATURES_GUIDE.md](IPAM_FEATURES_GUIDE.md)
 - **IPAM Scan Enhancements**: [IPAM_SCAN_ENHANCEMENT.md](IPAM_SCAN_ENHANCEMENT.md)
-- **Microservices Architecture**: [MICROSERVICES_ARCHITECTURE.md](MICROSERVICES_ARCHITECTURE.md)
-- **Manual Deployment**: [MANUAL_DEPLOYMENT.md](MANUAL_DEPLOYMENT.md)
 - **Collection Strategy**: [COLLECTION_STRATEGY_OPTIMIZATION.md](COLLECTION_STRATEGY_OPTIMIZATION.md)
-- **Nmap Install Guide**: [NMAP_INSTALL_GUIDE.md](NMAP_INSTALL_GUIDE.md)
 - **Project Summary**: [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)
 - **Configuration Reference**: [.env.example](.env.example)
 - **Development Rules**: [CLAUDE.md](CLAUDE.md)
-- **API Docs**: http://localhost:8101/api/docs (interactive, when running)
+
+> `NMAP_INSTALL_GUIDE.md` / `install_nmap.sh` are outdated: nmap is **not used** by the current scan path (OS type comes from TTL + SNMP). See [QUICK_START_GUIDE.md §1](QUICK_START_GUIDE.md#1-关于-nmap当前版本不参与扫描).
+>
+> Interactive API docs are **disabled by default** (`/docs` → 404). Enable with `API_DOCS_ENABLED=true`, then open http://127.0.0.1:8101/docs.
 
 ## 🛠️ Configuration
 
@@ -202,12 +214,14 @@ IP-Track uses **environment variables exclusively** for all configuration — no
 ```bash
 # Database (required)
 DATABASE_USER=iptrack
-DATABASE_PASSWORD=your_secure_password  # Auto-generated by init_config.sh
-DATABASE_HOST=postgres                   # 'postgres' in Docker, 'localhost' for manual
+DATABASE_PASSWORD=your_secure_password  # Auto-generated by setup.sh
+DATABASE_HOST=postgres                   # 'postgres' in Docker, '127.0.0.1' for manual
 DATABASE_NAME=iptrack
 
 # Security (required)
-ENCRYPTION_KEY=your_fernet_key          # Auto-generated by init_config.sh
+# base64-encoded 32 random bytes (NOT a Fernet key); used to encrypt stored
+# device credentials and to sign JWTs — never change it after first start
+ENCRYPTION_KEY=your_generated_key       # Auto-generated by setup.sh
 
 # Redis Cache
 REDIS_HOST=redis                        # 'redis' in Docker, 'localhost' for manual
@@ -230,7 +244,7 @@ FEATURE_IPAM=true
 FEATURE_ALARMS=true
 FEATURE_OPTICAL_MODULES=true
 FEATURE_PORT_ANALYSIS=true
-FEATURE_STATUS_CHECKER=true            # ICMP ping monitoring every 30s
+FEATURE_STATUS_CHECKER=true            # ICMP ping monitoring every STATUS_CHECK_INTERVAL_SECONDS (default 300s)
 ```
 
 See [.env.example](.env.example) for the complete list of configuration options (100+ variables covering database pooling, vendor collection methods, port-analysis scoring thresholds, logging, alarms, BMC, and more).
@@ -266,6 +280,8 @@ IPAM_MEMORY_LIMIT=4G
 ```
 
 ## 🔌 Supported Vendors
+
+> **重要**：当前前端“新增交换机”的厂商下拉只有 **Cisco / Dell / Alcatel-Lucent** 三项。下表后三行（Juniper / Arista / HPE / Huawei）只存在于 `collection_strategy.py` 的命令模板中，**无法从界面选择**，除非自行扩展前端下拉与后端处理器。
 
 | Vendor | Device Types | Collection Method | Enable Mode | Device Types |
 |--------|--------------|-------------------|-------------|--------------|
@@ -310,10 +326,12 @@ IPAM_MEMORY_LIMIT=4G
 
 4. **Initialize `.env` file**
    ```bash
-   ./scripts/init_config.sh
-   # Then edit .env to use localhost instead of Docker hostnames
-   DATABASE_HOST=localhost
-   REDIS_HOST=localhost
+   cp .env.example .env
+   # Generate the key setup.sh would normally create:
+   python3 -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+   # Put the result in .env as ENCRYPTION_KEY, then point at local services:
+   #   DATABASE_HOST=127.0.0.1
+   #   REDIS_HOST=127.0.0.1
    ```
 
 5. **Run database migrations**
@@ -342,9 +360,8 @@ IPAM_MEMORY_LIMIT=4G
 
 8. **Access the application**
    - Frontend: http://localhost:5173 (Vite dev server)
-   - Core API docs: http://localhost:8101/api/docs
-   - IPAM health: http://localhost:8102/health
-   - Collector health: http://localhost:8103/health
+   - Health: http://localhost:8101/health, `:8102/health`, `:8103/health`
+   - API docs: disabled by default — set `API_DOCS_ENABLED=true`, then http://localhost:8101/docs
 
 ### Running Tests
 
@@ -405,22 +422,25 @@ curl -s http://127.0.0.1/ | head -5
 **Solution**:
 ```bash
 docker compose logs --tail 50 backend-core
-docker compose build backend-core && docker compose up -d backend-core
+# Rebuild the shared backend image, then recreate the container
+docker build -t ip-track-backend:latest ./backend && docker compose up -d backend-core
 ```
 
 ### All Switches Show "Offline"
 
-**Cause**: The status checker only runs every 30 seconds after startup.
-**Solution**: Wait 30–60 seconds after startup, then refresh.
+**Cause**: The status checker runs every **300 seconds** (`STATUS_CHECK_INTERVAL_SECONDS`).
+**Solution**: Wait up to 5 minutes after startup, then refresh. Still offline → check reachability from the collector container:
+```bash
+docker exec -it iptrack-backend-collector ping -c 3 SWITCH_IP
+docker compose logs --tail=100 backend-collector
+```
 
 ### No Data After Collection
 
 **Cause**: The first collection is scheduled 120 minutes after startup (or your configured interval).
-**Solution**:
-```bash
-curl -X POST http://localhost:8101/api/v1/network/collect-all
-# Or use the UI: Switches page → select switch → Manual Collection
-```
+**Solution**: Trigger a manual collection from the UI — **Switches** page → open the switch → **采集** (ARP/MAC can be collected separately in the detail page). There is no `collect-all` endpoint in the current version.
+
+> Lookup is **cache-only**: you must collect before querying.
 
 ### Configuration Validation Errors
 
@@ -433,7 +453,7 @@ grep -E "DATABASE_USER|DATABASE_PASSWORD|ENCRYPTION_KEY" .env
 
 ### Remember to restart after code changes
 
-Source code is mounted into the containers (`./backend/src:/app/src`, uvicorn auto-reloads). If a change doesn't take effect:
+Source code is mounted into the containers (`./backend/src:/app/src`), but the container start command has **no `--reload` flag** — Python changes do **not** hot-reload. Restart the affected service:
 ```bash
 docker compose restart backend-core       # after core API changes
 docker compose restart backend-ipam       # after IPAM changes
@@ -505,6 +525,6 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 **⭐ Star this repository if you find it useful!**
 
-**Last Updated**: 2026-08-05
+**Last Updated**: 2026-11-05
 **Version**: 2.2.0
 **Maintained By**: IP-Track Contributors

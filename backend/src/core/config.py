@@ -88,6 +88,9 @@ class Settings(BaseSettings):
 
     # IPAM Settings
     IPAM_OFFLINE_THRESHOLD_HOURS: int = 6  # Hours without response before marking as offline
+    IPAM_FRESHNESS_STALE_DAYS: int = 7  # Devices unseen longer than this are excluded from distribution charts
+    IPAM_BLIND_ROUND_MIN_PREVIOUS: int = 10  # Minimum previously reachable hosts before a round can be flagged blind
+    IPAM_BLIND_ROUND_MAX_REACHABLE_RATIO: float = 0.2  # Reachable ratio below this (vs previous round) = collector blind
     IP_SCAN_HISTORY_RETENTION_DAYS: int = 14
     IP_SCAN_HISTORY_CLEANUP_BATCH_SIZE: int = 50000
     IPAM_DEFAULT_SCAN_INTERVAL: int = Field(

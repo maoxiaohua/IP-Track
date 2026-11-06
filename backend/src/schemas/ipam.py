@@ -286,6 +286,13 @@ class OSTypeStatisticsResponse(BaseModel):
     """OS type statistics response"""
     os_types: List[OSTypeStatItem]
     total_classified: int
+    # Data freshness split (active = answered latest round, stale = seen within
+    # retention, archived = unseen beyond retention and excluded by default)
+    active_classified: int = 0
+    stale_classified: int = 0
+    archived_classified: int = 0
+    include_archived: bool = False
+    data_as_of: Optional[datetime] = None
 
 
 # Batch Import Schemas

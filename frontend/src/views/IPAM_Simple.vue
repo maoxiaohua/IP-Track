@@ -58,6 +58,19 @@
         </el-col>
       </el-row>
 
+      <!-- Data freshness note (active / stale / archived split) -->
+      <div
+        v-if="osTypeStats || vendorStats"
+        style="display: flex; justify-content: flex-end; align-items: center; gap: 16px; margin-bottom: 8px"
+      >
+        <span style="font-size: 12px; color: #909399">
+          活跃 {{ osTypeStats?.active_classified ?? 0 }} · 失联 {{ osTypeStats?.stale_classified ?? 0 }} ·
+          已归档 {{ osTypeStats?.archived_classified ?? 0 }}（{{ includeArchivedStats ? '已计入' : '默认未计入' }}）
+          <template v-if="statsDataAsOf"> · 数据截至 {{ statsDataAsOf }}</template>
+        </span>
+        <el-checkbox v-model="includeArchivedStats" size="small">包含已归档</el-checkbox>
+      </div>
+
       <!-- OS Type & Vendor Distribution Charts -->
       <el-row v-if="(osTypeStats && osTypeStats.os_types.length > 0) || (vendorStats && vendorStats.os_types.length > 0)" style="margin-bottom: 20px" :gutter="16">
         <el-col v-if="osTypeStats && osTypeStats.os_types.length > 0" :span="vendorStats && vendorStats.os_types.length > 0 ? 12 : 24">
@@ -550,10 +563,19 @@ const globalSearchPage = ref(1)
 const globalSearchPageSize = ref(50)
 
 // OS type statistics
-const osTypeStats = ref<{ os_types: { os_type: string; count: number; label: string }[]; total_classified: number } | null>(null)
+const osTypeStats = ref<{ os_types: { os_type: string; count: number; label: string }[]; total_classified: number; active_classified?: number; stale_classified?: number; archived_classified?: number; data_as_of?: string | null } | null>(null)
 
 // Vendor statistics
-const vendorStats = ref<{ os_types: { os_type: string; count: number; label: string }[]; total_classified: number } | null>(null)
+const vendorStats = ref<{ os_types: { os_type: string; count: number; label: string }[]; total_classified: number; active_classified?: number; stale_classified?: number; archived_classified?: number; data_as_of?: string | null } | null>(null)
+
+// Distribution charts include archived devices only when explicitly requested
+const includeArchivedStats = ref(false)
+const statsDataAsOf = computed(() => {
+  const raw = osTypeStats.value?.data_as_of || vendorStats.value?.data_as_of
+  if (!raw) return ''
+  const date = new Date(raw)
+  return isNaN(date.getTime()) ? '' : date.toLocaleString()
+})
 
 const pagination = ref({
   currentPage: 1,
@@ -614,10 +636,17 @@ const handleScanStatusChange = (status: IPAMScanStatus, previous: IPAMScanStatus
     lastStatusNotificationKey = notificationKey
     if (status.source === 'manual') {
       const summary = status.summary as any
-      ElMessage.success(
-        status.message ||
-        `扫描完成：${summary?.reachable ?? 0} 个在线，${summary?.unreachable ?? 0} 个离线`
-      )
+      if (summary?.blind_round) {
+        // Collector likely lost its own network this round; charts were kept as-is
+        ElMessage.warning(
+          '本轮几乎全部失联，已跳过状态更新（可能是服务器网络异常），图表数据保持不变'
+        )
+      } else {
+        ElMessage.success(
+          status.message ||
+          `扫描完成：${summary?.reachable ?? 0} 个在线，${summary?.unreachable ?? 0} 个离线`
+        )
+      }
     }
     refreshSubnetsInBackground()
     return
@@ -909,6 +938,10 @@ const refreshSubnetsInBackground = async () => {
       const bUtil = b.utilization_percent ?? 0
       return bUtil - aUtil
     })
+
+    // Keep distribution charts in sync with the latest scan results
+    void loadOSTypeStats()
+    void loadVendorStats()
   } catch (error: any) {
     // Silent - don't show error for background refresh
     console.error('Background subnet refresh failed:', error)
@@ -1420,13 +1453,14 @@ const handleOSChartClick = (params: any) => {
   if (!params.name) return
   const osType = osTypeStats.value?.os_types.find(item => item.label === params.name)?.os_type
   const label = encodeURIComponent(params.name)
-  window.open(`/ipam/os-type?os_type=${osType || params.name}&label=${label}`, '_blank')
+  const archived = includeArchivedStats.value ? '&include_archived=1' : ''
+  window.open(`/ipam/os-type?os_type=${osType || params.name}&label=${label}${archived}`, '_blank')
 }
 
 // Load OS type statistics
 const loadOSTypeStats = async () => {
   try {
-    const stats = await ipamApi.getOSTypeStatistics()
+    const stats = await ipamApi.getOSTypeStatistics(undefined, includeArchivedStats.value)
     osTypeStats.value = stats
   } catch (error: any) {
     console.error('Failed to load OS type statistics:', error)
@@ -1437,18 +1471,24 @@ const loadOSTypeStats = async () => {
 const handleVendorChartClick = (params: any) => {
   if (!params.name) return
   const label = encodeURIComponent(params.name)
-  window.open(`/ipam/os-type?vendor=${label}&label=${label}`, '_blank')
+  const archived = includeArchivedStats.value ? '&include_archived=1' : ''
+  window.open(`/ipam/os-type?vendor=${label}&label=${label}${archived}`, '_blank')
 }
 
 // Load vendor statistics
 const loadVendorStats = async () => {
   try {
-    const stats = await ipamApi.getVendorStatistics()
+    const stats = await ipamApi.getVendorStatistics(undefined, includeArchivedStats.value)
     vendorStats.value = stats
   } catch (error: any) {
     console.error('Failed to load vendor statistics:', error)
   }
 }
+
+watch(includeArchivedStats, () => {
+  void loadOSTypeStats()
+  void loadVendorStats()
+})
 
 onMounted(() => {
   loadSubnets()

@@ -133,6 +133,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:20-alpine}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+        NPM_PROXY: ${NPM_PROXY:-}
     container_name: iptrack-frontend
     ports:
       - "${FRONTEND_PORT:-8001}:5173"
