@@ -523,6 +523,7 @@ async def list_ip_addresses(
     is_reachable: Optional[bool] = Query(None),
     os_type: Optional[str] = Query(None),
     vendor: Optional[str] = Query(None),
+    vendor_missing: bool = Query(False, description="Only hosts that answered a scan but have no vendor"),
     include_archived: bool = Query(False, description="Include devices unseen beyond retention"),
     search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
@@ -567,6 +568,17 @@ async def list_ip_addresses(
         conditions.append(IPAddress.os_type == os_type)
     if vendor:
         conditions.append(func.lower(IPAddress.vendor) == vendor.lower())
+    if vendor_missing:
+        # Match the "未识别厂商" slice: real devices (answered a scan) with no vendor
+        conditions.append(
+            and_(
+                or_(IPAddress.vendor.is_(None), IPAddress.vendor == ''),
+                or_(
+                    IPAddress.is_reachable.is_(True),
+                    IPAddress.last_seen_at.isnot(None),
+                ),
+            )
+        )
     if search:
         conditions.append(
             or_(
@@ -1052,14 +1064,30 @@ async def _grouped_distribution(
     db: AsyncSession,
     column,
     subnet_id: Optional[int],
-    include_archived: bool
+    include_archived: bool,
+    unclassified_label: Optional[str] = None
 ):
-    """Group a classification column, split by data freshness."""
-    from sqlalchemy import select, and_
+    """Group a classification column, split by data freshness.
+
+    When ``unclassified_label`` is set, hosts that answered a scan but carry no
+    value in ``column`` are counted under that label instead of being dropped.
+    Never-seen placeholder rows are still excluded so the bucket only contains
+    real devices.
+    """
+    from sqlalchemy import select, and_, or_
 
     ref = _subnet_scan_reference()
     bucket = _freshness_bucket(ref, settings.IPAM_FRESHNESS_STALE_DAYS)
-    conditions = [column.isnot(None)]
+    if unclassified_label is None:
+        conditions = [column.isnot(None)]
+    else:
+        conditions = [
+            or_(
+                column.isnot(None),
+                IPAddress.is_reachable.is_(True),
+                IPAddress.last_seen_at.isnot(None),
+            )
+        ]
     if subnet_id:
         conditions.append(IPAddress.subnet_id == subnet_id)
 
@@ -1075,7 +1103,9 @@ async def _grouped_distribution(
     per_value: dict = {}
     for value, bucket_name, count in rows:
         if not value:
-            continue
+            if unclassified_label is None:
+                continue
+            value = unclassified_label
         counts[bucket_name] += count
         if bucket_name != "archived" or include_archived:
             per_value[value] = per_value.get(value, 0) + count
@@ -1138,6 +1168,12 @@ def _get_os_type_label(os_type: str) -> str:
 
 
 # Vendor statistics endpoint
+# Sentinel used when a scanned host has no vendor; keeps the chart total in
+# line with the OS-type chart instead of silently dropping those devices.
+UNKNOWN_VENDOR_VALUE = "__unknown__"
+UNKNOWN_VENDOR_LABEL = "未识别厂商"
+
+
 @router.get("/statistics/vendor", response_model=OSTypeStatisticsResponse)
 async def get_vendor_statistics(
     subnet_id: Optional[int] = Query(None),
@@ -1146,11 +1182,16 @@ async def get_vendor_statistics(
 ):
     """Get IP count grouped by vendor (from MAC OUI lookup)."""
     counts, per_value, data_as_of = await _grouped_distribution(
-        db, IPAddress.vendor, subnet_id, include_archived
+        db, IPAddress.vendor, subnet_id, include_archived,
+        unclassified_label=UNKNOWN_VENDOR_VALUE
     )
 
     os_types = [
-        OSTypeStatItem(os_type=value, count=count, label=value)
+        OSTypeStatItem(
+            os_type=value,
+            count=count,
+            label=UNKNOWN_VENDOR_LABEL if value == UNKNOWN_VENDOR_VALUE else value,
+        )
         for value, count in sorted(per_value.items(), key=lambda item: item[1], reverse=True)
     ]
     total = counts["active"] + counts["stale"]

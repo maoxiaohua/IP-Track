@@ -5,7 +5,7 @@
         <div style="display: flex; justify-content: space-between; align-items: center">
           <div>
             <h2 style="margin: 0">{{ label }} 设备清单</h2>
-            <span style="font-size: 13px; color: #909399">共 {{ total }} 台设备（{{ filterType === 'vendor' ? '厂商' : 'OS 类型' }}：{{ filterValue }}）</span>
+            <span style="font-size: 13px; color: #909399">共 {{ total }} 台设备（{{ filterLabel }}：{{ filterDisplay }}）</span>
           </div>
           <el-button @click="exportToCSV" :disabled="!total">
             <el-icon><Download /></el-icon>
@@ -127,10 +127,19 @@ const router = useRouter()
 const filterType = computed(() => {
   if (route.query.os_type) return 'os_type'
   if (route.query.vendor) return 'vendor'
+  if (route.query.vendor_missing) return 'vendor_missing'
   return 'os_type'
 })
-const filterValue = computed(() => (route.query[filterType.value] as string) || '')
-const label = computed(() => (route.query.label as string) || filterValue.value || '设备清单')
+const filterValue = computed(() => (
+  filterType.value === 'vendor_missing'
+    ? ''
+    : (route.query[filterType.value] as string) || ''
+))
+const filterLabel = computed(() => (filterType.value === 'os_type' ? 'OS 类型' : '厂商'))
+const filterDisplay = computed(() => (
+  filterType.value === 'vendor_missing' ? '未识别' : filterValue.value
+))
+const label = computed(() => (route.query.label as string) || filterDisplay.value || '设备清单')
 
 const ipList = ref<IPAddressDetail[]>([])
 const loading = ref(false)
@@ -146,7 +155,11 @@ async function loadData() {
       limit: pageSize.value,
       skip: (currentPage.value - 1) * pageSize.value
     }
-    params[filterType.value] = filterValue.value
+    if (filterType.value === 'vendor_missing') {
+      params.vendor_missing = true
+    } else {
+      params[filterType.value] = filterValue.value
+    }
     if (searchText.value.trim()) {
       params.search = searchText.value.trim()
     }

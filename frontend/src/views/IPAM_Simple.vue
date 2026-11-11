@@ -1470,8 +1470,14 @@ const loadOSTypeStats = async () => {
 // Vendor chart click handler
 const handleVendorChartClick = (params: any) => {
   if (!params.name) return
-  const label = encodeURIComponent(params.name)
+  const item = vendorStats.value?.os_types.find(entry => entry.label === params.name)
   const archived = includeArchivedStats.value ? '&include_archived=1' : ''
+  if (item?.os_type === '__unknown__') {
+    // "未识别厂商" slice: open the list filtered by missing vendor
+    window.open(`/ipam/os-type?vendor_missing=1&label=${encodeURIComponent(params.name)}${archived}`, '_blank')
+    return
+  }
+  const label = encodeURIComponent(params.name)
   window.open(`/ipam/os-type?vendor=${label}&label=${label}${archived}`, '_blank')
 }
 
