@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS switches (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     ip_address INET NOT NULL UNIQUE,
-    vendor VARCHAR(50) NOT NULL CHECK (vendor IN ('cisco', 'dell', 'alcatel')),
+    vendor VARCHAR(50) NOT NULL CHECK (vendor IN ('cisco', 'dell', 'alcatel', 'juniper', 'h3c')),
     model VARCHAR(100),
     role VARCHAR(20) DEFAULT 'access' NOT NULL CHECK (role IN ('core', 'aggregation', 'access')),
     priority INTEGER DEFAULT 50 NOT NULL CHECK (priority >= 1 AND priority <= 100),

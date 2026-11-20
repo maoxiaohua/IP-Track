@@ -251,6 +251,51 @@ class NetworkDataCollector:
             'enable_password_encrypted': switch.enable_password_encrypted
         }
 
+    async def collect_chassis_serial(self, db: AsyncSession, switch: Switch) -> Optional[str]:
+        """采集并回填机箱序列号：非 Dell 走 SNMP，Dell 或 SNMP 失败时走 CLI。
+
+        以前只有旧的批量采集路径（collect_from_all_switches）会补序列号，定时调度跑的是
+        MAC/ARP/光模块三种单类型任务，所以新加的交换机 SN 一直是空的。所有入口统一调用
+        本方法，避免各路径各写一套、行为漂移。
+        """
+        if switch.serial_number and switch.serial_number.strip():
+            return switch.serial_number
+
+        serial = None
+        vendor_lower = (switch.vendor or '').lower()
+        # Dell 的 ENTITY-MIB 返回的是部件号（或字面量 NA），不是服务标签，只能走 CLI。
+        if 'dell' not in vendor_lower and switch_has_snmp_credentials(switch):
+            try:
+                serial = await snmp_service.get_chassis_serial(
+                    str(switch.ip_address), self._get_snmp_config(switch)
+                )
+            except Exception as serial_err:
+                logger.debug(f"  SNMP serial collection failed for {switch.name}: {serial_err}")
+
+        if not serial and switch.cli_enabled and switch.password_encrypted:
+            try:
+                cli_serial_config = self._build_cli_config(switch)
+                # device_type 交给 _resolve_device_type 按命令模板解析，不在这里硬编码：
+                # 同一厂商的驱动不一样（Dell 既有 dell_os10 也有 dell_force10）。
+                cli_serial_config['device_type'] = cli_service._resolve_device_type(
+                    switch.vendor or '', switch.model or '', switch.name or ''
+                )
+                serial = await asyncio.to_thread(
+                    cli_service.get_chassis_serial_cli,
+                    str(switch.ip_address),
+                    cli_serial_config,
+                )
+            except Exception as cli_err:
+                logger.debug(f"  CLI serial collection failed for {switch.name}: {cli_err}")
+
+        if serial and serial != switch.serial_number:
+            switch.serial_number = serial
+            db.add(switch)
+            logger.info(f"  Serial number for {switch.name}: {serial}")
+        elif not serial:
+            logger.debug(f"  No serial number collected for {switch.name} ({switch.ip_address})")
+        return serial
+
     def _set_optical_collection_state(
         self,
         switch: Switch,
@@ -386,6 +431,15 @@ class NetworkDataCollector:
                 'mac_command': t.mac_command,
                 'mac_parser_type': t.mac_parser_type,
                 'mac_enabled': t.mac_enabled,
+                'lldp_command': t.lldp_command,
+                'lldp_parser_type': t.lldp_parser_type,
+                'lldp_enabled': t.lldp_enabled,
+                'cdp_command': t.cdp_command,
+                'cdp_parser_type': t.cdp_parser_type,
+                'cdp_enabled': t.cdp_enabled,
+                'interfaces_command': t.interfaces_command,
+                'interfaces_parser_type': t.interfaces_parser_type,
+                'interfaces_enabled': t.interfaces_enabled,
                 'priority': t.priority,
                 'enabled': t.enabled
             }
@@ -1131,14 +1185,12 @@ class NetworkDataCollector:
         if switch.model == 'Unknown' and switch.cli_enabled and switch.password_encrypted:
             logger.info(f"  Model is Unknown for {switch.name}, attempting to retrieve device info via CLI")
             try:
-                # Determine device_type based on vendor
-                device_type_map = {
-                    'alcatel': 'nokia_sros',
-                    'nokia': 'nokia_sros',
-                    'dell': 'dell_os10',
-                    'cisco': 'cisco_ios'
-                }
-                device_type = device_type_map.get(switch.vendor.lower(), 'generic')
+                # device_type 按命令模板解析，不在这里按厂商硬编码：
+                # Dell 既有 dell_os10 也有 dell_force10（FTOS），硬编码会选错驱动，
+                # 导致进不了 enable、拿不到 Svc Tag。
+                device_type = cli_service._resolve_device_type(
+                    switch.vendor or '', switch.model or '', switch.name or ''
+                )
 
                 cli_config_temp = {
                     'username': switch.username,
@@ -1196,53 +1248,9 @@ class NetworkDataCollector:
             except Exception as e:
                 logger.warning(f"  Failed to get device info for {switch.name}: {str(e)}")
 
-        # Collect chassis serial via SNMP (ENTITY-MIB), falling back to CLI 'show version'
-        # for platforms that don't expose it over SNMP (e.g. Nokia SR Linux).
-        # Dell: SNMP ENTITY-MIB returns the piece-part ID (or literal 'NA') instead of
-        # the real service tag, so skip SNMP and rely on CLI 'show inventory' Svc Tag.
-        if not (switch.serial_number and switch.serial_number.strip()):
-            serial = None
-            vendor_lower = (switch.vendor or '').lower()
-            if 'dell' not in vendor_lower and switch_has_snmp_credentials(switch):
-                try:
-                    from services.snmp_service import snmp_service as _snmp_svc
-                    serial = await _snmp_svc.get_chassis_serial(
-                        str(switch.ip_address), self._get_snmp_config(switch)
-                    )
-                except Exception as serial_err:
-                    logger.debug(f"  SNMP serial collection failed for {switch.name}: {serial_err}")
-
-            if not serial and switch.cli_enabled and switch.password_encrypted:
-                try:
-                    device_type_map = {
-                        'alcatel': 'nokia_sros',
-                        'nokia': 'nokia_sros',
-                        'dell': 'dell_os10',
-                        'cisco': 'cisco_ios',
-                        'juniper': 'juniper_junos',
-                    }
-                    cli_serial_config = {
-                        'username': switch.username,
-                        'password_encrypted': switch.password_encrypted,
-                        'vendor': switch.vendor,
-                        'device_type': device_type_map.get(switch.vendor.lower(), 'generic'),
-                        'cli_transport': switch.cli_transport,
-                        'ssh_port': switch.ssh_port,
-                        'connection_timeout': switch.connection_timeout,
-                        'enable_password_encrypted': switch.enable_password_encrypted,
-                    }
-                    serial = await asyncio.to_thread(
-                        cli_service.get_chassis_serial_cli,
-                        str(switch.ip_address),
-                        cli_serial_config,
-                    )
-                except Exception as cli_err:
-                    logger.debug(f"  CLI serial collection failed for {switch.name}: {cli_err}")
-
-            if serial and serial != switch.serial_number:
-                switch.serial_number = serial
-                db.add(switch)
-                logger.info(f"  Serial number for {switch.name}: {serial}")
+        # Chassis serial: SNMP (ENTITY-MIB) for non-Dell, CLI 'show inventory' for Dell
+        # (its ENTITY-MIB returns the piece-part ID or literal 'NA'). 统一走 collect_chassis_serial。
+        await self.collect_chassis_serial(db, switch)
 
         cli_config = {
             'username': switch.username,
@@ -1965,7 +1973,7 @@ class NetworkDataCollector:
         else:
             # Auto mode: Try vendor-based default
             vendor_lower = switch.vendor.lower() if switch.vendor else ''
-            preferred_method = 'snmp' if vendor_lower in ['cisco', 'dell'] else 'cli'
+            preferred_method = 'snmp' if vendor_lower in ['cisco', 'dell', 'h3c'] else 'cli'
             logger.debug(f"Auto mode: trying {preferred_method} first for optical on {switch.name}")
 
         # Try preferred method first

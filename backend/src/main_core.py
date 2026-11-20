@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.v1 import switches, lookup, history, alarms, snmp_profiles, command_templates, snmp_oid_overrides, settings as settings_module, bmc, auth
+from api.v1 import switches, lookup, history, alarms, snmp_profiles, command_templates, snmp_oid_overrides, settings as settings_module, bmc, auth, visio
 from api.routes import snmp_config
 from services.status_checker import switch_status_checker
 from services.ip_lookup import ip_lookup_service
@@ -90,6 +90,7 @@ app.include_router(command_templates.router, prefix=settings.API_V1_PREFIX)
 app.include_router(snmp_oid_overrides.router, prefix=settings.API_V1_PREFIX)
 app.include_router(settings_module.router, prefix=settings.API_V1_PREFIX)
 app.include_router(bmc.router, prefix=settings.API_V1_PREFIX)
+app.include_router(visio.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 async def health():

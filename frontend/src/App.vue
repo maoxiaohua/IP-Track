@@ -21,6 +21,12 @@
                 <span>Switches</span>
               </el-menu-item>
             </el-tooltip>
+            <el-tooltip content="Network Topology" placement="bottom" :show-after="300" :disabled="!isMobile">
+              <el-menu-item index="/topology">
+                <el-icon><Share /></el-icon>
+                <span>Topology</span>
+              </el-menu-item>
+            </el-tooltip>
             <el-tooltip content="IPAM" placement="bottom" :show-after="300" :disabled="!isMobile">
               <el-menu-item index="/ipam">
                 <el-icon><Grid /></el-icon>
@@ -71,6 +77,9 @@
                 </el-dropdown-item>
                 <el-dropdown-item command="/subnet-probe">
                   <el-icon><Search /></el-icon> 子网存活探测
+                </el-dropdown-item>
+                <el-dropdown-item command="/visio">
+                  <el-icon><Document /></el-icon> Visio 图纸查看
                 </el-dropdown-item>
               </el-dropdown-menu>
             </template>

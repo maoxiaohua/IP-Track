@@ -32,7 +32,7 @@ from schemas.ipam import (
     OSTypeStatItem,
     OSTypeStatisticsResponse
 )
-from services.ipam_service import ipam_service
+from services.ipam_service import ipam_service, subnet_scope_condition
 from services.ipam_scan_status import ipam_scan_status_service
 from services.network_scheduler import network_scheduler
 from core.config import settings
@@ -524,7 +524,7 @@ async def list_ip_addresses(
     os_type: Optional[str] = Query(None),
     vendor: Optional[str] = Query(None),
     vendor_missing: bool = Query(False, description="Only hosts that answered a scan but have no vendor"),
-    include_archived: bool = Query(False, description="Include devices unseen beyond retention"),
+    include_archived: bool = Query(True, description="Include devices unseen beyond retention (default: full inventory)"),
     search: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=10000),
@@ -538,6 +538,8 @@ async def list_ip_addresses(
     - **is_reachable**: Filter by reachability
     - **os_type**: Filter by OS type (windows, linux, network, etc.)
     - **search**: Search in IP, hostname, or description
+    - **include_archived**: Include devices unseen beyond retention (default true,
+      so the IPAM inventory always shows every address; set false to hide them)
     - **skip**: Number of records to skip (pagination)
     - **limit**: Maximum number of records to return (1-10000)
     """
@@ -549,17 +551,16 @@ async def list_ip_addresses(
         Switch, IPAddress.switch_id == Switch.id
     )
 
-    # Same freshness semantics as the distribution charts
-    ref_subq = _subnet_scan_reference()
-    freshness_bucket = _freshness_bucket(ref_subq, settings.IPAM_FRESHNESS_STALE_DAYS)
-    query = query.outerjoin(ref_subq, ref_subq.c.subnet_id == IPAddress.subnet_id)
-
-    # Apply filters
+    # Inventory views list every address; freshness only applies when hidden.
+    ref_subq = None
     conditions = []
     if not include_archived:
+        ref_subq = _subnet_scan_reference()
+        freshness_bucket = _freshness_bucket(ref_subq, settings.IPAM_FRESHNESS_STALE_DAYS)
+        query = query.outerjoin(ref_subq, ref_subq.c.subnet_id == IPAddress.subnet_id)
         conditions.append(freshness_bucket != "archived")
     if subnet_id:
-        conditions.append(IPAddress.subnet_id == subnet_id)
+        conditions.append(subnet_scope_condition(subnet_id))
     if status:
         conditions.append(IPAddress.status == status)
     if is_reachable is not None:
@@ -599,9 +600,11 @@ async def list_ip_addresses(
         query = query.where(and_(*conditions))
 
     # Get total count before pagination
-    count_query = select(func.count(IPAddress.id)).select_from(IPAddress).outerjoin(
-        ref_subq, ref_subq.c.subnet_id == IPAddress.subnet_id
-    )
+    count_query = select(func.count(IPAddress.id)).select_from(IPAddress)
+    if ref_subq is not None:
+        count_query = count_query.outerjoin(
+            ref_subq, ref_subq.c.subnet_id == IPAddress.subnet_id
+        )
     if conditions:
         count_query = count_query.where(and_(*conditions))
 
@@ -1089,7 +1092,7 @@ async def _grouped_distribution(
             )
         ]
     if subnet_id:
-        conditions.append(IPAddress.subnet_id == subnet_id)
+        conditions.append(subnet_scope_condition(subnet_id))
 
     query = (
         select(column, bucket.label("bucket"), func.count(IPAddress.id))
@@ -1112,7 +1115,7 @@ async def _grouped_distribution(
 
     data_as_of_query = select(func.max(IPAddress.last_scan_at))
     if subnet_id:
-        data_as_of_query = data_as_of_query.where(IPAddress.subnet_id == subnet_id)
+        data_as_of_query = data_as_of_query.where(subnet_scope_condition(subnet_id))
     data_as_of = (await db.execute(data_as_of_query)).scalar()
 
     return counts, per_value, data_as_of

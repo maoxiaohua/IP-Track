@@ -183,6 +183,7 @@
             <el-option label="Dell" value="dell" />
             <el-option label="Alcatel-Lucent" value="alcatel" />
             <el-option label="Juniper" value="juniper" />
+            <el-option label="H3C" value="h3c" />
           </el-select>
         </el-form-item>
 
@@ -778,6 +779,113 @@
           />
         </el-card>
       </el-tab-pane>
+
+      <el-tab-pane label="邻居 / 拓扑" name="topology">
+        <el-card>
+          <template #header>
+            <div class="card-header">
+              <div class="card-header-actions">
+                <span>LLDP / CDP 邻居与接口</span>
+                <el-tag
+                  v-if="switchInfo?.last_topology_collection_status"
+                  :type="topologyStatusTagType"
+                  size="small"
+                >
+                  {{ switchInfo.last_topology_collection_status }}
+                  <template v-if="switchInfo.last_topology_neighbors_count != null">
+                    （{{ switchInfo.last_topology_neighbors_count }} 条邻居）
+                  </template>
+                </el-tag>
+              </div>
+              <el-tooltip :content="authStore.isLoggedIn ? '采集该交换机的接口与邻居' : '访客只读，请登录后采集'" placement="top">
+                <span>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    class="detail-action-button"
+                    :loading="topologyCollecting"
+                    :disabled="!authStore.isLoggedIn"
+                    @click="collectTopologyData"
+                  >
+                    <template #icon><el-icon><Refresh /></el-icon></template>
+                    采集拓扑
+                  </el-button>
+                </span>
+              </el-tooltip>
+            </div>
+          </template>
+
+          <el-alert
+            v-if="switchInfo?.last_topology_collection_message && switchInfo.last_topology_collection_status !== 'success'"
+            :title="switchInfo.last_topology_collection_message"
+            type="warning"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 20px;"
+          />
+
+          <el-tabs v-model="topologyTab">
+            <el-tab-pane label="链路" name="links">
+              <el-empty v-if="!topologyLinks.length && !topologyLoading" description="暂无链路，请先采集拓扑" :image-size="60" />
+              <el-table v-else :data="topologyLinks" stripe border size="small" v-loading="topologyLoading">
+                <el-table-column label="状态" width="150">
+                  <template #default="{ row }">
+                    <el-tag :type="linkStatusTagType(row.status)" size="small">{{ row.status }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="confidence" label="置信度" width="90" />
+                <el-table-column label="本端端口" min-width="160">
+                  <template #default="{ row }">{{ localPortName(row) || '-' }}</template>
+                </el-table-column>
+                <el-table-column label="对端" min-width="220">
+                  <template #default="{ row }">
+                    {{ remoteLabel(row) }}
+                    <el-text type="info" size="small">{{ remotePortName(row) || '-' }}</el-text>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="evidence" label="证据" width="110" />
+              </el-table>
+            </el-tab-pane>
+
+            <el-tab-pane label="邻居" name="neighbors">
+              <el-empty v-if="!topologyNeighbors.length && !topologyLoading" description="该交换机暂无已采集的邻居" :image-size="60" />
+              <el-table v-else :data="topologyNeighbors" stripe border size="small" v-loading="topologyLoading">
+                <el-table-column prop="protocol" label="协议" width="80" />
+                <el-table-column label="本端" min-width="150">
+                  <template #default="{ row }">
+                    {{ row.local_port_id || row.local_port_desc || row.local_if_index }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="远端" min-width="200">
+                  <template #default="{ row }">
+                    {{ row.remote_sys_name || row.remote_chassis_id || '-' }}
+                    <el-text type="info" size="small">{{ row.remote_port_id || row.remote_port_desc || '-' }}</el-text>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="remote_mgmt_addr" label="远端管理 IP" width="150" />
+              </el-table>
+            </el-tab-pane>
+
+            <el-tab-pane label="接口" name="interfaces">
+              <el-empty v-if="!topologyInterfaces.length && !topologyLoading" description="该交换机暂无已采集的接口" :image-size="60" />
+              <el-table v-else :data="topologyInterfaces" stripe border size="small" v-loading="topologyLoading">
+                <el-table-column label="接口" min-width="150">
+                  <template #default="{ row }">
+                    {{ row.if_name || row.if_descr || row.if_index }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="if_alias" label="描述" min-width="140" />
+                <el-table-column label="状态" width="120">
+                  <template #default="{ row }">
+                    {{ row.admin_status || '-' }} / {{ row.oper_status || '-' }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="speed_mbps" label="速率(Mbps)" width="110" />
+              </el-table>
+            </el-tab-pane>
+          </el-tabs>
+        </el-card>
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -799,11 +907,22 @@ import {
 } from '@/api/switches'
 // 凭据模板列表：编辑对话框的「凭据来源」下拉要用。与新增/批量配置共用同一份缓存。
 import { useSNMPProfilesStore } from '@/stores/snmpProfiles'
+import { useAuthStore } from '@/stores/auth'
+import {
+  collectTopology,
+  getTopologyGraph,
+  getTopologyInterfaces,
+  getTopologyNeighbors,
+  type TopologyInterface,
+  type TopologyLink,
+  type TopologyNeighbor,
+} from '@/api/topology'
 
 const route = useRoute()
 const router = useRouter()
 
 const snmpProfileStore = useSNMPProfilesStore()
+const authStore = useAuthStore()
 
 const switchId = ref(Number(route.params.id))
 const switchInfo = ref<Switch | null>(null)
@@ -834,6 +953,14 @@ const portAnalyzing = ref(false)
 const portPolicyUpdatingPort = ref<string | null>(null)
 const trunkReviewUpdating = ref(false)
 
+// 邻居 / 拓扑页签：按需加载，避免详情页一进来就打三份拓扑请求。
+const topologyTab = ref('links')
+const topologyLoading = ref(false)
+const topologyCollecting = ref(false)
+const topologyNeighbors = ref<TopologyNeighbor[]>([])
+const topologyInterfaces = ref<TopologyInterface[]>([])
+const topologyLinks = ref<TopologyLink[]>([])
+
 const arpCurrentPage = ref(1)
 const macCurrentPage = ref(1)
 const opticalCurrentPage = ref(1)
@@ -856,6 +983,7 @@ const switchForm = reactive<SwitchCreate>({
   connection_timeout: 30,
   auto_collect_arp: true,
   auto_collect_mac: true,
+  auto_collect_topology: true,
   snmp_enabled: true,
   snmp_version: '3',
   snmp_port: 161,
@@ -1187,6 +1315,7 @@ const resetSwitchForm = () => {
     connection_timeout: 30,
     auto_collect_arp: true,
     auto_collect_mac: true,
+    auto_collect_topology: true,
     snmp_enabled: true,
     snmp_version: '3',
     snmp_port: 161,
@@ -1223,6 +1352,7 @@ const openEditDialog = async () => {
     connection_timeout: switchInfo.value.connection_timeout || 30,
     auto_collect_arp: switchInfo.value.auto_collect_arp ?? true,
     auto_collect_mac: switchInfo.value.auto_collect_mac ?? true,
+    auto_collect_topology: switchInfo.value.auto_collect_topology ?? true,
     snmp_enabled: switchInfo.value.snmp_enabled || false,
     snmp_version: switchInfo.value.snmp_version || '3',
     snmp_port: switchInfo.value.snmp_port || 161,
@@ -1579,6 +1709,96 @@ const collectOpticalData = async () => {
     opticalLoading.value = false
   }
 }
+
+// 采集是异步队列任务，入队后延迟刷新一次，省得用户手动点刷新。
+const TOPOLOGY_REFRESH_DELAY_MS = 6000
+
+const topologyStatusTagType = computed(() => {
+  switch (switchInfo.value?.last_topology_collection_status) {
+    case 'success':
+      return 'success'
+    case 'partial':
+      return 'warning'
+    case 'unsupported':
+      return 'info'
+    case 'failed':
+      return 'danger'
+    default:
+      return 'info'
+  }
+})
+
+const linkStatusTagType = (status: string) => {
+  switch (status) {
+    case 'confirmed':
+      return 'success'
+    case 'one_sided':
+      return 'warning'
+    case 'unresolved':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+const isLocalA = (link: TopologyLink) => link.a_switch_id === switchId.value
+const localPortName = (link: TopologyLink) => (isLocalA(link) ? link.a_port_name : link.b_port_name)
+const remotePortName = (link: TopologyLink) => (isLocalA(link) ? link.b_port_name : link.a_port_name)
+const remoteLabel = (link: TopologyLink) => {
+  const label = isLocalA(link) ? link.b_sys_name || link.b_mgmt_ip : link.a_sys_name || link.a_mgmt_ip
+  return label || '未知节点'
+}
+
+const loadTopologyData = async () => {
+  topologyLoading.value = true
+  try {
+    const [neighborRes, interfaceRes, graphRes] = await Promise.all([
+      getTopologyNeighbors({ switch_id: switchId.value, limit: 1000 }),
+      getTopologyInterfaces({ switch_id: switchId.value, limit: 2000 }),
+      getTopologyGraph({ focus_switch_id: switchId.value, depth: 1 })
+    ])
+    topologyNeighbors.value = neighborRes.data || []
+    topologyInterfaces.value = interfaceRes.data || []
+    topologyLinks.value = (graphRes.data.links || []).filter(
+      (link) => link.a_switch_id === switchId.value || link.b_switch_id === switchId.value
+    )
+  } catch (error: any) {
+    console.error('Failed to load topology data:', error)
+    ElMessage.error(error.response?.data?.detail || '加载拓扑数据失败')
+  } finally {
+    topologyLoading.value = false
+  }
+}
+
+const collectTopologyData = async () => {
+  if (!authStore.isLoggedIn) {
+    ElMessage.warning('访客只读，请先登录再采集拓扑')
+    return
+  }
+  topologyCollecting.value = true
+  try {
+    const { data } = await collectTopology([switchId.value])
+    if (data.queued > 0) {
+      ElMessage.success('已入队采集，稍后自动刷新')
+      window.setTimeout(async () => {
+        await loadTopologyData()
+        await loadSwitchInfo()
+      }, TOPOLOGY_REFRESH_DELAY_MS)
+    } else {
+      ElMessage.info(data.message || '该交换机未启用或未开启自动拓扑')
+    }
+  } catch (error: any) {
+    console.error('Failed to collect topology:', error)
+    ElMessage.error(error.response?.data?.detail || '采集拓扑失败')
+  } finally {
+    topologyCollecting.value = false
+  }
+}
+
+// 页签首次切到「邻居 / 拓扑」时才真正发请求。
+watch(activeTab, (tab) => {
+  if (tab === 'topology') loadTopologyData()
+})
 
 const refreshDeviceInfo = async () => {
   deviceInfoLoading.value = true

@@ -869,6 +869,7 @@ const handleGlobalSearch = async () => {
   try {
     const result = await ipamApi.getIPAddresses({
       search: query,
+      include_archived: true,
       skip: 0,
       limit: globalSearchPageSize.value
     })
@@ -891,6 +892,7 @@ const handleGlobalSearchPageChange = async () => {
   try {
     const result = await ipamApi.getIPAddresses({
       search: query,
+      include_archived: true,
       skip: (globalSearchPage.value - 1) * globalSearchPageSize.value,
       limit: globalSearchPageSize.value
     })
@@ -1358,6 +1360,7 @@ const exportToExcel = async () => {
       while (true) {
         const result = await ipamApi.getIPAddresses({
           subnet_id: subnet.subnet_id,
+          include_archived: true,
           skip,
           limit: PAGE_SIZE
         })

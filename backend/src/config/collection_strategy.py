@@ -4,7 +4,7 @@
 根据厂商和型号定义最佳的数据收集策略
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 from enum import Enum
 
 
@@ -40,6 +40,7 @@ class CollectionStrategy:
         'arista': CollectionMethod.AUTO,
         'hpe': CollectionMethod.AUTO,
         'huawei': CollectionMethod.AUTO,
+        'h3c': CollectionMethod.AUTO,
     }
 
     # 型号级别的精确策略（保留为空，运行时自动选择）
@@ -450,7 +451,171 @@ OPTIMIZED_CLI_TEMPLATES: List[Dict] = [
         'enabled': True,
         'description': 'Huawei VRP通用模板'
     },
+
+    # ==================== H3C Templates ====================
+
+    {
+        'vendor': 'h3c',
+        'model_pattern': '*',
+        'device_type': 'hp_comware',
+        'arp_command': 'display arp all',
+        'arp_parser_type': 'h3c_comware',
+        'arp_enabled': True,
+        'mac_command': 'display mac-address',
+        'mac_parser_type': 'h3c_comware',
+        'mac_enabled': True,
+        'priority': 150,
+        'enabled': True,
+        'description': 'H3C Comware通用模板'
+    },
 ]
+
+
+# 拓扑采集的内置默认命令（按 device_type）。
+# 与 arp/mac 一样是「兜底」：数据库模板里的 lldp_command / cdp_command /
+# interfaces_command 优先，只有模板没配置时才用这里的值。
+# CDP 是 Cisco 私有协议，非 Cisco 设备默认关闭，避免每轮采集都失败。
+TOPOLOGY_CLI_DEFAULTS: Dict[str, Dict[str, Optional[str]]] = {
+    'nokia_srl': {
+        'lldp_command': 'show system lldp neighbor',
+        'lldp_parser_type': 'nokia_7220',
+        'lldp_enabled': True,
+        'cdp_command': None,
+        'cdp_parser_type': None,
+        'cdp_enabled': False,
+        'interfaces_command': 'show interface brief',
+        'interfaces_parser_type': 'nokia_7220',
+        'interfaces_enabled': True,
+    },
+    'nokia_sros': {
+        'lldp_command': 'show system lldp neighbor',
+        'lldp_parser_type': 'nokia_7250',
+        'lldp_enabled': True,
+        'cdp_command': None,
+        'cdp_parser_type': None,
+        'cdp_enabled': False,
+        'interfaces_command': 'show port',
+        'interfaces_parser_type': 'nokia_7250',
+        'interfaces_enabled': True,
+    },
+    'dell_force10': {
+        # FTOS 不支持 `show lldp remote-system`（真机报 Invalid input），
+        # 正确命令是 detail；解析器兼容 detail 块与简述表两种形态。
+        'lldp_command': 'show lldp neighbors detail',
+        'lldp_parser_type': 'dell_force10',
+        'lldp_enabled': True,
+        'cdp_command': None,
+        'cdp_parser_type': None,
+        'cdp_enabled': False,
+        'interfaces_command': 'show interfaces status',
+        'interfaces_parser_type': 'dell_force10',
+        'interfaces_enabled': True,
+    },
+    'dell_os10': {
+        # OS10 不支持 `show lldp remote-system`（真机报 Unrecognized command），
+        # 正确命令是 detail；解析器兼容 detail 块与简述表两种形态。
+        'lldp_command': 'show lldp neighbors detail',
+        'lldp_parser_type': 'dell_os10',
+        'lldp_enabled': True,
+        'cdp_command': None,
+        'cdp_parser_type': None,
+        'cdp_enabled': False,
+        'interfaces_command': 'show interfaces status',
+        'interfaces_parser_type': 'dell_os10',
+        'interfaces_enabled': True,
+    },
+    'cisco_ios': {
+        'lldp_command': 'show lldp neighbors detail',
+        'lldp_parser_type': 'cisco_ios',
+        'lldp_enabled': True,
+        'cdp_command': 'show cdp neighbors detail',
+        'cdp_parser_type': 'cisco_ios',
+        'cdp_enabled': True,
+        'interfaces_command': 'show interfaces status',
+        'interfaces_parser_type': 'cisco_ios',
+        'interfaces_enabled': True,
+    },
+    'cisco_nxos': {
+        'lldp_command': 'show lldp neighbors detail',
+        'lldp_parser_type': 'cisco_nxos',
+        'lldp_enabled': True,
+        'cdp_command': 'show cdp neighbors detail',
+        'cdp_parser_type': 'cisco_nxos',
+        'cdp_enabled': True,
+        'interfaces_command': 'show interface status',
+        'interfaces_parser_type': 'cisco_nxos',
+        'interfaces_enabled': True,
+    },
+    'juniper_junos': {
+        'lldp_command': 'show lldp neighbors',
+        'lldp_parser_type': 'juniper',
+        'lldp_enabled': True,
+        'cdp_command': None,
+        'cdp_parser_type': None,
+        'cdp_enabled': False,
+        'interfaces_command': 'show interfaces terse',
+        'interfaces_parser_type': 'juniper',
+        'interfaces_enabled': True,
+    },
+    'arista_eos': {
+        'lldp_command': 'show lldp neighbors detail',
+        'lldp_parser_type': 'arista_eos',
+        'lldp_enabled': True,
+        'cdp_command': 'show cdp neighbors detail',
+        'cdp_parser_type': 'arista_eos',
+        'cdp_enabled': True,
+        'interfaces_command': 'show interfaces status',
+        'interfaces_parser_type': 'arista_eos',
+        'interfaces_enabled': True,
+    },
+    'hp_procurve': {
+        'lldp_command': 'show lldp info remote-device',
+        'lldp_parser_type': 'hpe_procurve',
+        'lldp_enabled': True,
+        'cdp_command': None,
+        'cdp_parser_type': None,
+        'cdp_enabled': False,
+        'interfaces_command': 'show interfaces brief',
+        'interfaces_parser_type': 'hpe_procurve',
+        'interfaces_enabled': True,
+    },
+    'huawei': {
+        'lldp_command': 'display lldp neighbor brief',
+        'lldp_parser_type': 'huawei_vrp',
+        'lldp_enabled': True,
+        'cdp_command': None,
+        'cdp_parser_type': None,
+        'cdp_enabled': False,
+        'interfaces_command': 'display interface brief',
+        'interfaces_parser_type': 'huawei_vrp',
+        'interfaces_enabled': True,
+    },
+    'hp_comware': {
+        'lldp_command': 'display lldp neighbor-information list',
+        'lldp_parser_type': 'h3c_comware',
+        'lldp_enabled': True,
+        'cdp_command': None,
+        'cdp_parser_type': None,
+        'cdp_enabled': False,
+        'interfaces_command': 'display interface brief',
+        'interfaces_parser_type': 'generic',
+        'interfaces_enabled': True,
+    },
+}
+
+
+def apply_topology_defaults(templates: List[Dict]) -> List[Dict]:
+    """给模板补上缺失的拓扑命令字段（不覆盖模板中已有的值）。"""
+    for template in templates:
+        defaults = TOPOLOGY_CLI_DEFAULTS.get(template.get('device_type') or '')
+        if not defaults:
+            continue
+        for key, value in defaults.items():
+            template.setdefault(key, value)
+    return templates
+
+
+apply_topology_defaults(OPTIMIZED_CLI_TEMPLATES)
 
 
 def get_collection_info(vendor: str, model: str) -> Dict:

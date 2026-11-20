@@ -16,6 +16,15 @@ export interface CommandTemplate {
   mac_command?: string
   mac_parser_type?: string
   mac_enabled: boolean
+  lldp_command?: string
+  lldp_parser_type?: string
+  lldp_enabled: boolean
+  cdp_command?: string
+  cdp_parser_type?: string
+  cdp_enabled: boolean
+  interfaces_command?: string
+  interfaces_parser_type?: string
+  interfaces_enabled: boolean
   priority: number
   description?: string
   is_builtin?: boolean
@@ -32,7 +41,7 @@ export interface TestConnectionRequest {
   switch_port?: number
   cli_transport?: 'ssh' | 'telnet'
   template_id: number
-  test_type: 'arp' | 'mac'
+  test_type: 'arp' | 'mac' | 'lldp' | 'cdp' | 'interfaces'
 }
 
 export interface TestConnectionResponse {
@@ -59,6 +68,9 @@ export interface CommandTemplateOptions {
   device_types: DeviceTypeInfo[]
   arp: ParserInfo[]
   mac: ParserInfo[]
+  lldp: ParserInfo[]
+  cdp: ParserInfo[]
+  interfaces: ParserInfo[]
 }
 
 /**

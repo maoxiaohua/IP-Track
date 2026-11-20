@@ -16,6 +16,7 @@ class JobType(str, enum.Enum):
     MAC = "mac"
     ARP = "arp"
     OPTICAL = "optical"
+    TOPOLOGY = "topology"  # LLDP/CDP neighbors + interface inventory
     ALL = "all"  # Combined MAC+ARP+Optical collection
 
 

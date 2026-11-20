@@ -82,6 +82,18 @@ class Switch(Base):
     last_optical_collection_message = Column(Text, nullable=True)
     last_optical_modules_count = Column(Integer, nullable=True)
 
+    # 拓扑身份（由 SNMP/CLI 学到的对端识别依据）与拓扑采集状态
+    sys_name = Column(String(255), nullable=True)
+    chassis_id = Column(String(255), nullable=True)
+    bridge_mac = Column(String(32), nullable=True)
+    auto_collect_topology = Column(Boolean, default=True, nullable=False)
+    topology_collection_method = Column(String(20), nullable=True)
+    last_topology_collection_at = Column(DateTime(timezone=True), nullable=True)
+    last_topology_success_at = Column(DateTime(timezone=True), nullable=True)
+    last_topology_collection_status = Column(String(20), nullable=True)
+    last_topology_collection_message = Column(Text, nullable=True)
+    last_topology_neighbors_count = Column(Integer, nullable=True)
+
     # Collection method preferences (ARP/MAC use per-vendor auto-detection with SNMP/CLI fallback;
     # optical modules can still learn per-device SNMP/CLI preference)
     mac_collection_method = Column(String(10), default='auto')

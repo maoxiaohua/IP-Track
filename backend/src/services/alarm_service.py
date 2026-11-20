@@ -250,7 +250,9 @@ class AlarmService:
         db: AsyncSession,
         source_type: AlarmSourceType,
         source_id: int,
-        severity: Optional[AlarmSeverity] = None
+        severity: Optional[AlarmSeverity] = None,
+        title_prefix: Optional[str] = None,
+        exclude_id: Optional[int] = None
     ) -> int:
         """
         Auto-resolve alarms for a source that has recovered.
@@ -276,6 +278,15 @@ class AlarmService:
         # Add severity filter if specified
         if severity:
             conditions.append(cast(Alarm.severity, String) == self._enum_value(severity))
+
+        # 只恢复同类告警：拓扑成功不应顺手清掉 MAC/ARP 的告警，反之亦然。
+        if title_prefix:
+            conditions.append(Alarm.title.like(f"{title_prefix}%"))
+
+        # 失败原因文案变化会改变 severity，而 fingerprint 含 severity，
+        # 同一设备的旧告警会残留。创建新告警后用它排掉旧的那条。
+        if exclude_id is not None:
+            conditions.append(Alarm.id != exclude_id)
 
         result = await db.execute(
             select(Alarm).where(and_(*conditions))

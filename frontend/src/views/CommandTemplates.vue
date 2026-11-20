@@ -4,7 +4,7 @@
       <template #header>
         <div class="card-header">
           <h2>交换机命令模板管理</h2>
-          <p>配置不同厂商交换机的 ARP 和 MAC 收集命令</p>
+          <p>配置不同厂商交换机的 ARP、MAC、LLDP、CDP 与接口收集命令</p>
           <div>
             <el-button type="primary" @click="showAddDialog = true" :icon="Plus">
               添加模板
@@ -56,6 +56,36 @@
             <div v-if="row.mac_enabled && row.mac_command">
               <el-tag type="success" size="small">启用</el-tag>
               <el-text size="small" style="margin-left: 5px">{{ row.mac_parser_type }}</el-text>
+            </div>
+            <el-tag v-else type="info" size="small">禁用</el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="LLDP" width="160">
+          <template #default="{ row }">
+            <div v-if="row.lldp_enabled && row.lldp_command">
+              <el-tag type="success" size="small">启用</el-tag>
+              <el-text size="small" style="margin-left: 5px">{{ row.lldp_parser_type }}</el-text>
+            </div>
+            <el-tag v-else type="info" size="small">禁用</el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="CDP" width="160">
+          <template #default="{ row }">
+            <div v-if="row.cdp_enabled && row.cdp_command">
+              <el-tag type="success" size="small">启用</el-tag>
+              <el-text size="small" style="margin-left: 5px">{{ row.cdp_parser_type }}</el-text>
+            </div>
+            <el-tag v-else type="info" size="small">禁用</el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="接口" width="160">
+          <template #default="{ row }">
+            <div v-if="row.interfaces_enabled && row.interfaces_command">
+              <el-tag type="success" size="small">启用</el-tag>
+              <el-text size="small" style="margin-left: 5px">{{ row.interfaces_parser_type }}</el-text>
             </div>
             <el-tag v-else type="info" size="small">禁用</el-tag>
           </template>
@@ -133,7 +163,7 @@
     >
       <el-form :model="templateForm" :rules="formRules" ref="formRef" label-width="140px">
         <el-form-item label="厂商" prop="vendor">
-          <el-input v-model="templateForm.vendor" placeholder="例如: alcatel, dell, cisco, huawei" />
+          <el-input v-model="templateForm.vendor" placeholder="例如: alcatel, dell, cisco, huawei, h3c" />
         </el-form-item>
 
         <el-form-item label="型号模式" prop="model_pattern">
@@ -193,6 +223,78 @@
           <el-select v-model="templateForm.mac_parser_type" placeholder="选择解析器" style="width: 100%">
             <el-option
               v-for="parser in availableOptions.mac"
+              :key="parser.type"
+              :label="parser.name"
+              :value="parser.type"
+            >
+              <span>{{ parser.name }}</span>
+              <span style="float: right; color: #8492a6; font-size: 13px">{{ parser.type }}</span>
+            </el-option>
+          </el-select>
+        </el-form-item>
+
+        <el-divider content-position="left">LLDP 配置</el-divider>
+
+        <el-form-item label="启用LLDP收集">
+          <el-switch v-model="templateForm.lldp_enabled" />
+        </el-form-item>
+
+        <el-form-item label="LLDP命令" v-if="templateForm.lldp_enabled">
+          <el-input v-model="templateForm.lldp_command" placeholder="例如: show lldp neighbors detail" />
+        </el-form-item>
+
+        <el-form-item label="LLDP解析器类型" v-if="templateForm.lldp_enabled">
+          <el-select v-model="templateForm.lldp_parser_type" placeholder="选择解析器" style="width: 100%">
+            <el-option
+              v-for="parser in availableOptions.lldp"
+              :key="parser.type"
+              :label="parser.name"
+              :value="parser.type"
+            >
+              <span>{{ parser.name }}</span>
+              <span style="float: right; color: #8492a6; font-size: 13px">{{ parser.type }}</span>
+            </el-option>
+          </el-select>
+        </el-form-item>
+
+        <el-divider content-position="left">CDP 配置</el-divider>
+
+        <el-form-item label="启用CDP收集">
+          <el-switch v-model="templateForm.cdp_enabled" />
+        </el-form-item>
+
+        <el-form-item label="CDP命令" v-if="templateForm.cdp_enabled">
+          <el-input v-model="templateForm.cdp_command" placeholder="例如: show cdp neighbors detail" />
+        </el-form-item>
+
+        <el-form-item label="CDP解析器类型" v-if="templateForm.cdp_enabled">
+          <el-select v-model="templateForm.cdp_parser_type" placeholder="选择解析器" style="width: 100%">
+            <el-option
+              v-for="parser in availableOptions.cdp"
+              :key="parser.type"
+              :label="parser.name"
+              :value="parser.type"
+            >
+              <span>{{ parser.name }}</span>
+              <span style="float: right; color: #8492a6; font-size: 13px">{{ parser.type }}</span>
+            </el-option>
+          </el-select>
+        </el-form-item>
+
+        <el-divider content-position="left">接口配置</el-divider>
+
+        <el-form-item label="启用接口收集">
+          <el-switch v-model="templateForm.interfaces_enabled" />
+        </el-form-item>
+
+        <el-form-item label="接口命令" v-if="templateForm.interfaces_enabled">
+          <el-input v-model="templateForm.interfaces_command" placeholder="例如: show interfaces status" />
+        </el-form-item>
+
+        <el-form-item label="接口解析器类型" v-if="templateForm.interfaces_enabled">
+          <el-select v-model="templateForm.interfaces_parser_type" placeholder="选择解析器" style="width: 100%">
+            <el-option
+              v-for="parser in availableOptions.interfaces"
               :key="parser.type"
               :label="parser.name"
               :value="parser.type"
@@ -265,6 +367,9 @@
           <el-radio-group v-model="testForm.test_type">
             <el-radio label="arp" :disabled="!currentTestTemplate?.arp_enabled">ARP收集</el-radio>
             <el-radio label="mac" :disabled="!currentTestTemplate?.mac_enabled">MAC收集</el-radio>
+            <el-radio label="lldp" :disabled="!currentTestTemplate?.lldp_enabled">LLDP收集</el-radio>
+            <el-radio label="cdp" :disabled="!currentTestTemplate?.cdp_enabled">CDP收集</el-radio>
+            <el-radio label="interfaces" :disabled="!currentTestTemplate?.interfaces_enabled">接口收集</el-radio>
           </el-radio-group>
         </el-form-item>
 
@@ -329,6 +434,36 @@
         </el-descriptions-item>
         <el-descriptions-item label="MAC解析器">{{ currentTemplate.mac_parser_type || '-' }}</el-descriptions-item>
 
+        <el-descriptions-item label="LLDP启用">
+          <el-tag :type="currentTemplate.lldp_enabled ? 'success' : 'info'" size="small">
+            {{ currentTemplate.lldp_enabled ? '是' : '否' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="LLDP命令" :span="2">
+          <el-text>{{ currentTemplate.lldp_command || '-' }}</el-text>
+        </el-descriptions-item>
+        <el-descriptions-item label="LLDP解析器">{{ currentTemplate.lldp_parser_type || '-' }}</el-descriptions-item>
+
+        <el-descriptions-item label="CDP启用">
+          <el-tag :type="currentTemplate.cdp_enabled ? 'success' : 'info'" size="small">
+            {{ currentTemplate.cdp_enabled ? '是' : '否' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="CDP命令" :span="2">
+          <el-text>{{ currentTemplate.cdp_command || '-' }}</el-text>
+        </el-descriptions-item>
+        <el-descriptions-item label="CDP解析器">{{ currentTemplate.cdp_parser_type || '-' }}</el-descriptions-item>
+
+        <el-descriptions-item label="接口启用">
+          <el-tag :type="currentTemplate.interfaces_enabled ? 'success' : 'info'" size="small">
+            {{ currentTemplate.interfaces_enabled ? '是' : '否' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="接口命令" :span="2">
+          <el-text>{{ currentTemplate.interfaces_command || '-' }}</el-text>
+        </el-descriptions-item>
+        <el-descriptions-item label="接口解析器">{{ currentTemplate.interfaces_parser_type || '-' }}</el-descriptions-item>
+
         <el-descriptions-item label="描述" :span="2">{{ currentTemplate.description || '-' }}</el-descriptions-item>
         <el-descriptions-item label="内置模板">
           <el-tag :type="currentTemplate.is_builtin ? 'warning' : 'info'" size="small">
@@ -366,7 +501,7 @@ import {
 } from '@/api/commandTemplates'
 
 const templates = ref<CommandTemplate[]>([])
-const availableOptions = ref<CommandTemplateOptions>({ device_types: [], arp: [], mac: [] })
+const availableOptions = ref<CommandTemplateOptions>({ device_types: [], arp: [], mac: [], lldp: [], cdp: [], interfaces: [] })
 const loading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
@@ -392,6 +527,15 @@ const templateForm = ref<CommandTemplate>({
   mac_command: '',
   mac_parser_type: '',
   mac_enabled: true,
+  lldp_command: '',
+  lldp_parser_type: '',
+  lldp_enabled: true,
+  cdp_command: '',
+  cdp_parser_type: '',
+  cdp_enabled: true,
+  interfaces_command: '',
+  interfaces_parser_type: '',
+  interfaces_enabled: true,
   priority: 150,
   description: '',
   enabled: true
@@ -405,7 +549,7 @@ const testForm = ref({
   switch_port: 22,
   cli_transport: 'ssh' as 'ssh' | 'telnet',
   template_id: 0,
-  test_type: 'arp' as 'arp' | 'mac'
+  test_type: 'arp' as 'arp' | 'mac' | 'lldp' | 'cdp' | 'interfaces'
 })
 
 watch(
@@ -468,6 +612,14 @@ const showEditDialog = (template: CommandTemplate) => {
   showAddDialog.value = true
 }
 
+const firstEnabledTestType = (template: CommandTemplate) => {
+  if (template.arp_enabled) return 'arp'
+  if (template.mac_enabled) return 'mac'
+  if (template.lldp_enabled) return 'lldp'
+  if (template.cdp_enabled) return 'cdp'
+  return 'interfaces'
+}
+
 const showTestDialog = (template: CommandTemplate) => {
   currentTestTemplate.value = template
   testForm.value = {
@@ -478,7 +630,7 @@ const showTestDialog = (template: CommandTemplate) => {
     switch_port: defaultCliPort(testForm.value.cli_transport),
     cli_transport: testForm.value.cli_transport,
     template_id: template.id!,
-    test_type: template.arp_enabled ? 'arp' : 'mac'
+    test_type: firstEnabledTestType(template)
   }
   testResult.value = null
   showTestDialogVisible.value = true
@@ -497,6 +649,15 @@ const resetForm = () => {
     mac_command: '',
     mac_parser_type: '',
     mac_enabled: true,
+    lldp_command: '',
+    lldp_parser_type: '',
+    lldp_enabled: true,
+    cdp_command: '',
+    cdp_parser_type: '',
+    cdp_enabled: true,
+    interfaces_command: '',
+    interfaces_parser_type: '',
+    interfaces_enabled: true,
     priority: 150,
     description: '',
     enabled: true
@@ -595,7 +756,8 @@ const getVendorTagType = (vendor: string) => {
     nokia: 'warning',
     dell: 'success',
     cisco: 'primary',
-    huawei: 'danger'
+    huawei: 'danger',
+    h3c: 'danger'
   }
   return types[vendor.toLowerCase()] || 'info'
 }

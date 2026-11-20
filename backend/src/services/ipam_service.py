@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, cast, Text, String, Integer, delete, insert
+from sqlalchemy.orm import aliased
 from models.ipam import IPSubnet, IPAddress, IPScanHistory, IPStatus
 from models.switch import Switch
 from models.arp_table import ARPTable
@@ -23,6 +24,20 @@ import gc
 
 # Upper bound when listing hosts of a subnet that is not managed in IPAM.
 MAX_UNMANAGED_HOSTS = 65536
+
+
+def subnet_scope_condition(subnet_id: int):
+    """子网范围：本子网地址 + 完全嵌套在其中的子子网地址。
+
+    ``ip_addresses.ip_address`` 全局唯一，嵌套子网的地址只保存一份并归属最内层
+    子网；查看外层子网时必须纳入嵌套范围，否则列表和统计会缺 IP。
+    """
+    nested_ids = select(IPSubnet.id).where(
+        IPSubnet.network.op('<<')(
+            select(IPSubnet.network).where(IPSubnet.id == subnet_id).scalar_subquery()
+        )
+    )
+    return or_(IPAddress.subnet_id == subnet_id, IPAddress.subnet_id.in_(nested_ids))
 
 
 def _usable_ends(net) -> tuple:
@@ -488,7 +503,7 @@ class IPAMService:
                 IPAddress.status,
                 func.count(IPAddress.id).label('count')
             )
-            .where(IPAddress.subnet_id == subnet_id)
+            .where(subnet_scope_condition(subnet_id))
             .group_by(IPAddress.status)
         )
 
@@ -502,7 +517,7 @@ class IPAMService:
             select(func.count(IPAddress.id))
             .where(
                 and_(
-                    IPAddress.subnet_id == subnet_id,
+                    subnet_scope_condition(subnet_id),
                     IPAddress.is_reachable == True
                 )
             )
@@ -545,15 +560,22 @@ class IPAMService:
             for sid in subnet_ids
         }
 
+        # 地址可能归属嵌套子网，按 CIDR 归属把地址汇总到外层子网
+        owner = aliased(IPSubnet)
+        scope = aliased(IPSubnet)
+
         # Single query: count IPs grouped by subnet_id and status
         status_result = await db.execute(
             select(
-                IPAddress.subnet_id,
+                scope.id.label('subnet_id'),
                 IPAddress.status,
                 func.count(IPAddress.id).label('count')
             )
-            .where(IPAddress.subnet_id.in_(subnet_ids))
-            .group_by(IPAddress.subnet_id, IPAddress.status)
+            .select_from(IPAddress)
+            .join(owner, owner.id == IPAddress.subnet_id)
+            .join(scope, scope.network.op('>>=')(owner.network))
+            .where(scope.id.in_(subnet_ids))
+            .group_by(scope.id, IPAddress.status)
         )
 
         for row in status_result:
@@ -565,16 +587,19 @@ class IPAMService:
         # Single query: count reachable IPs per subnet
         reachable_result = await db.execute(
             select(
-                IPAddress.subnet_id,
+                scope.id.label('subnet_id'),
                 func.count(IPAddress.id).label('count')
             )
+            .select_from(IPAddress)
+            .join(owner, owner.id == IPAddress.subnet_id)
+            .join(scope, scope.network.op('>>=')(owner.network))
             .where(
                 and_(
-                    IPAddress.subnet_id.in_(subnet_ids),
+                    scope.id.in_(subnet_ids),
                     IPAddress.is_reachable == True
                 )
             )
-            .group_by(IPAddress.subnet_id)
+            .group_by(scope.id)
         )
 
         for row in reachable_result:

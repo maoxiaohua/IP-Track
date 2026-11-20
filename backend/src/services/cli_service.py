@@ -134,11 +134,13 @@ class CLIService:
         return ansi_escape.sub('', text)
 
     def _should_use_timing_commands(self, device_type: Optional[str], transport: Optional[str]) -> bool:
-        """Telnet sessions and some platforms are more stable with timing-based reads."""
-        return (
-            self.normalize_cli_transport(transport) == 'telnet' or
-            self._base_device_type(device_type) == 'dell_force10'
-        )
+        """Only Telnet needs timing reads; SSH devices use prompt-based reads.
+
+        FTOS (dell_force10) 曾经强制走 send_command_timing，实测会在设备输出延迟时
+        提前返回（只拿到命令回显），导致后续命令丢失首字符、拓扑解析为 0 条；
+        send_command 等待提示符更可靠，失败时 _execute_command 仍会回退到 timing。
+        """
+        return self.normalize_cli_transport(transport) == 'telnet'
 
     def _disable_paging(
         self,
@@ -201,7 +203,8 @@ class CLIService:
         port: Optional[int] = None,
         timeout: int = 30,
         enable_secret: str = None,
-        transport: str = 'ssh'
+        transport: str = 'ssh',
+        raise_on_error: bool = False
     ) -> Optional[ConnectHandler]:
         """
         Create CLI connection to network device.
@@ -320,6 +323,10 @@ class CLIService:
         except Exception as e:
             normalized_transport = self.normalize_cli_transport(transport)
             logger.error(f"❌ {normalized_transport.upper()} connection failed to {host}: {str(e)}")
+            # 拓扑采集需要把「为什么连不上」（认证失败/超时/不可达）写进状态与告警，
+            # 仅返回 None 无法区分，调用方可按需要求抛出原始异常。
+            if raise_on_error:
+                raise
             return None
 
     def _create_ssh_connection(
@@ -1575,6 +1582,341 @@ class CLIService:
                 entries.append({'mac_address': mac, 'port_name': port, 'vlan_id': vlan, 'is_dynamic': is_dynamic})
         return entries
 
+    # ==================== H3C Comware Parsers ====================
+
+    @staticmethod
+    def _normalize_h3c_mac(value: str) -> Optional[str]:
+        """Comware 的 aabb-ccdd-eeff / aa:bb:cc:dd:ee:ff 统一成 aa:bb:cc:dd:ee:ff。"""
+        compact = re.sub(r'[-:.]', '', (value or '').strip().lower())
+        if len(compact) != 12 or not re.fullmatch(r'[0-9a-f]{12}', compact):
+            return None
+        return ':'.join(compact[i:i + 2] for i in range(0, 12, 2))
+
+    @staticmethod
+    def _looks_like_h3c_interface(token: str) -> bool:
+        """Comware 接口名（GE1/0/1、Ten-GigabitEthernet1/0/25、Port-channel1）。
+
+        不能直接用 topology_utils.looks_like_port：它的前缀上限 16 字符，
+        Ten-GigabitEthernet 这类长接口名会漏判；而它又会匹配裸数字，
+        把 VLAN 列误当成端口。这里要求「字母前缀 + 数字」或纯数字的分层形式。
+        """
+        return bool(re.match(r'^(?:[A-Za-z][A-Za-z\-]*\d+(?:[/:\.]\d+)*|\d+(?:[/\.]\d+)+)$', token))
+
+    def _parse_h3c_comware_arp_table(self, output: str) -> List[Dict]:
+        """
+        Parse H3C Comware 'display arp' / 'display arp all'.
+
+        V5:  IP address  MAC address  VLAN ID   Port Name   Aging Type
+        V7:  IP address  MAC address  VLAN/VSI name  Interface  Aging Type
+
+        VLAN/VSI 列在部分 V7 设备上是 VSI 名称而非数字，接口列也可能因版本
+        不同落在第 3 或第 4 列，所以先取第 3 列当 VLAN（数字才收），再从
+        后续列里找第一个像接口的 token；找不到时说明该版本没有 VLAN 列。
+        """
+        entries = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or 'mac address' in line.lower() or line.startswith('---'):
+                continue
+            parts = line.split()
+            if len(parts) < 4 or not re.match(r'^\d+\.\d+\.\d+\.\d+$', parts[0]):
+                continue
+            mac = self._normalize_h3c_mac(parts[1])
+            if not mac:
+                continue
+            vlan = int(parts[2]) if parts[2].isdigit() else None
+            interface = ''
+            for token in parts[3:]:
+                if self._looks_like_h3c_interface(token):
+                    interface = token
+                    break
+            if not interface and self._looks_like_h3c_interface(parts[2]):
+                # 少数版本没有 VLAN 列，接口直接落在第 3 列
+                interface = parts[2]
+            entries.append({
+                'ip_address': parts[0],
+                'mac_address': mac,
+                'vlan_id': vlan,
+                'interface': interface or '',
+            })
+        return entries
+
+    def _parse_h3c_comware_mac_table(self, output: str) -> List[Dict]:
+        """
+        Parse H3C Comware 'display mac-address'.
+
+        V5:  MAC Address  VLAN ID   State    Port/Nickname   Aging
+        V7:  MAC Address  VLAN/VSI  Learned-From  Type
+
+        VLAN/VSI 是第 2 列（数字才是 VLAN），端口在其后；找不到时说明该
+        版本没有 VLAN 列。
+        """
+        entries = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or 'mac address' in line.lower() or line.startswith('---'):
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            mac = self._normalize_h3c_mac(parts[0])
+            if not mac:
+                continue
+            vlan = int(parts[1]) if parts[1].isdigit() else None
+            port = None
+            for token in parts[2:]:
+                if self._looks_like_h3c_interface(token):
+                    port = token
+                    break
+            if not port and self._looks_like_h3c_interface(parts[1]):
+                # 少数版本没有 VLAN 列，端口直接落在第 2 列
+                port = parts[1]
+            if not port:
+                # 多端口安全、黑洞表项等没有端口，跳过
+                continue
+            joined = ' '.join(parts[1:]).lower()
+            entries.append({
+                'mac_address': mac,
+                'port_name': port,
+                'vlan_id': vlan,
+                'is_dynamic': 1 if ('learned' in joined or 'dynamic' in joined) else 0,
+            })
+        return entries
+
+    _H3C_LLDP_LABELS = ('system name', 'local interface', 'chassis id', 'port id')
+
+    def _parse_h3c_comware_lldp(self, output: str) -> List[Dict]:
+        """
+        Parse H3C Comware LLDP 邻居。
+
+        1. `display lldp neighbor-information list` 表格：列序随版本变化，
+           按表头各列起始字符位置切片取值；
+        2. `display lldp neighbor-information verbose` 块形态：
+           `LLDP neighbor-information of port 25[XGE1/0/25]:`（V7）
+           或 `LLDP neighbor information on port GE1/0/1:` + `字段 : 值`。
+        """
+        entries = self._parse_h3c_lldp_table(output)
+        if entries:
+            return entries
+        entries = self._parse_h3c_lldp_verbose(output)
+        if entries:
+            return entries
+        return self._parse_generic_lldp_table(output)
+
+    def _parse_h3c_lldp_table(self, output: str) -> List[Dict]:
+        from services.topology_utils import looks_like_port
+
+        lines = output.splitlines()
+        header_idx = None
+        ordered = []
+        for idx, raw_line in enumerate(lines):
+            lowered = raw_line.lower()
+            if 'local interface' not in lowered or 'chassis id' not in lowered:
+                continue
+            positions = sorted(
+                (lowered.find(label), label)
+                for label in self._H3C_LLDP_LABELS if lowered.find(label) >= 0
+            )
+            if len(positions) < 3:
+                continue
+            ordered = [
+                (label, start, positions[i + 1][0] if i + 1 < len(positions) else None)
+                for i, (start, label) in enumerate(positions)
+            ]
+            header_idx = idx
+            break
+        if header_idx is None:
+            return []
+
+        entries = []
+        for raw_line in lines[header_idx + 1:]:
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith(('---', '===', 'Total')):
+                if entries:
+                    break
+                continue
+            fields = {
+                label: (raw_line[start:end].strip() if end else raw_line[start:].strip())
+                for label, start, end in ordered
+            }
+            local_port = fields.get('local interface')
+            if not local_port or not looks_like_port(local_port):
+                continue
+            entries.append(self._build_neighbor_entry(
+                'lldp',
+                local_port_id=local_port,
+                remote_sys_name=fields.get('system name') or None,
+                remote_chassis_id=fields.get('chassis id') or None,
+                remote_port_id=fields.get('port id') or None,
+            ))
+        return entries
+
+    def _parse_h3c_lldp_verbose(self, output: str) -> List[Dict]:
+        entries: List[Dict] = []
+        local_port = None
+        current: Dict = {}
+
+        def flush():
+            if current.get('remote_chassis_id') or current.get('remote_sys_name'):
+                entries.append(self._build_neighbor_entry('lldp', local_port_id=local_port, **current))
+            current.clear()
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            # 真实 Comware 形态：`LLDP neighbor-information of port 25[XGE1/0/25]:`
+            port_match = re.search(
+                r'neighbor[- ]information\s+of\s+port\s+\d+\s*\[([^\]]+)\]',
+                line, re.IGNORECASE
+            )
+            if not port_match:
+                port_match = re.search(
+                    r'neighbor information on (?:port|interface)\s+(\S+?):?$',
+                    line, re.IGNORECASE
+                )
+            if port_match:
+                flush()
+                local_port = port_match.group(1).rstrip(':')
+                continue
+            if ':' not in line:
+                continue
+            key, value = line.split(':', 1)
+            key = key.strip().lower()
+            value = value.strip() or None
+            if key == 'chassis id':
+                current['remote_chassis_id'] = value
+            elif key == 'port id':
+                current['remote_port_id'] = value
+            elif key in ('port description', 'interface description'):
+                current['remote_port_desc'] = value
+            elif key == 'system name':
+                current['remote_sys_name'] = value
+            elif key == 'system description':
+                current['remote_sys_desc'] = value
+        flush()
+        return entries
+
+    def _parse_h3c_system_info(self, output: str) -> Dict[str, str]:
+        """Parse H3C Comware 'display version' output.
+
+        V7 example:
+            H3C Comware Software, Version 7.1.070, Release 3506P10
+            H3C S5560X-30C-EI uptime is 12 weeks, 3 days, 4 hours, 5 minutes
+        V5 example:
+            Comware Software, Version 5.20.99, Release 2221P02
+            H3C S5500-28C-EI uptime is 0 week, 0 day, 0 hour, 0 minute
+        """
+        result = {'hostname': None, 'model': None, 'version': None}
+        try:
+            text = self._strip_ansi_codes(output or '')
+
+            # 版本行：优先带 "Comware Software" 的行，避免误取 Boot/System image 行
+            version_match = re.search(
+                r'Comware\s+Software,\s*Version\s+([0-9][^\s,]*)'
+                r'(?:\s*,?\s*Release\s+(\S+))?',
+                text, re.IGNORECASE
+            )
+            if not version_match:
+                version_match = re.search(
+                    r'Version\s+([0-9][^\s,]*)(?:\s*,?\s*Release\s+(\S+))?',
+                    text, re.IGNORECASE
+                )
+            if version_match:
+                version = version_match.group(1).strip()
+                if version_match.group(2):
+                    version = f"{version} Release {version_match.group(2).strip()}"
+                result['version'] = version
+
+            # 型号行："H3C S5560X-30C-EI uptime is ..." 或 "... with 1 Processor"
+            model_match = re.search(
+                r'^(?:H3C|HP)\s+(\S+)\s+uptime\s+is\b', text, re.IGNORECASE | re.MULTILINE
+            )
+            if not model_match:
+                model_match = re.search(
+                    r'^(?:H3C|HP)\s+(\S+)\s+with\s+\d+\s+Processor',
+                    text, re.IGNORECASE | re.MULTILINE
+                )
+            if model_match:
+                result['model'] = model_match.group(1).strip()
+
+            # 'display version' 本身不含 sysname，兼容带配置/提示符回显的输出
+            hostname_match = re.search(r'^\s*sysname\s+(\S+)', text, re.IGNORECASE | re.MULTILINE)
+            if not hostname_match:
+                hostname_match = re.search(r'^[<\[]~?([A-Za-z0-9._-]{2,63})[>\]]\s*$', text, re.MULTILINE)
+            if hostname_match:
+                hostname = hostname_match.group(1).strip()
+                if not any(ord(c) < 32 for c in hostname):
+                    result['hostname'] = hostname
+
+            logger.info(f"Parsed H3C system info: {result}")
+        except Exception as e:
+            logger.error(f"Error parsing H3C system info: {str(e)}")
+        return result
+
+    def _parse_h3c_transceiver(self, output: str) -> List[Dict]:
+        """Parse H3C Comware 'display transceiver interface' / 'manuinfo' output.
+
+        Example:
+            GigabitEthernet1/0/1 transceiver information:
+              Transceiver Type           : 1000_BASE_SX_SFP
+              Vendor Name                : H3C
+              Vendor Part Number         : SFP-GE-SX-MM850-A
+              Serial Number              : 210231A1234567
+        """
+        modules: List[Dict] = []
+        current_port = None
+        fields: Dict[str, str] = {}
+
+        def flush():
+            if not current_port:
+                return
+            type_hint = fields.get('transceiver type', '')
+            model = fields.get('vendor part number') or fields.get('part number')
+            serial = fields.get('serial number')
+            if not (type_hint or model or serial):
+                # 端口存在但没有模块（"The transceiver is absent"）时不落库
+                return
+            module_type = self._identify_module_type(type_hint)
+            if module_type in ('Unknown', 'Transceiver'):
+                module_type = self._infer_module_type_from_port_name(current_port)
+            modules.append({
+                'port_name': current_port,
+                'model': model,
+                'vendor': fields.get('vendor name') or fields.get('manufacturer name'),
+                'serial_number': serial,
+                'module_type': module_type,
+                'speed_gbps': (
+                    self._extract_speed_gbps(type_hint)
+                    or self._extract_speed_gbps(current_port)
+                ),
+            })
+
+        try:
+            for raw_line in output.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                header = re.search(
+                    r'^(\S+)\s+transceiver(?:\s+manufacture)?\s+information\s*:\s*$',
+                    line, re.IGNORECASE
+                )
+                if header:
+                    flush()
+                    current_port = header.group(1).strip()
+                    fields = {}
+                    continue
+                if current_port and ':' in line:
+                    key, value = line.split(':', 1)
+                    key = ' '.join(key.strip().lower().split())
+                    value = value.strip().rstrip(',') or None
+                    if value:
+                        fields[key] = value
+            flush()
+        except Exception as e:
+            logger.error(f"Error parsing H3C transceiver output: {str(e)}")
+        return modules
+
     def _parse_juniper_system_info(self, output: str) -> Dict[str, str]:
         """
         Parse Juniper 'show system information' output
@@ -1670,10 +2012,14 @@ class CLIService:
                         result['model'] = model
                         logger.debug(f"Extracted Dell model: {model}")
 
-                # Match OS Version - e.g., "OS Version: 10.5.1.0"
-                version_match = re.search(r'OS\s+Version\s*[:=]\s*(.+)', line, re.IGNORECASE)
+                # 版本行各 NOS 写法不同：OS10 是 "OS Version:"，FTOS/OS9 是
+                # "Software Version:"（有时带结尾句点），都收下并去掉尾部标点。
+                version_match = re.search(
+                    r'(?:OS|Software|System|Firmware)\s+Version\s*[:=]\s*(\S+)',
+                    line, re.IGNORECASE
+                )
                 if version_match:
-                    version = version_match.group(1).strip()
+                    version = version_match.group(1).strip().rstrip('.,;')
                     if version:
                         result['version'] = version
                         logger.debug(f"Extracted Dell version: {version}")
@@ -1689,6 +2035,21 @@ class CLIService:
                         not any(ord(c) < 32 for c in hostname)):
                         result['hostname'] = hostname
                         logger.debug(f"Extracted Dell hostname: {hostname}")
+
+            # FTOS/OS9 的 'show version' 里通常没有 Hostname 行，主机名只能从命令行提示符
+            # （"switch# show version" 或末尾的 "switch#"）里取。
+            if not result['hostname']:
+                prompt_match = re.search(
+                    r'^\s*([A-Za-z0-9][A-Za-z0-9._-]{1,62})\s*[#>]\s*(?:show\b.*)?$',
+                    output,
+                    re.MULTILINE
+                )
+                if prompt_match:
+                    candidate = prompt_match.group(1).strip()
+                    if (candidate and len(candidate) >= 2 and
+                        not any(ord(c) < 32 for c in candidate)):
+                        result['hostname'] = candidate
+                        logger.debug(f"Extracted Dell hostname from prompt: {candidate}")
 
             logger.info(f"Parsed Dell system info: {result}")
 
@@ -2118,8 +2479,12 @@ class CLIService:
             return OPTIMIZED_CLI_TEMPLATES
         except ImportError:
             logger.warning("Could not import optimized templates, using fallback")
+            try:
+                from config.collection_strategy import apply_topology_defaults
+            except ImportError:
+                apply_topology_defaults = None
             # Fallback to basic templates
-            return [
+            fallback_templates = [
                 {
                     'vendor': 'alcatel',
                     'model_pattern': '7220*',
@@ -2173,6 +2538,7 @@ class CLIService:
                     'enabled': True
                 },
             ]
+            return apply_topology_defaults(fallback_templates) if apply_topology_defaults else fallback_templates
 
     def collect_arp_table_cli(
         self,
@@ -2441,6 +2807,11 @@ class CLIService:
                 command = 'show version'
                 parser = self._parse_cisco_system_info
 
+            # H3C Comware 系列（不支持 'show version'，必须用 'display version'）
+            elif vendor == 'h3c':
+                command = 'display version'
+                parser = self._parse_h3c_system_info
+
             if not command or not parser:
                 logger.debug(f"No device info CLI command available for {vendor} {model}")
                 return None
@@ -2450,7 +2821,9 @@ class CLIService:
             transport = switch_config.get('cli_transport', 'ssh')
 
             # Establish CLI connection
-            device_type = switch_config.get('device_type', 'nokia_sros')
+            device_type = switch_config.get('device_type')
+            if not device_type:
+                device_type = 'hp_comware' if vendor == 'h3c' else 'nokia_sros'
             enable_secret = None
             if switch_config.get('enable_password_encrypted'):
                 enable_secret = decrypt_password(switch_config['enable_password_encrypted'])
@@ -2526,12 +2899,18 @@ class CLIService:
                 # Data -> "Serial number". Some Nokia white-box variants (e.g. Nuage
                 # 210 WBX) reject 'detail' but expose it under plain 'show chassis'.
                 commands = ['show chassis detail', 'show chassis']
+            elif 'h3c' in vendor:
+                # Comware 不支持 'show version'；整机 SN 在 manuinfo 的
+                # DEVICE_SERIAL_NUMBER 字段，'display version' 不含 SN。
+                commands = ['display device manuinfo', 'display version']
             else:
                 commands = ['show version']
 
             password = decrypt_password(switch_config['password_encrypted'])
             transport = switch_config.get('cli_transport', 'ssh')
-            device_type = switch_config.get('device_type', 'nokia_sros')
+            device_type = switch_config.get('device_type')
+            if not device_type:
+                device_type = 'hp_comware' if 'h3c' in vendor else 'nokia_sros'
             enable_secret = None
             if switch_config.get('enable_password_encrypted'):
                 enable_secret = decrypt_password(switch_config['enable_password_encrypted'])
@@ -2599,8 +2978,19 @@ class CLIService:
             svc_tag = self._extract_dell_ftos_svc_tag(output)
             if svc_tag:
                 return svc_tag
+            # OS9/OS10 的 'show inventory' 机箱行通常形如
+            # "PID: 0P3TGG, VID: 00, SN: 5J0YH32"（不是 "Service Tag:"）。
+            # FTOS 行里的 "Serial Number" 列会直接写 NA，由下面的 NA 过滤挡掉。
+            m = re.search(r'\bSN\s*[:=]\s*"?([A-Za-z0-9]{5,})"?', output)
+            if m:
+                val = m.group(1).strip()
+                if val and val.lower() not in ('null', 'none', 'n/a', 'na'):
+                    return val
 
         patterns = [
+            # H3C Comware 'display device manuinfo'：多槽位的风扇/电源也会输出
+            # SERIAL_NUMBER，整机序列号只在 DEVICE_SERIAL_NUMBER 里，必须优先匹配。
+            r'DEVICE_SERIAL_NUMBER\s*[:=]\s*"?([A-Za-z0-9]+)"?',
             r'Serial\s+Number\s*[:=]\s*"?([A-Za-z0-9]+)"?',      # Nokia SR Linux / Dell / Junos
             r'serial[-_]?number\s*[:=]\s*"?([A-Za-z0-9]+)"?',    # SR Linux info / Junos table
             r'Processor\s+board\s+ID\s+([A-Za-z0-9]+)',          # Cisco IOS
@@ -2633,13 +3023,753 @@ class CLIService:
                     return token
         return None
 
+    # ------------------------------------------------------------------
+    # 拓扑：LLDP / CDP / 接口清单解析器
+    #
+    # 输出结构与 SNMP 侧保持完全一致（见 snmp_service.collect_*），
+    # 上层 topology_service 不区分数据来源，只消费同一种事实结构。
+    # ------------------------------------------------------------------
+
+    # Cisco/NX-OS `show lldp neighbors detail` 的 capability 缩写；
+    # 长单词形态（Bridge / Router ...）原样保留，由 topology_service 统一解析。
+    _LLDP_CAPABILITY_LETTERS = {
+        'p': 'repeater', 'b': 'bridge', 'w': 'wlan', 'r': 'router',
+        't': 'phone', 'c': 'docsis', 's': 'station', 'o': 'other',
+    }
+    # capability 行可能是 `System Capabilities: B,R`，也可能用 `-` 分隔并写
+    # `not advertised`（NX-OS），两种都要认。
+    _LLDP_CAPABILITY_LINE = re.compile(
+        r'^(?:Remote System Capabilities|System Capabilities|Enabled Capabilities)'
+        r'\s*(?::|-)\s*(.*)$',
+        re.IGNORECASE,
+    )
+    _CAPABILITY_NON_VALUES = ('not advertised', 'unknown', 'none', '-', '')
+
+    @classmethod
+    def _normalize_lldp_capability(cls, value: Optional[str]) -> Optional[str]:
+        """把 `P,B,R` 归一成 `repeater,bridge,router`；无信息或未知缩写时返回 None。"""
+        raw = (value or '').strip()
+        if raw.lower() in cls._CAPABILITY_NON_VALUES:
+            return None
+        parts = [part.strip() for part in raw.split(',') if part.strip()]
+        if not parts:
+            return None
+        mapped = []
+        for part in parts:
+            if len(part) == 1:
+                word = cls._LLDP_CAPABILITY_LETTERS.get(part.lower())
+                if not word:
+                    return None
+                mapped.append(word)
+            else:
+                mapped.append(part.lower())
+        return ','.join(mapped)
+
+    @classmethod
+    def _apply_capability_line(cls, current: Dict, line: str) -> bool:
+        """命中 capability 行就写入当前块；Enabled 仅在未拿到 System 时兜底。"""
+        match = cls._LLDP_CAPABILITY_LINE.match(line)
+        if not match:
+            return False
+        if line.lower().startswith('enabled') and current.get('capability'):
+            return True
+        cap = cls._normalize_lldp_capability(match.group(1))
+        if cap:
+            current['capability'] = cap
+        return True
+
+    @staticmethod
+    def _build_neighbor_entry(
+        protocol: str,
+        local_port_id: Optional[str] = None,
+        local_if_index: Optional[int] = None,
+        remote_chassis_id: Optional[str] = None,
+        remote_port_id: Optional[str] = None,
+        remote_port_desc: Optional[str] = None,
+        remote_sys_name: Optional[str] = None,
+        remote_sys_desc: Optional[str] = None,
+        remote_mgmt_addr: Optional[str] = None,
+        mgmt_type: Optional[str] = None,
+        capability: Optional[str] = None,
+    ) -> Dict:
+        from services.topology_utils import normalize_mac
+        return {
+            'protocol': protocol,
+            'local_if_index': local_if_index,
+            'local_port_id': local_port_id,
+            'local_port_desc': None,
+            'remote_chassis_id': normalize_mac(remote_chassis_id),
+            'remote_chassis_id_subtype': None,
+            'remote_port_id': remote_port_id,
+            'remote_port_id_subtype': None,
+            'remote_port_desc': remote_port_desc,
+            'remote_sys_name': remote_sys_name,
+            'remote_sys_desc': remote_sys_desc,
+            'remote_mgmt_addr': remote_mgmt_addr,
+            'remote_mgmt_addr_type': mgmt_type,
+            'ttl': None,
+            'capability': capability,
+        }
+
+    def _parse_cisco_lldp_neighbors(self, output: str) -> List[Dict]:
+        """Cisco IOS / NX-OS 的 `show lldp neighbors detail`。"""
+        entries: List[Dict] = []
+        current: Dict = {}
+
+        def flush():
+            if current.get('remote_sys_name') or current.get('remote_chassis_id'):
+                entries.append(self._build_neighbor_entry('lldp', **current))
+            current.clear()
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if self._apply_capability_line(current, line):
+                continue
+            if line.startswith('Local Intf:') or line.startswith('Local Port id:'):
+                flush()
+                current['local_port_id'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('Chassis id:'):
+                current['remote_chassis_id'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('Port id:'):
+                current['remote_port_id'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('Port Description:'):
+                current['remote_port_desc'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('System Name:'):
+                current['remote_sys_name'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('System Description:'):
+                current['remote_sys_desc'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('IP:'):
+                address = line.split(':', 1)[1].strip()
+                current['remote_mgmt_addr'] = address
+                current['mgmt_type'] = 'ipv6' if ':' in address else 'ipv4'
+        flush()
+        return entries
+
+    def _parse_generic_lldp_table(self, output: str) -> List[Dict]:
+        """
+        通用 LLDP 邻居：
+
+        1. `detail` 块形态（Dell OS10 / FTOS 的 `show lldp neighbors detail`）；
+        2. 简述表格形态（`Local Interface / Remote Device ID / Remote Port ID` 等）。
+
+        先判形态再解析，两种输出不会互相误吃。
+        """
+        from services.topology_utils import looks_like_port
+
+        lowered_all = (output or '').lower()
+        if 'remote chassis id:' in lowered_all or 'local port id:' in lowered_all:
+            return self._parse_lldp_detail_blocks(output)
+
+        entries: List[Dict] = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if lowered.startswith(('---', '===', 'lldp', 'neighbor', 'remote system')):
+                continue
+            if 'chassis id' in lowered or 'system name' in lowered or 'local port' in lowered:
+                continue
+            parts = [part.strip() for part in re.split(r'\s{2,}|\t+', line) if part.strip()]
+            if len(parts) < 3 or not looks_like_port(parts[0]):
+                continue
+            entries.append(self._build_neighbor_entry(
+                'lldp',
+                local_port_id=parts[0],
+                remote_sys_name=parts[1] or None,
+                remote_port_id=parts[2] or None,
+            ))
+        return entries
+
+    def _parse_lldp_detail_blocks(self, output: str) -> List[Dict]:
+        """
+        LLDP `detail` 块（Dell OS10 / FTOS、Nokia SR Linux 等）。
+
+        每块以 `Remote Chassis ID:` 开头（FTOS 前面还有 `Local Interface ... has
+        N neighbor` 段头），字段统一为 `字段名: 值`；块之间是空行或 `-----` 分隔线。
+        只认带 chassis / 系统名的块，表头与统计行一律忽略。
+        """
+        entries: List[Dict] = []
+        current: Dict = {}
+
+        def flush():
+            if current.get('remote_chassis_id') or current.get('remote_sys_name'):
+                entries.append(self._build_neighbor_entry('lldp', **current))
+            current.clear()
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or set(line) <= {'-', '=', '+', '_'}:
+                continue
+            if self._apply_capability_line(current, line):
+                continue
+            if line.startswith('Remote Chassis ID:'):
+                if current.get('remote_chassis_id'):
+                    flush()
+                current['remote_chassis_id'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('Remote Port ID:'):
+                current['remote_port_id'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('Remote Port Description:'):
+                desc = line.split(':', 1)[1].strip()
+                current['remote_port_desc'] = None if desc.lower() == 'not advertised' else (desc or None)
+            elif line.startswith('Local Port ID:'):
+                current['local_port_id'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('Remote System Name:'):
+                current['remote_sys_name'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('Remote System Desc:'):
+                current['remote_sys_desc'] = line.split(':', 1)[1].strip() or None
+        flush()
+        return entries
+
+    @staticmethod
+    def _parse_pipe_table_rows(output: str) -> List[Dict[str, str]]:
+        """
+        解析 `|` 框线表（Nokia SR Linux 的 `show system lldp neighbor` /
+        `show interface brief`）。
+
+        以第一行 `|` 行为表头、按列名取值，不依赖固定列位，列宽与数量随固件变化
+        仍可解析。多张表拼在一起时只认第一张，避免把第二张表头当数据。
+        """
+        rows: List[Dict[str, str]] = []
+        header: Optional[List[str]] = None
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line.startswith('|'):
+                continue
+            cells = [cell.strip() for cell in line.strip('|').split('|')]
+            if not any(cells):
+                continue
+            if header is None:
+                header = cells
+                continue
+            if len(cells) != len(header):
+                continue
+            rows.append(dict(zip(header, cells)))
+        return rows
+
+    def _parse_srlinux_lldp_neighbors(self, output: str) -> List[Dict]:
+        """Nokia SR Linux `show system lldp neighbor`（`|` 框线表）。"""
+        from services.topology_utils import looks_like_port
+
+        entries: List[Dict] = []
+        for row in self._parse_pipe_table_rows(output):
+            local_port = row.get('Name') or row.get('Port')
+            if not looks_like_port(local_port):
+                continue
+            entries.append(self._build_neighbor_entry(
+                'lldp',
+                local_port_id=local_port,
+                remote_chassis_id=row.get('Neighbor Chassis ID') or None,
+                remote_port_id=row.get('Neighbor Port') or None,
+                remote_sys_name=row.get('Neighbor System Name') or row.get('Neighbor') or None,
+            ))
+        return entries
+
+    @staticmethod
+    def _speed_to_mbps(value: Optional[str]) -> Optional[int]:
+        """把 `1G` / `10M` / `1000` / `1000Mbps` 统一成 Mbps。"""
+        if not value:
+            return None
+        text = str(value).strip().lower()
+        match = re.search(r'(\d+(?:\.\d+)?)\s*([gmt])(?:bit|bps|b)?\b', text)
+        if match:
+            factor = {'g': 1000, 'm': 1, 't': 1_000_000}[match.group(2)]
+            return int(float(match.group(1)) * factor)
+        bare = re.search(r'\b(\d{2,6})\b', text)
+        return int(bare.group(1)) if bare else None
+
+    def _parse_srlinux_interfaces(self, output: str) -> List[Dict]:
+        """Nokia SR Linux `show interface brief`（`|` 框线表）。"""
+        from services.topology_utils import (
+            looks_like_port, normalize_lag_key, synthetic_if_index
+        )
+
+        entries: List[Dict] = []
+        for row in self._parse_pipe_table_rows(output):
+            if_name = row.get('Port') or row.get('Name')
+            if not looks_like_port(if_name):
+                continue
+            # SR Linux 用 enable/disable，与 SNMP（up/down）及其它厂商解析器统一。
+            state_map = {'enable': 'up', 'disable': 'down'}
+            oper_raw = (row.get('Oper State') or '').strip().lower()
+            admin_raw = (row.get('Admin State') or '').strip().lower()
+            oper_raw = state_map.get(oper_raw, oper_raw)
+            admin_raw = state_map.get(admin_raw, admin_raw)
+            entries.append({
+                'if_index': synthetic_if_index(if_name),
+                'if_name': if_name,
+                'if_descr': None,
+                'if_alias': None,
+                'if_type': None,
+                'admin_status': admin_raw or None,
+                'oper_status': oper_raw or None,
+                'speed_mbps': self._speed_to_mbps(row.get('Speed')),
+                'phys_address': None,
+                'lag_key': normalize_lag_key(if_name),
+            })
+        return entries
+
+    def _parse_cisco_cdp_neighbors(self, output: str) -> List[Dict]:
+        """Cisco `show cdp neighbors detail`。"""
+        entries: List[Dict] = []
+        current: Dict = {}
+
+        def flush():
+            if current.get('remote_sys_name'):
+                entries.append(self._build_neighbor_entry('cdp', **current))
+            current.clear()
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith('Device ID:'):
+                flush()
+                current['remote_sys_name'] = line.split(':', 1)[1].strip() or None
+            elif line.startswith('IP address:'):
+                address = line.split(':', 1)[1].strip()
+                current['remote_mgmt_addr'] = address
+                current['mgmt_type'] = 'ipv6' if ':' in address else 'ipv4'
+            elif line.startswith('Platform:'):
+                platform = line.split(':', 1)[1].split(',')[0].strip()
+                current['remote_sys_desc'] = platform or None
+            elif line.startswith('Interface:'):
+                detail = line.split(':', 1)[1]
+                local_part = detail.split(',')[0].strip()
+                current['local_port_id'] = local_part or None
+                match = re.search(
+                    r'Port ID \(outgoing port\)\s*:\s*(.+)$', detail, re.IGNORECASE
+                )
+                if match:
+                    current['remote_port_id'] = match.group(1).strip() or None
+        flush()
+        return entries
+
+    def _parse_generic_cdp_table(self, output: str) -> List[Dict]:
+        """通用 CDP 短表：Device ID / Local Intrfce / Holdtme / Capability / Platform / Port ID。"""
+        entries: List[Dict] = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith('---'):
+                continue
+            lowered = line.lower()
+            if 'device id' in lowered or 'total cdp entries' in lowered:
+                continue
+            match = re.match(r'^(\S+)\s+(\S+)\s+(\d+)\s+(.+?)\s+(\S+)$', line)
+            if not match:
+                continue
+            entries.append(self._build_neighbor_entry(
+                'cdp',
+                remote_sys_name=match.group(1),
+                local_port_id=match.group(2),
+                capability=match.group(4),
+                remote_port_id=match.group(5),
+            ))
+        return entries
+
+    def _parse_cisco_interfaces(self, output: str) -> List[Dict]:
+        """Cisco `show interfaces status`。"""
+        from services.topology_utils import (
+            looks_like_port, normalize_lag_key, synthetic_if_index
+        )
+
+        entries: List[Dict] = []
+        in_table = False
+        status_map = {
+            'connected': 'up', 'up': 'up', 'notconnect': 'down',
+            'disabled': 'down', 'err-disabled': 'down', 'down': 'down',
+        }
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if lowered.startswith('port') and 'status' in lowered:
+                in_table = True
+                continue
+            if not in_table:
+                continue
+            # Name 列可能为空或含空格，不能依赖固定列位置，
+            # 先按已知状态关键字定位 Status，再往后取 Vlan / Duplex / Speed。
+            tokens = line.split()
+            if len(tokens) < 2 or not looks_like_port(tokens[0]):
+                continue
+            status_index = None
+            for index in range(1, len(tokens)):
+                if tokens[index].lower() in status_map:
+                    status_index = index
+                    break
+            if status_index is None:
+                continue
+            if_name = tokens[0]
+            status = tokens[status_index].lower()
+            # 列序：Port / Name / Status / Vlan / Duplex / Speed / Type
+            name_tokens = tokens[1:status_index]
+            speed = None
+            speed_index = status_index + 3  # Status 后第 3 个是 Speed
+            if speed_index < len(tokens):
+                speed_match = re.fullmatch(r'a-?(\d+)', tokens[speed_index].lower())
+                if speed_match:
+                    speed = int(speed_match.group(1))
+            entries.append({
+                'if_index': synthetic_if_index(if_name),
+                'if_name': if_name,
+                'if_descr': ' '.join(name_tokens) or None,
+                'if_alias': None,
+                'if_type': None,
+                'admin_status': None,
+                'oper_status': status_map.get(status),
+                'speed_mbps': speed,
+                'phys_address': None,
+                'lag_key': normalize_lag_key(if_name),
+            })
+        return entries
+
+    def _parse_nokia_interfaces(self, output: str) -> List[Dict]:
+        """Nokia SR OS `show port`（列：Port / Admin / Link / SFP / Cfg / LAG / Oper）。"""
+        from services.topology_utils import (
+            looks_like_port, normalize_lag_key, synthetic_if_index
+        )
+
+        entries: List[Dict] = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(('---', '===', 'Port ', 'Total')):
+                continue
+            parts = [part.strip() for part in re.split(r'\s{2,}|\t+', line) if part.strip()]
+            if not parts or not looks_like_port(parts[0]):
+                continue
+            if_name = parts[0]
+            # Link 是第 3 列；取不到再看整行（不同固件列数不同）。
+            link_text = parts[2].lower() if len(parts) >= 3 else ' '.join(parts[1:]).lower()
+            oper_status = None
+            if link_text in ('yes', 'up'):
+                oper_status = 'up'
+            elif link_text in ('no', 'down'):
+                oper_status = 'down'
+            elif len(parts) >= 3 and parts[-1].lower() in ('up', 'down'):
+                oper_status = parts[-1].lower()
+            entries.append({
+                'if_index': synthetic_if_index(if_name),
+                'if_name': if_name,
+                'if_descr': None,
+                'if_alias': None,
+                'if_type': None,
+                'admin_status': None,
+                'oper_status': oper_status,
+                'speed_mbps': None,
+                'phys_address': None,
+                'lag_key': normalize_lag_key(if_name),
+            })
+        return entries
+
+    def _parse_generic_interfaces(self, output: str) -> List[Dict]:
+        """
+        通用接口清单：每行「接口名 + 状态 + 速率」。
+
+        无法识别状态时仍保留接口，oper_status 为 None（UI 显示未知，
+        不用猜测的 "up" 骗自己）。
+        """
+        from services.topology_utils import (
+            looks_like_port, normalize_lag_key, synthetic_if_index
+        )
+
+        entries: List[Dict] = []
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(('---', '===', 'Total')):
+                continue
+            parts = [part.strip() for part in re.split(r'\s{2,}|\t+', line) if part.strip()]
+            if not parts:
+                continue
+            if_name = parts[0]
+            # Dell FTOS 的 `show interfaces status` 把接口名写成 "Gi 1/1"（单空格），
+            # 按列切分后仍是同一个 token，含空格会被 looks_like_port 整行丢弃。
+            spaced_name = re.fullmatch(r'([A-Za-z][A-Za-z\-]{0,15})\s+(\d+(?:/\d+)+)', if_name)
+            if spaced_name and len(parts) > 1:
+                if_name = f'{spaced_name.group(1)}{spaced_name.group(2)}'
+            elif (
+                len(parts) > 1
+                and re.fullmatch(r'[A-Za-z][A-Za-z\-]{0,15}', parts[0])
+                and re.fullmatch(r'\d+(?:/\d+)+', parts[1])
+            ):
+                if_name = f'{parts[0]}{parts[1]}'
+                parts = [if_name, *parts[2:]]
+            if not looks_like_port(if_name):
+                continue
+            joined = ' '.join(parts[1:]).lower()
+            oper_status = None
+            if re.search(r'\bup\b|\bconnected\b', joined):
+                oper_status = 'up'
+            elif re.search(r'\bdown\b|\bnotconnect\b|\bdisabled\b', joined):
+                oper_status = 'down'
+            speed = None
+            # 优先识别带单位的速率（1000M / 1000 Mbit / a-1000 / Comware 1G(a) 10G(a)），
+            # 裸数字可能撞上 VLAN 列，只在找不到单位时才退回。
+            # 注意单位是 G 时要换算：1G(a) = 1000 Mbps，10G(a) = 10000 Mbps。
+            unit_match = re.search(r'(\d+)\s*(gbit|gb|g|mbit|mbps|mb)\b', joined)
+            if unit_match:
+                speed = int(unit_match.group(1))
+                if unit_match.group(2).startswith('g'):
+                    speed *= 1000
+            else:
+                for token in parts[1:]:
+                    speed_match = re.fullmatch(r'a-?(\d+)', token.lower())
+                    if speed_match:
+                        speed = int(speed_match.group(1))
+                        break
+            if speed is None:
+                bare_match = re.search(r'\b(\d{3,5})\b', ' '.join(parts[2:]))
+                if bare_match:
+                    speed = int(bare_match.group(1))
+            entries.append({
+                'if_index': synthetic_if_index(if_name),
+                'if_name': if_name,
+                'if_descr': None,
+                'if_alias': None,
+                'if_type': None,
+                'admin_status': None,
+                'oper_status': oper_status,
+                'speed_mbps': speed,
+                'phys_address': None,
+                'lag_key': normalize_lag_key(if_name),
+            })
+        return entries
+
+    def _collect_topology_facts_cli(
+        self,
+        switch_ip: str,
+        switch_config: Dict,
+        templates: Optional[List[Dict]],
+        data_type: str,
+    ) -> Dict:
+        """
+        采集一类拓扑事实（lldp / cdp / interfaces）。
+
+        命令与解析器全部来自模板（数据库优先，其次内置模板），不在代码里硬编码设备命令。
+        """
+        connection = None
+        try:
+            password = decrypt_password(switch_config['password_encrypted'])
+            enable_secret = None
+            if switch_config.get('enable_password_encrypted'):
+                enable_secret = decrypt_password(switch_config['enable_password_encrypted'])
+
+            vendor = switch_config.get('vendor', '')
+            model = switch_config.get('model', '')
+            name = switch_config.get('name', '')
+            template = self._find_matching_template(vendor, model, name, templates)
+            if not template:
+                return {
+                    'status': 'unsupported',
+                    'entries': [],
+                    'message': 'no command template matched for this device',
+                }
+
+            # 数据库模板优先；模板里没有配置拓扑命令（None/空）时，按 device_type 取内置默认命令。
+            from config.collection_strategy import TOPOLOGY_CLI_DEFAULTS
+            effective = dict(template)
+            for key, value in (TOPOLOGY_CLI_DEFAULTS.get(template.get('device_type') or '') or {}).items():
+                if effective.get(key) is None:
+                    effective[key] = value
+
+            command = effective.get(f'{data_type}_command')
+            enabled = effective.get(f'{data_type}_enabled', True)
+            if not enabled or not command:
+                return {
+                    'status': 'unsupported',
+                    'entries': [],
+                    'message': f'{data_type} CLI collection is not enabled for this template',
+                }
+
+            parser_type = effective.get(f'{data_type}_parser_type')
+            parser = self._get_parser(parser_type, data_type)
+            if not parser:
+                return {
+                    'status': 'error',
+                    'entries': [],
+                    'message': f'no {data_type} parser registered for type {parser_type!r}',
+                }
+
+            transport = switch_config.get('cli_transport', 'ssh')
+            device_type = template.get('device_type')
+            try:
+                connection = self._create_cli_connection(
+                    host=switch_ip,
+                    username=switch_config['username'],
+                    password=password,
+                    device_type=device_type,
+                    port=switch_config.get('ssh_port'),
+                    timeout=switch_config.get('connection_timeout', 30),
+                    enable_secret=enable_secret,
+                    transport=transport,
+                    raise_on_error=True,
+                )
+            except Exception as connect_error:
+                # netmiko 异常是多行带排查建议的大段文本，压成一行便于在告警页阅读。
+                reason = ' '.join(str(connect_error).split())[:300]
+                return {
+                    'status': 'error',
+                    'entries': [],
+                    'message': f'CLI connection failed: {reason}',
+                }
+            if not connection:
+                return {'status': 'error', 'entries': [], 'message': 'CLI connection failed'}
+
+            try:
+                output = self._execute_command(
+                    connection,
+                    command,
+                    device_type=device_type,
+                    transport=transport,
+                    read_timeout=90,
+                    delay_factor=3,
+                    max_loops=200,
+                )
+            except Exception as e:
+                return {'status': 'error', 'entries': [], 'message': str(e)}
+
+            logger.debug(
+                f"{data_type.upper()} CLI output from {switch_ip} "
+                f"({len(output or '')} chars):\n{(output or '')[:500]}"
+            )
+            entries = parser(output or '')
+            if not entries:
+                # 设备真实输出格式可能与登记的厂商/型号不符（例如登记为 cisco，实际输出 Dell 表格）。
+                # 通用表格解析器覆盖多数厂商的 detail/table 输出；命中条目即采用，避免误报解析失败。
+                fallback_parser = self._get_parser('generic', data_type)
+                if fallback_parser and fallback_parser is not parser:
+                    fallback_entries = fallback_parser(output or '')
+                    if fallback_entries:
+                        logger.warning(
+                            f"{data_type.upper()} parser {parser_type!r} found 0 entries from "
+                            f"{switch_ip}; generic parser matched {len(fallback_entries)} entries"
+                        )
+                        entries = fallback_entries
+            if not entries:
+                lowered = (output or '').lower()
+                if any(marker in lowered for marker in (
+                    'invalid input', 'unrecognized command', 'incomplete command',
+                    'syntax error', 'unknown command', "doesn't exist",
+                    # NX-OS 在 feature 未开启时回显 "% Invalid command at '^' marker."
+                    '% invalid command',
+                    # H3C Comware 的错误回显
+                    '% wrong parameter', '% ambiguous command', '% too many parameters',
+                    '% unrecognized command', '% incomplete command',
+                    # Comware 未开启 LLDP
+                    'lldp is not enabled',
+                )):
+                    return {
+                        'status': 'unsupported',
+                        'entries': [],
+                        'message': 'device rejected the command',
+                    }
+                if not (output or '').strip():
+                    return {'status': 'error', 'entries': [], 'message': 'empty CLI output'}
+                # 设备明确表示没有邻居 = 支持协议但无邻居，属于成功；
+                # 其余「解析出 0 条」说明输出格式没被识别，不能报成功（假 success 会误导覆盖率）。
+                # Cisco 实际输出是 "Total cdp entries displayed : 0"（冒号前有空格），
+                # 固定子串匹配不到，必须按空白宽松匹配。
+                if any(marker in lowered for marker in (
+                    'no neighbors', 'no lldp neighbors', 'no cdp neighbors',
+                    'neighbor table is empty', 'no remote system',
+                )) or re.search(
+                    r'total\s+(?:cdp\s+|lldp\s+)?entries\s+displayed\s*:\s*0\b', lowered
+                ) or re.search(
+                    r'total\s+number\s+of\s+neighbors\s*:\s*0\b', lowered
+                ):
+                    return {
+                        'status': 'ok',
+                        'entries': [],
+                        'message': 'device reports no neighbors',
+                    }
+                return {
+                    'status': 'error',
+                    'entries': [],
+                    'message': 'unable to parse CLI output; command or output format may be unsupported',
+                }
+            logger.info(f"Collected {len(entries)} {data_type} facts from {switch_ip} via CLI")
+            return {'status': 'ok', 'entries': entries}
+
+        except Exception as e:
+            logger.error(f"Failed to collect {data_type} via CLI from {switch_ip}: {str(e)}")
+            return {'status': 'error', 'entries': [], 'message': str(e)}
+
+        finally:
+            if connection:
+                try:
+                    connection.disconnect()
+                except Exception:
+                    pass
+
+    def collect_lldp_neighbors_cli(
+        self,
+        switch_ip: str,
+        switch_config: Dict,
+        templates: Optional[List[Dict]] = None
+    ) -> Dict:
+        return self._collect_topology_facts_cli(switch_ip, switch_config, templates, 'lldp')
+
+    def collect_cdp_neighbors_cli(
+        self,
+        switch_ip: str,
+        switch_config: Dict,
+        templates: Optional[List[Dict]] = None
+    ) -> Dict:
+        return self._collect_topology_facts_cli(switch_ip, switch_config, templates, 'cdp')
+
+    def collect_interfaces_cli(
+        self,
+        switch_ip: str,
+        switch_config: Dict,
+        templates: Optional[List[Dict]] = None
+    ) -> Dict:
+        return self._collect_topology_facts_cli(switch_ip, switch_config, templates, 'interfaces')
+
+    def topology_dataset_supported(
+        self,
+        switch_config: Dict,
+        templates: Optional[List[Dict]],
+        data_type: str,
+    ) -> Optional[bool]:
+        """
+        该设备类型是否应采集某类拓扑事实。
+
+        返回 None 表示无法判断（模板或 device_type 未定义），调用方按原逻辑
+        SNMP 优先 + CLI 回退实际探测；True/False 表示模板已明确支持/不适用
+        （例如 Dell / Nokia 没有 CDP），此时不应再尝试 SNMP，避免把
+        「协议不适用」误记成采集失败。
+        """
+        template = self._find_matching_template(
+            switch_config.get('vendor', ''),
+            switch_config.get('model', ''),
+            switch_config.get('name', ''),
+            templates,
+        )
+        if not template:
+            return None
+        from config.collection_strategy import TOPOLOGY_CLI_DEFAULTS
+        defaults = TOPOLOGY_CLI_DEFAULTS.get(template.get('device_type') or '')
+        if not defaults:
+            return None
+        # 与 _collect_topology_facts_cli 相同的「模板优先、内置默认补齐」规则。
+        effective = dict(template)
+        for key, value in defaults.items():
+            if effective.get(key) is None:
+                effective[key] = value
+        enabled = effective.get(f'{data_type}_enabled', True)
+        command = effective.get(f'{data_type}_command')
+        return bool(enabled and command)
+
     def _get_parser(self, parser_type: Optional[str], data_type: str):
         """
         Get parser function by type
 
         Args:
             parser_type: Parser type name (e.g., 'nokia_7220', 'dell_os10')
-            data_type: 'arp' or 'mac'
+            data_type: 'arp' / 'mac' / 'lldp' / 'cdp' / 'interfaces'
 
         Returns:
             Parser function or None
@@ -2650,43 +3780,83 @@ class CLIService:
         parser_map = {
             'nokia_7220': {
                 'arp': self._parse_nokia_7220_arp_table,
-                'mac': self._parse_nokia_7220_mac_table
+                'mac': self._parse_nokia_7220_mac_table,
+                'lldp': self._parse_srlinux_lldp_neighbors,
+                'interfaces': self._parse_srlinux_interfaces,
             },
             'nokia_7250': {
                 'arp': self._parse_nokia_7250_arp_table,
-                'mac': self._parse_nokia_7250_mac_table
+                'mac': self._parse_nokia_7250_mac_table,
+                'lldp': self._parse_generic_lldp_table,
+                'interfaces': self._parse_nokia_interfaces,
+            },
+            # 别名：命令模板页可选 nokia_sros，但此前未注册会导致「解析器不存在」。
+            'nokia_sros': {
+                'lldp': self._parse_generic_lldp_table,
+                'interfaces': self._parse_nokia_interfaces,
+            },
+            # 别名：未知厂商/通用表格，与命令模板页的 generic 选项保持一致。
+            'generic': {
+                'lldp': self._parse_generic_lldp_table,
+                'cdp': self._parse_generic_lldp_table,
+                'interfaces': self._parse_generic_interfaces,
             },
             'dell_os10': {
                 'arp': self._parse_dell_os10_arp_table,
-                'mac': self._parse_dell_os10_mac_table
+                'mac': self._parse_dell_os10_mac_table,
+                'lldp': self._parse_generic_lldp_table,
+                'interfaces': self._parse_generic_interfaces,
             },
             'dell_force10': {
                 'arp': self._parse_dell_force10_arp_table,
-                'mac': self._parse_dell_force10_mac_table
+                'mac': self._parse_dell_force10_mac_table,
+                'lldp': self._parse_generic_lldp_table,
+                'interfaces': self._parse_generic_interfaces,
             },
             'cisco_ios': {
                 'arp': self._parse_cisco_ios_arp_table,
-                'mac': self._parse_cisco_ios_mac_table
+                'mac': self._parse_cisco_ios_mac_table,
+                'lldp': self._parse_cisco_lldp_neighbors,
+                'cdp': self._parse_cisco_cdp_neighbors,
+                'interfaces': self._parse_cisco_interfaces,
             },
             'cisco_nxos': {
                 'arp': self._parse_cisco_nxos_arp_table,
-                'mac': self._parse_cisco_nxos_mac_table
+                'mac': self._parse_cisco_nxos_mac_table,
+                'lldp': self._parse_cisco_lldp_neighbors,
+                'cdp': self._parse_cisco_cdp_neighbors,
+                'interfaces': self._parse_cisco_interfaces,
             },
             'juniper': {
                 'arp': self._parse_juniper_arp_table,
-                'mac': self._parse_juniper_mac_table
+                'mac': self._parse_juniper_mac_table,
+                'lldp': self._parse_generic_lldp_table,
+                'interfaces': self._parse_generic_interfaces,
             },
             'arista_eos': {
                 'arp': self._parse_arista_eos_arp_table,
-                'mac': self._parse_arista_eos_mac_table
+                'mac': self._parse_arista_eos_mac_table,
+                'lldp': self._parse_cisco_lldp_neighbors,
+                'cdp': self._parse_cisco_cdp_neighbors,
+                'interfaces': self._parse_cisco_interfaces,
             },
             'hpe_procurve': {
                 'arp': self._parse_hpe_procurve_arp_table,
-                'mac': self._parse_hpe_procurve_mac_table
+                'mac': self._parse_hpe_procurve_mac_table,
+                'lldp': self._parse_generic_lldp_table,
+                'interfaces': self._parse_generic_interfaces,
             },
             'huawei_vrp': {
                 'arp': self._parse_huawei_vrp_arp_table,
-                'mac': self._parse_huawei_vrp_mac_table
+                'mac': self._parse_huawei_vrp_mac_table,
+                'lldp': self._parse_generic_lldp_table,
+                'interfaces': self._parse_generic_interfaces,
+            },
+            'h3c_comware': {
+                'arp': self._parse_h3c_comware_arp_table,
+                'mac': self._parse_h3c_comware_mac_table,
+                'lldp': self._parse_h3c_comware_lldp,
+                'interfaces': self._parse_generic_interfaces,
             }
         }
 
@@ -2710,7 +3880,9 @@ class CLIService:
                 )
             return resolved_device_type
 
-        return configured_device_type or 'cisco_ios'
+        return configured_device_type or (
+            'hp_comware' if (vendor or '').lower() == 'h3c' else 'cisco_ios'
+        )
 
     def collect_optical_modules_cli(
         self,
@@ -2768,33 +3940,25 @@ class CLIService:
             vendor_lower = vendor.lower() if vendor else ''
             model_upper = model.upper() if model else ''
             
-            # Dell OS10 platforms (for example S3048/S4048/S5232): show inventory media
-            if vendor_lower == 'dell' and (
-                '3048' in model_upper or
-                '4048' in model_upper or
-                '5232' in model_upper or
-                'S3048' in model_upper or
-                'S4048' in model_upper or
-                'S5232' in model_upper
-            ):
-                logger.info(f"Using 'show inventory media' for Dell {model}")
-                command = 'show inventory media'
-                output = connection.send_command_timing(command, delay_factor=2)
-                logger.debug(f"Command output length: {len(output)} bytes")
-                logger.debug(f"Dell inventory media output:\n{output}")
-                modules = self._parse_dell_inventory_media(output)
-            
-            # Dell Force10/DNOS9 (S3000, S4000, Z9000 series): show interface transceiver
-            elif vendor_lower == 'dell' and (
-                '3148' in model_upper or '4148' in model_upper or
-                '9100' in model_upper or 's9100' in model_upper
-            ):
-                logger.info(f"Using 'show interface transceiver' for Dell {model}")
-                command = 'show interface transceiver'
-                output = connection.send_command_timing(command, delay_factor=2)
-                logger.debug(f"Command output length: {len(output)} bytes")
-                modules = self._parse_dell_transceiver(output)
-            
+            # Dell: OS10 与 OS9(FTOS) 的光模块命令不一样，而且同一型号可能跑不同 NOS
+            # （本环境的 S4048-ON 就跑 FTOS，而不是 OS10）。以前按型号后缀猜单一命令，
+            # 猜错就只能拿到一条报错回显、0 个模块。改成按候选命令依次尝试，解析到模块即停。
+            if vendor_lower == 'dell':
+                candidates = (
+                    ('show inventory media', self._parse_dell_inventory_media),
+                    ('show interfaces transceiver', self._parse_dell_transceiver),
+                    ('show interface transceiver', self._parse_dell_transceiver),
+                )
+                for command, parser in candidates:
+                    logger.info(f"Trying '{command}' for Dell {model}")
+                    output = connection.send_command_timing(command, delay_factor=2)
+                    logger.debug(f"Command output length: {len(output)} bytes")
+                    modules = parser(output)
+                    if modules:
+                        logger.info(
+                            f"Parsed {len(modules)} optical module(s) from '{command}' on {switch_ip}"
+                        )
+                        break
             # Cisco: show inventory and show interface transceiver
             elif vendor_lower == 'cisco':
                 # Detect if this is NX-OS device
@@ -2832,6 +3996,20 @@ class CLIService:
                 output = connection.send_command_timing(command, delay_factor=2)
                 logger.debug(f"Command output length: {len(output)} bytes")
                 modules = self._parse_juniper_optics(output)
+
+            # H3C Comware: 'display transceiver interface' 在老版本/部分平台不输出
+            # 厂商型号，回退到 manuinfo 视图；两者解析格式一致。
+            elif vendor_lower == 'h3c':
+                for command in ('display transceiver interface', 'display transceiver manuinfo interface'):
+                    logger.info(f"Trying '{command}' for H3C {model}")
+                    output = connection.send_command_timing(command, delay_factor=2)
+                    logger.debug(f"Command output length: {len(output)} bytes")
+                    modules = self._parse_h3c_transceiver(output)
+                    if modules:
+                        logger.info(
+                            f"Parsed {len(modules)} optical module(s) from '{command}' on {switch_ip}"
+                        )
+                        break
 
             else:
                 logger.warning(f"Unsupported vendor/model for optical module CLI collection: {vendor} {model}")
@@ -2967,23 +4145,26 @@ class CLIService:
                 if 'pluggable optics cannot be read or is not present' in block_text.lower():
                     continue
 
+                # FTOS 不同版本的行格式不一致：有的带模块类型前缀（"SFP+ 0 Vendor SN = ..."），
+                # 有的就是裸的 "Vendor SN = ..."。前缀设为可选，分隔符同时接受 '=' 和 ':'。
+                _opt_prefix = r'(?:(?:QSFP28|QSFP\+|QSFP|SFP\+|SFP)\s+\S+\s+)?'
                 serial_match = re.search(
-                    r'^\s*(?:QSFP28|QSFP|QSFP\+|SFP\+|SFP)\s+\S+\s+Vendor SN\s*=\s*(.+?)\s*$',
+                    _opt_prefix + r'Vendor SN\s*[:=]\s*(.+?)\s*$',
                     block_text,
                     re.MULTILINE
                 )
                 vendor_match = re.search(
-                    r'^\s*(?:QSFP28|QSFP|QSFP\+|SFP\+|SFP)\s+\S+\s+Vendor Name\s*=\s*(.+?)\s*$',
+                    _opt_prefix + r'Vendor Name\s*[:=]\s*(.+?)\s*$',
                     block_text,
                     re.MULTILINE
                 )
                 part_match = re.search(
-                    r'^\s*(?:QSFP28|QSFP|QSFP\+|SFP\+|SFP)\s+\S+\s+Vendor (?:PN|Part Number|Part)\s*=\s*(.+?)\s*$',
+                    _opt_prefix + r'Vendor (?:PN|Part Number|Part)\s*[:=]\s*(.+?)\s*$',
                     block_text,
                     re.MULTILINE
                 )
                 family_match = re.search(
-                    r'^\s*((?:QSFP28|QSFP|QSFP\+|SFP\+|SFP))\s+\S+\s+Serial ID Base Fields',
+                    r'^\s*((?:QSFP28|QSFP\+|QSFP|SFP\+|SFP))(?:\s+\S+)?\s+Serial ID Base Fields',
                     block_text,
                     re.MULTILINE
                 )

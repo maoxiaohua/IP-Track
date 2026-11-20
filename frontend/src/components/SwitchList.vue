@@ -240,7 +240,8 @@ const getVendorTagType = (vendor: string) => {
   const types: Record<string, any> = {
     cisco: 'primary',
     dell: 'success',
-    alcatel: 'warning'
+    alcatel: 'warning',
+    h3c: 'danger'
   }
   return types[vendor] || 'info'
 }

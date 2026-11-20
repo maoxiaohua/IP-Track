@@ -611,6 +611,10 @@ class IPScanService:
                             os_info['os_name'] = f"Juniper JUNOS {os_info['os_version']}"
                         else:
                             os_info['os_name'] = 'Juniper Network Device'
+                    elif any(keyword in os_lower for keyword in ['h3c', 'comware']):
+                        os_info['os_type'] = 'network'
+                        os_info['os_vendor'] = 'H3C'
+                        os_info['os_name'] = 'H3C Network Device'
                     elif any(keyword in os_lower for keyword in ['hp', 'aruba', 'procurve']):
                         os_info['os_type'] = 'network'
                         os_info['os_vendor'] = 'HP/Aruba'

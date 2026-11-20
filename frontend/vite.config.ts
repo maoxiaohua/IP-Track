@@ -83,6 +83,12 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false
         },
+        // 自动拓扑挂在 backend-collector；必须排在 '/api' 兜底之前，端口用容器内 8100
+        '/api/v1/topology': {
+          target: backendCollector,
+          changeOrigin: true,
+          secure: false
+        },
         '/api': {
           target: backendCore,
           changeOrigin: true,

@@ -35,6 +35,17 @@ class SwitchCommandTemplate(Base):
     mac_parser_type = Column(String(50))  # Parser to use
     mac_enabled = Column(Boolean, default=True)
 
+    # Topology Collection (LLDP / CDP / interface inventory)
+    lldp_command = Column(Text)  # CLI command to get LLDP neighbors
+    lldp_parser_type = Column(String(50))  # 'cisco_ios', 'nokia_sros', 'dell_os10', 'generic'
+    lldp_enabled = Column(Boolean, default=True)
+    cdp_command = Column(Text)  # CLI command to get CDP neighbors
+    cdp_parser_type = Column(String(50))
+    cdp_enabled = Column(Boolean, default=True)
+    interfaces_command = Column(Text)  # CLI command to list interfaces
+    interfaces_parser_type = Column(String(50))
+    interfaces_enabled = Column(Boolean, default=True)
+
     # Priority (higher number = higher priority when multiple templates match)
     priority = Column(Integer, default=100)
 

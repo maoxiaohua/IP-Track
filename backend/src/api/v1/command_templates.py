@@ -38,6 +38,9 @@ class CommandTemplateOptionsResponse(BaseModel):
     device_types: List[DeviceTypeInfo]
     arp: List[ParserInfo]
     mac: List[ParserInfo]
+    lldp: List[ParserInfo]
+    cdp: List[ParserInfo]
+    interfaces: List[ParserInfo]
 
 
 @router.get("/parsers", response_model=CommandTemplateOptionsResponse)
@@ -79,6 +82,26 @@ async def get_available_parsers():
                 "type": "juniper_junos",
                 "name": "Juniper JunOS",
                 "description": "Used for Juniper switches"
+            },
+            {
+                "type": "arista_eos",
+                "name": "Arista EOS",
+                "description": "Used for Arista switches running EOS"
+            },
+            {
+                "type": "hpe_procurve",
+                "name": "HPE ProCurve / ArubaOS-Switch",
+                "description": "Used for HPE ProCurve and ArubaOS-Switch devices"
+            },
+            {
+                "type": "huawei_vrp",
+                "name": "Huawei VRP",
+                "description": "Used for Huawei VRP switches"
+            },
+            {
+                "type": "hp_comware",
+                "name": "H3C / HP Comware",
+                "description": "Used for H3C and HP Comware (V5/V7) switches"
             }
         ],
         "arp": [
@@ -116,6 +139,26 @@ async def get_available_parsers():
                 "type": "juniper",
                 "name": "Juniper JunOS",
                 "description": "Parser for Juniper JunOS ARP table output"
+            },
+            {
+                "type": "arista_eos",
+                "name": "Arista EOS",
+                "description": "Parser for Arista EOS ARP table output"
+            },
+            {
+                "type": "hpe_procurve",
+                "name": "HPE ProCurve",
+                "description": "Parser for HPE ProCurve ARP table output"
+            },
+            {
+                "type": "huawei_vrp",
+                "name": "Huawei VRP",
+                "description": "Parser for Huawei VRP ARP table output"
+            },
+            {
+                "type": "h3c_comware",
+                "name": "H3C / Comware",
+                "description": "Parser for H3C Comware 'display arp' output"
             }
         ],
         "mac": [
@@ -153,6 +196,142 @@ async def get_available_parsers():
                 "type": "juniper",
                 "name": "Juniper JunOS",
                 "description": "Parser for Juniper JunOS MAC table output"
+            },
+            {
+                "type": "arista_eos",
+                "name": "Arista EOS",
+                "description": "Parser for Arista EOS MAC table output"
+            },
+            {
+                "type": "hpe_procurve",
+                "name": "HPE ProCurve",
+                "description": "Parser for HPE ProCurve MAC table output"
+            },
+            {
+                "type": "huawei_vrp",
+                "name": "Huawei VRP",
+                "description": "Parser for Huawei VRP MAC table output"
+            },
+            {
+                "type": "h3c_comware",
+                "name": "H3C / Comware",
+                "description": "Parser for H3C Comware 'display mac-address' output"
+            }
+        ],
+        "lldp": [
+            {
+                "type": "cisco_ios",
+                "name": "Cisco IOS/IOS-XE",
+                "description": "Parser for 'show lldp neighbors detail' output"
+            },
+            {
+                "type": "cisco_nxos",
+                "name": "Cisco NX-OS",
+                "description": "Parser for 'show lldp neighbors detail' output (NX-OS)"
+            },
+            {
+                "type": "nokia_sros",
+                "name": "Nokia SR OS",
+                "description": "Parser for 'show system lldp neighbor' output"
+            },
+            {
+                "type": "dell_os10",
+                "name": "Dell OS10",
+                "description": "Parser for 'show lldp remote-system' output"
+            },
+            {
+                "type": "generic",
+                "name": "Generic neighbor table",
+                "description": "Parser for a table with local port / remote device / remote port columns"
+            },
+            {
+                "type": "arista_eos",
+                "name": "Arista EOS",
+                "description": "Parser for 'show lldp neighbors detail' output (EOS)"
+            },
+            {
+                "type": "hpe_procurve",
+                "name": "HPE ProCurve",
+                "description": "Parser for HPE ProCurve LLDP neighbor output"
+            },
+            {
+                "type": "huawei_vrp",
+                "name": "Huawei VRP",
+                "description": "Parser for Huawei VRP LLDP neighbor output"
+            },
+            {
+                "type": "h3c_comware",
+                "name": "H3C / Comware",
+                "description": "Parser for 'display lldp neighbor-information' output"
+            }
+        ],
+        "cdp": [
+            {
+                "type": "cisco_ios",
+                "name": "Cisco IOS/IOS-XE",
+                "description": "Parser for 'show cdp neighbors detail' output"
+            },
+            {
+                "type": "cisco_nxos",
+                "name": "Cisco NX-OS",
+                "description": "Parser for 'show cdp neighbors detail' output (NX-OS)"
+            },
+            {
+                "type": "generic",
+                "name": "Generic neighbor table",
+                "description": "Parser for a table with local port / remote device / remote port columns"
+            },
+            {
+                "type": "arista_eos",
+                "name": "Arista EOS",
+                "description": "Parser for 'show cdp neighbors detail' output (EOS)"
+            }
+        ],
+        "interfaces": [
+            {
+                "type": "cisco_ios",
+                "name": "Cisco IOS/IOS-XE",
+                "description": "Parser for 'show interfaces status' output"
+            },
+            {
+                "type": "cisco_nxos",
+                "name": "Cisco NX-OS",
+                "description": "Parser for 'show interface status' output (NX-OS)"
+            },
+            {
+                "type": "nokia_sros",
+                "name": "Nokia SR OS",
+                "description": "Parser for 'show port' output"
+            },
+            {
+                "type": "dell_os10",
+                "name": "Dell OS10",
+                "description": "Parser for 'show interface status' output"
+            },
+            {
+                "type": "generic",
+                "name": "Generic interface table",
+                "description": "Parser for a table with interface name / status / speed columns"
+            },
+            {
+                "type": "arista_eos",
+                "name": "Arista EOS",
+                "description": "Parser for 'show interfaces status' output (EOS)"
+            },
+            {
+                "type": "hpe_procurve",
+                "name": "HPE ProCurve",
+                "description": "Parser for HPE ProCurve interface status output"
+            },
+            {
+                "type": "huawei_vrp",
+                "name": "Huawei VRP",
+                "description": "Parser for Huawei VRP interface brief output"
+            },
+            {
+                "type": "h3c_comware",
+                "name": "H3C / Comware",
+                "description": "Parser for 'display interface brief' output"
             }
         ]
     }
@@ -167,7 +346,7 @@ class TestConnectionRequest(BaseModel):
     switch_port: int | None = None
     cli_transport: Literal['ssh', 'telnet'] = 'ssh'
     template_id: int
-    test_type: Literal['arp', 'mac']
+    test_type: Literal['arp', 'mac', 'lldp', 'cdp', 'interfaces']
 
 
 class TestConnectionResponse(BaseModel):
@@ -201,6 +380,12 @@ class TemplateMatchPreviewResponse(BaseModel):
     arp_parser_type: str | None = None
     mac_command: str | None = None
     mac_parser_type: str | None = None
+    lldp_command: str | None = None
+    lldp_parser_type: str | None = None
+    cdp_command: str | None = None
+    cdp_parser_type: str | None = None
+    interfaces_command: str | None = None
+    interfaces_parser_type: str | None = None
     is_builtin: bool | None = None
     message: str
 
@@ -263,6 +448,15 @@ async def create_command_template(
             mac_command=template.mac_command,
             mac_parser_type=template.mac_parser_type,
             mac_enabled=template.mac_enabled,
+            lldp_command=template.lldp_command,
+            lldp_parser_type=template.lldp_parser_type,
+            lldp_enabled=template.lldp_enabled,
+            cdp_command=template.cdp_command,
+            cdp_parser_type=template.cdp_parser_type,
+            cdp_enabled=template.cdp_enabled,
+            interfaces_command=template.interfaces_command,
+            interfaces_parser_type=template.interfaces_parser_type,
+            interfaces_enabled=template.interfaces_enabled,
             priority=template.priority,
             description=template.description,
             enabled=template.enabled,
@@ -316,6 +510,15 @@ async def preview_command_template_match(
             'mac_command': t.mac_command,
             'mac_parser_type': t.mac_parser_type,
             'mac_enabled': t.mac_enabled,
+            'lldp_command': t.lldp_command,
+            'lldp_parser_type': t.lldp_parser_type,
+            'lldp_enabled': t.lldp_enabled,
+            'cdp_command': t.cdp_command,
+            'cdp_parser_type': t.cdp_parser_type,
+            'cdp_enabled': t.cdp_enabled,
+            'interfaces_command': t.interfaces_command,
+            'interfaces_parser_type': t.interfaces_parser_type,
+            'interfaces_enabled': t.interfaces_enabled,
             'priority': t.priority,
             'enabled': t.enabled,
             'description': t.description,
@@ -353,6 +556,12 @@ async def preview_command_template_match(
         arp_parser_type=matched_template.get('arp_parser_type'),
         mac_command=matched_template.get('mac_command'),
         mac_parser_type=matched_template.get('mac_parser_type'),
+        lldp_command=matched_template.get('lldp_command'),
+        lldp_parser_type=matched_template.get('lldp_parser_type'),
+        cdp_command=matched_template.get('cdp_command'),
+        cdp_parser_type=matched_template.get('cdp_parser_type'),
+        interfaces_command=matched_template.get('interfaces_command'),
+        interfaces_parser_type=matched_template.get('interfaces_parser_type'),
         is_builtin=bool(matched_template.get('is_builtin', source == 'builtin')),
         message=(
             f"已匹配{'数据库' if source == 'database' else '内置'}模板: "
@@ -484,6 +693,15 @@ async def test_command_template(
         'mac_command': template.mac_command,
         'mac_parser_type': template.mac_parser_type,
         'mac_enabled': template.mac_enabled,
+        'lldp_command': template.lldp_command,
+        'lldp_parser_type': template.lldp_parser_type,
+        'lldp_enabled': template.lldp_enabled,
+        'cdp_command': template.cdp_command,
+        'cdp_parser_type': template.cdp_parser_type,
+        'cdp_enabled': template.cdp_enabled,
+        'interfaces_command': template.interfaces_command,
+        'interfaces_parser_type': template.interfaces_parser_type,
+        'interfaces_enabled': template.interfaces_enabled,
         'priority': template.priority,
         'enabled': template.enabled
     }
@@ -531,10 +749,43 @@ async def test_command_template(
                 sample_output=str(entries[:3]) if entries else "No entries found"
             )
 
+        elif test_request.test_type in ('lldp', 'cdp', 'interfaces'):
+            enabled = getattr(template, f'{test_request.test_type}_enabled', True)
+            command = getattr(template, f'{test_request.test_type}_command', None)
+            if not enabled or not command:
+                return TestConnectionResponse(
+                    success=False,
+                    message=f"{test_request.test_type.upper()} collection is not enabled for this template",
+                    error=f"{test_request.test_type.upper()} disabled"
+                )
+
+            collector = {
+                'lldp': cli_service.collect_lldp_neighbors_cli,
+                'cdp': cli_service.collect_cdp_neighbors_cli,
+                'interfaces': cli_service.collect_interfaces_cli,
+            }[test_request.test_type]
+            result = collector(
+                test_request.switch_ip,
+                switch_config,
+                [template_dict]
+            ) or {}
+            entries = result.get('entries') or []
+            collect_status = result.get('status') or 'ok'
+            return TestConnectionResponse(
+                success=collect_status != 'error',
+                message=(
+                    f"{test_request.test_type.upper()} collection {collect_status}: "
+                    f"{len(entries)} entries"
+                ),
+                entries_count=len(entries),
+                sample_output=str(entries[:3]) if entries else (result.get('message') or "No entries found"),
+                error=(result.get('message') or "") if collect_status == 'error' else ""
+            )
+
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="test_type must be 'arp' or 'mac'"
+                detail="test_type must be 'arp', 'mac', 'lldp', 'cdp' or 'interfaces'"
             )
 
     except Exception as e:

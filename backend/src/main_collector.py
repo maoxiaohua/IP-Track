@@ -6,8 +6,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.v1 import discovery, command_templates, snmp_oid_overrides
+from api.v1 import discovery, command_templates, snmp_oid_overrides, topology
 from api.routes import network
+# models/__init__.py 为空：拓扑四张表必须显式导入，否则 metadata 里没有它们。
+from models.topology import (  # noqa: F401
+    LldpNeighbor, SwitchInterface, TopologyLink, TopologyUnknownNode,
+)
 from services.network_scheduler import start_collection_scheduler, stop_collection_scheduler
 from services.collection_worker import worker_pool
 from services.switch_discovery import switch_discovery_service
@@ -66,6 +70,7 @@ app.include_router(network.router, prefix=settings.API_V1_PREFIX)
 app.include_router(discovery.router, prefix=settings.API_V1_PREFIX)
 app.include_router(command_templates.router, prefix=settings.API_V1_PREFIX)
 app.include_router(snmp_oid_overrides.router, prefix=settings.API_V1_PREFIX)
+app.include_router(topology.router, prefix=settings.API_V1_PREFIX)
 
 @app.get("/health")
 async def health():

@@ -180,6 +180,7 @@
             <el-option label="Cisco" value="cisco" />
             <el-option label="Dell" value="dell" />
             <el-option label="Alcatel-Lucent" value="alcatel" />
+            <el-option label="H3C" value="h3c" />
           </el-select>
         </el-form-item>
 
@@ -869,7 +870,17 @@ const handleSave = async () => {
         await switchesApi.update(editingSwitch.value.id, updateData)
         ElMessage.success('Switch updated successfully')
       } else {
-        await switchesApi.create(switchForm)
+        const createData: SwitchCreate = { ...switchForm }
+        // 逐台凭据不是必填项：引用模板时凭据来自模板，SNMP 关闭时根本用不上。
+        // 这两种情况下空串发过去只会触发后端「用户名/口令必填」的校验错误，
+        // 因此一律不发（后端快照里也就不会留空串）。
+        if (switchForm.snmp_profile_id || !switchForm.snmp_enabled) {
+          delete createData.snmp_username
+          delete createData.snmp_auth_password
+          delete createData.snmp_priv_password
+          delete createData.snmp_community
+        }
+        await switchesApi.create(createData)
         ElMessage.success('Switch created successfully')
       }
       showAddDialog.value = false
@@ -1563,8 +1574,7 @@ onUnmounted(() => {
 
 <style scoped>
 .switches-view {
-  max-width: 1400px;
-  margin: 0 auto;
+  width: 100%;
 }
 
 .card-header {

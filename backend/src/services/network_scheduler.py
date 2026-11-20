@@ -186,6 +186,17 @@ class NetworkCollectionScheduler:
                 max_instances=1
             )
 
+            # Add topology collection job (LLDP/CDP neighbors + interface inventory)
+            if settings.FEATURE_TOPOLOGY:
+                self.scheduler.add_job(
+                    self._run_topology_collection,
+                    trigger=IntervalTrigger(minutes=settings.TOPOLOGY_COLLECTION_INTERVAL_MINUTES),
+                    id='topology_collection',
+                    name='Topology Collection (LLDP/CDP)',
+                    replace_existing=True,
+                    max_instances=1
+                )
+
             logger.info(f"Starting APScheduler with {len(self.scheduler.get_jobs())} jobs")
             self.scheduler.start()
             self.is_running = True
@@ -197,6 +208,11 @@ class NetworkCollectionScheduler:
             logger.info(f"IPAM history cleanup scheduled (daily at {settings.ALARM_CLEANUP_HOUR:02d}:20)")
             logger.info(f"IPAM auto-scan job scheduled (interval: {self.ipam_scan_interval_minutes} min)")
             logger.info(f"Optical module collection job scheduled (interval: {self.optical_module_interval_minutes} min)")
+            if settings.FEATURE_TOPOLOGY:
+                logger.info(
+                    f"Topology collection job scheduled "
+                    f"(interval: {settings.TOPOLOGY_COLLECTION_INTERVAL_MINUTES} min)"
+                )
             asyncio.create_task(
                 self.trigger_startup_catchup(
                     include_collection=True,
@@ -759,6 +775,44 @@ class NetworkCollectionScheduler:
         logger.info(f"Optical job creation finished in {elapsed:.1f}s (workers will execute asynchronously)")
 
 
+    async def _run_topology_collection(self):
+        """Run scheduled topology collection, then rebuild derived links."""
+        if not settings.FEATURE_TOPOLOGY:
+            logger.info("Topology disabled (FEATURE_TOPOLOGY=False), skip scheduled collection")
+            return
+        logger.info("Scheduled topology collection started")
+        start_time = datetime.now()
+
+        try:
+            # Import here to avoid circular dependency
+            from services.topology_service import collect_switches_topology, derive_links
+
+            async for db in get_db():
+                try:
+                    # collect_switches_topology 内部按 TOPOLOGY_MAX_COLLECT_CONCURRENCY 限流，
+                    # 网络阶段并发、入库串行，避免 1000 台同时 SNMP 打爆网络。
+                    summaries = await collect_switches_topology(db)
+                    # 先提交采集事实，再推导链路：derive 失败也不会丢原始邻居数据。
+                    await db.commit()
+                    result = await derive_links(db)
+                    await db.commit()
+                    logger.info(
+                        f"Topology collection finished: {len(summaries)} switches, "
+                        f"{result.get('links', 0)} links "
+                        f"({result.get('confirmed', 0)} confirmed, {result.get('stale', 0)} stale)"
+                    )
+                except Exception as e:
+                    logger.error(f"Topology collection failed: {str(e)}", exc_info=True)
+                    await db.rollback()
+                finally:
+                    break  # Only need one iteration
+
+        except Exception as e:
+            logger.error(f"Topology scheduler error: {str(e)}", exc_info=True)
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"Topology collection finished in {elapsed:.1f}s")
+
     async def run_now(self):
         """Trigger immediate collection (outside of schedule)"""
         logger.info("Manual collection triggered")
@@ -822,6 +876,17 @@ async def start_collection_scheduler():
                 replace_existing=True,
                 max_instances=1
             )
+
+            # Add topology collection job (LLDP/CDP neighbors + interface inventory)
+            if settings.FEATURE_TOPOLOGY:
+                scheduler.add_job(
+                    network_scheduler._run_topology_collection,
+                    trigger=IntervalTrigger(minutes=settings.TOPOLOGY_COLLECTION_INTERVAL_MINUTES),
+                    id='topology_collection',
+                    name='Topology Collection (LLDP/CDP)',
+                    replace_existing=True,
+                    max_instances=1
+                )
 
             # Add alarm cleanup job
             scheduler.add_job(

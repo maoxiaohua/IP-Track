@@ -56,6 +56,8 @@ PUBLIC_READ_POST_PATHS = frozenset({
     f"{settings.API_V1_PREFIX}/command-templates/match-preview",
     # Dry-run subnet parser used by the probe page before starting a sweep.
     f"{settings.API_V1_PREFIX}/subnet-probe/parse",
+    # Read-only .vsdx rendering: the upload is parsed to SVG and discarded.
+    f"{settings.API_V1_PREFIX}/visio/parse",
 })
 
 

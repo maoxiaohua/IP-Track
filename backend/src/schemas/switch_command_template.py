@@ -22,6 +22,18 @@ class SwitchCommandTemplateBase(BaseModel):
     mac_parser_type: Optional[str] = Field(None, max_length=50, description="Parser type for MAC output")
     mac_enabled: bool = Field(True, description="Enable MAC collection via CLI")
 
+    lldp_command: Optional[str] = Field(None, description="CLI command to collect LLDP neighbors")
+    lldp_parser_type: Optional[str] = Field(None, max_length=50, description="Parser type for LLDP output")
+    lldp_enabled: bool = Field(True, description="Enable LLDP neighbor collection via CLI")
+
+    cdp_command: Optional[str] = Field(None, description="CLI command to collect CDP neighbors")
+    cdp_parser_type: Optional[str] = Field(None, max_length=50, description="Parser type for CDP output")
+    cdp_enabled: bool = Field(True, description="Enable CDP neighbor collection via CLI")
+
+    interfaces_command: Optional[str] = Field(None, description="CLI command to list interfaces")
+    interfaces_parser_type: Optional[str] = Field(None, max_length=50, description="Parser type for interface output")
+    interfaces_enabled: bool = Field(True, description="Enable interface inventory collection via CLI")
+
     priority: int = Field(100, ge=0, le=1000, description="Priority (higher = match first)")
     description: Optional[str] = Field(None, description="Template description")
     enabled: bool = Field(True, description="Enable this template")
@@ -46,6 +58,18 @@ class SwitchCommandTemplateUpdate(BaseModel):
     mac_command: Optional[str] = None
     mac_parser_type: Optional[str] = Field(None, max_length=50)
     mac_enabled: Optional[bool] = None
+
+    lldp_command: Optional[str] = None
+    lldp_parser_type: Optional[str] = Field(None, max_length=50)
+    lldp_enabled: Optional[bool] = None
+
+    cdp_command: Optional[str] = None
+    cdp_parser_type: Optional[str] = Field(None, max_length=50)
+    cdp_enabled: Optional[bool] = None
+
+    interfaces_command: Optional[str] = None
+    interfaces_parser_type: Optional[str] = Field(None, max_length=50)
+    interfaces_enabled: Optional[bool] = None
 
     priority: Optional[int] = Field(None, ge=0, le=1000)
     description: Optional[str] = None

@@ -156,7 +156,7 @@ async def create_switch(
         if switch_data.enable_password:
             enable_password_encrypted = credential_encryption.encrypt(switch_data.enable_password)
 
-        # Encrypt SNMP credentials (required)
+        # Encrypt SNMP credentials (仅在 snmp_enabled=True 且未引用模板时需要)
         # 引用了模板就**一个口令都不加密、不留存**：凭据整体以模板为准，这里存一份
         # 副本正是这次改造要消灭的东西。也正因为口令可能为空，下面几行必须先判空，
         # 否则 encrypt(None) 会直接抛异常，新增交换机整个接口 500。
@@ -193,7 +193,7 @@ async def create_switch(
             enable_password_encrypted=enable_password_encrypted,
             connection_timeout=switch_data.connection_timeout,
 
-            # SNMP fields (required)
+            # SNMP fields (snmp_enabled=False 时只是占位值，不参与采集)
             snmp_enabled=switch_data.snmp_enabled,
             snmp_version=switch_data.snmp_version,
             snmp_port=switch_data.snmp_port,
@@ -214,7 +214,7 @@ async def create_switch(
         await db.commit()
         await db.refresh(switch)
 
-        logger.info(f"Created switch with SNMP: {switch.name} ({switch.ip_address})")
+        logger.info(f"Created switch: {switch.name} ({switch.ip_address}), snmp_enabled={switch.snmp_enabled}")
         return switch
 
     except HTTPException:
@@ -456,6 +456,11 @@ async def update_switch(
             update_data['password_encrypted'] = credential_encryption.encrypt(update_data.pop('password'))
         elif 'password' in update_data:
             update_data.pop('password')
+
+        # 空串表示「留空不改」：前端把没填的输入框当 '' 发过来很常见，
+        # 直接写库会把已有用户名清掉。
+        if 'username' in update_data and not update_data['username']:
+            update_data.pop('username')
 
         if 'enable_password' in update_data and update_data['enable_password']:
             update_data['enable_password_encrypted'] = credential_encryption.encrypt(update_data.pop('enable_password'))
@@ -1355,23 +1360,21 @@ async def collect_switch_device_info(
             await db.refresh(switch)
             logger.info(f"✅ Updated device info for {switch.ip_address}: {updated_fields}")
 
-        # Collect chassis serial via SNMP for duplicate detection
-        if switch_has_snmp_credentials(switch):
-            try:
-                from services.snmp_service import snmp_service as _snmp_svc
-                # 凭据走统一解析：引用了模板就以模板为准，否则用本机自带那份
-                serial = await _snmp_svc.get_chassis_serial(
-                    str(switch.ip_address), build_switch_snmp_config(switch)
-                )
-                if serial and serial != switch.serial_number:
-                    switch.serial_number = serial
-                    db.add(switch)
-                    await db.commit()
-                    await db.refresh(switch)
-                    updated_fields.append('serial_number')
-                    logger.info(f"Serial number for {switch.name}: {serial}")
-            except Exception as e:
-                logger.debug(f"Serial collection failed for {switch.name}: {e}")
+        # Collect chassis serial for duplicate detection.
+        # 与自动采集共用同一实现：非 Dell 走 SNMP(ENTITY-MIB)，Dell 直接走 CLI
+        # 'show inventory'（其 ENTITY-MIB 返回的是部件号/NA，不是服务标签）。
+        # 以前这里只走 SNMP，Dell 新机永远拿不到 SN。
+        try:
+            serial_before = switch.serial_number
+            serial = await network_data_collector.collect_chassis_serial(db, switch)
+            if serial and serial != serial_before:
+                db.add(switch)
+                await db.commit()
+                await db.refresh(switch)
+                updated_fields.append('serial_number')
+                logger.info(f"Serial number for {switch.name}: {serial}")
+        except Exception as e:
+            logger.debug(f"Serial collection failed for {switch.name}: {e}")
 
         # Detect duplicate switches based on hostname/serial
         try:

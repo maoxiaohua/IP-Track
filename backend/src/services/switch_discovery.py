@@ -32,6 +32,8 @@ class SwitchDiscoveryService:
         '1.3.6.1.4.1.6027': 'dell',    # Force10 Networks (now Dell EMC)
         '1.3.6.1.4.1.674':  'dell',    # Dell Inc.
         '1.3.6.1.4.1.7050': 'alcatel', # Nokia SR Linux
+        '1.3.6.1.4.1.25506': 'h3c',    # New H3C Technologies
+        '1.3.6.1.4.1.11':   'hpe',     # HP (ProCurve / HP 品牌 Comware，见 _discover_via_snmp)
     }
 
     def _detect_vendor_from_oid(self, sys_object_id: str) -> Optional[str]:
@@ -45,7 +47,8 @@ class SwitchDiscoveryService:
             return None
         # Dotted numeric form: "1.3.6.1.4.1.ENTERPRISE..."
         for oid_prefix, vendor in self.VENDOR_OIDS.items():
-            if sys_object_id.startswith(oid_prefix):
+            # 必须在企业号边界上匹配，否则 '...1.4.1.11' 会误吞 110/111 等企业号
+            if sys_object_id == oid_prefix or sys_object_id.startswith(oid_prefix + '.'):
                 logger.debug(f"Vendor '{vendor}' detected from sysObjectID: {sys_object_id}")
                 return vendor
         # Named form: "SNMPv2-SMI::enterprises.6527.1.3.3"
@@ -92,6 +95,11 @@ class SwitchDiscoveryService:
         # Juniper
         if any(k in d for k in ('juniper', 'junos', 'ex series', 'qfx', 'srx')):
             return 'juniper'
+
+        # H3C / HP Comware (必须在 Cisco 之前判断：Comware banner 里也可能带 HP/HPE 字样)
+        # sysDescr: "H3C Comware Software, Version 7.1.070, ..." / "H3C S5560X-30C-EI uptime is ..."
+        if any(k in d for k in ('h3c', 'comware')):
+            return 'h3c'
 
         # Cisco - use specific phrases, NOT bare 'ios' to avoid false positives
         if any(k in d for k in ('cisco ios', 'cisco nexus', 'ios-xe', 'ios xe',
@@ -220,6 +228,22 @@ class SwitchDiscoveryService:
 
             return 'Unknown'
 
+        elif vendor == 'h3c':
+            # Comware: "... H3C S5560X-30C-EI uptime is 0 week, 0 day ..."
+            m = re.search(
+                r'\bH3C\s+([A-Za-z0-9][A-Za-z0-9._/\-]*)\s+uptime\s+is',
+                d, re.IGNORECASE
+            )
+            if m:
+                return m.group(1)
+
+            # 部分 V5 版本只在 banner 里给出系列名： "H3C S5120-28P-SI Software Version ..."
+            m = re.search(r'\bH3C\s+([A-Za-z]{1,6}\d{3,5}[A-Za-z0-9\-]*)', d, re.IGNORECASE)
+            if m:
+                return m.group(1)
+
+            return 'Unknown'
+
         # Generic fallback: "Model: X"
         m = re.search(r'model[:\s]+(\S+)', d, re.IGNORECASE)
         if m:
@@ -233,6 +257,7 @@ class SwitchDiscoveryService:
         Each vendor has a different output format.
         """
         lines = show_version_output.split('\n')
+        import re
         model = 'Unknown'
 
         if vendor == 'cisco':
@@ -315,6 +340,25 @@ class SwitchDiscoveryService:
                         if len(parts) >= 2:
                             model = parts[-1].strip()
                             break
+
+        elif vendor == 'h3c':
+            # Comware `display version`: "H3C S5560X-30C-EI uptime is 0 week, 0 day ..."
+            for line in lines:
+                m = re.search(r'\bH3C\s+(\S+)\s+uptime\s+is', line, re.IGNORECASE)
+                if m:
+                    model = m.group(1)
+                    break
+
+            # 没有 uptime 行时的兜底：以 H3C 开头的型号行
+            if model == 'Unknown':
+                for line in lines:
+                    m = re.search(
+                        r'^\s*H3C\s+([A-Za-z]{1,6}\d{3,5}[A-Za-z0-9\-]*)',
+                        line, re.IGNORECASE
+                    )
+                    if m:
+                        model = m.group(1)
+                        break
 
         # Generic fallback
         if model == 'Unknown':
@@ -445,13 +489,22 @@ class SwitchDiscoveryService:
                             logger.info(f"Found hostname via 'system name': {hostname}")
                             return hostname
 
+                # H3C Comware format: "sysname SWITCHNAME"
+                if line_lower.startswith('sysname '):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        hostname = parts[1].strip().strip('"').strip("'")
+                        if hostname:
+                            logger.info(f"Found hostname via 'sysname': {hostname}")
+                            return hostname
+
             # If not found in config, try to get from prompt
             try:
                 # Get the prompt (often includes hostname)
                 if hasattr(conn, 'find_prompt'):
                     prompt = conn.find_prompt()
                     # Remove common prompt characters
-                    hostname = prompt.strip().rstrip('#>$').strip()
+                    hostname = prompt.strip().strip('<>[]').rstrip('#>$').strip()
                     if hostname and len(hostname) > 0 and len(hostname) < 64:
                         logger.info(f"Found hostname from prompt: {hostname}")
                         return hostname
@@ -480,6 +533,7 @@ class SwitchDiscoveryService:
                 ('nokia_srl',     'alcatel'),  # Nokia SR Linux (7220, etc.)
                 ('dell_os10',     'dell'),      # Dell EMC OS10
                 ('juniper_junos', 'juniper'),   # Juniper JunOS
+                ('hp_comware',    'h3c'),       # H3C Comware（必须排在 cisco_ios 之前）
                 ('cisco_ios',     'cisco'),     # Cisco IOS / IOS-XE
                 ('alcatel_aos',   'alcatel'),   # Alcatel AOS (OmniSwitch)
             ]
@@ -500,8 +554,13 @@ class SwitchDiscoveryService:
 
                     if conn:
                         # Step 1: Get show version output (vendor-independent command)
+                        # Comware 不支持 'show version'，必须用 'display version'
+                        probe_command = (
+                            'display version' if device_type == 'hp_comware'
+                            else 'show version'
+                        )
                         try:
-                            output = conn.send_command('show version', read_timeout=15)
+                            output = conn.send_command(probe_command, read_timeout=15)
                         except Exception:
                             output = ''
 
@@ -510,6 +569,15 @@ class SwitchDiscoveryService:
 
                         # Step 3: Fall back to the device_type's default vendor
                         if not vendor:
+                            if device_type == 'hp_comware':
+                                # Comware banner 必含 "Comware"/"H3C"；识别不到说明
+                                # 不是 H3C（例如 Cisco 返回 '% Invalid input'），
+                                # 不能回退成 h3c，否则会误判厂商。
+                                logger.debug(
+                                    f"{ip}: hp_comware probe matched no Comware banner, "
+                                    f"skipping device_type"
+                                )
+                                continue
                             vendor = default_vendor
                             logger.debug(
                                 f"{ip}: vendor not found in 'show version', "
@@ -524,6 +592,9 @@ class SwitchDiscoveryService:
                             elif device_type == 'dell_os10':
                                 hostname_output = conn.send_command(
                                     'show running-configuration | grep hostname', read_timeout=15)
+                            elif device_type == 'hp_comware':
+                                hostname_output = conn.send_command(
+                                    'display current-configuration | include sysname', read_timeout=15)
                             elif device_type == 'cisco_ios':
                                 hostname_output = conn.send_command(
                                     'show running-config | include hostname', read_timeout=15)
@@ -667,6 +738,11 @@ class SwitchDiscoveryService:
                 vendor = self._detect_vendor_from_descr(sys_descr)
             if not vendor:
                 vendor = 'unknown'
+
+            # HP 企业号 11 既可能是 ProCurve 也可能是 HP 品牌 Comware，
+            # 只有 sysDescr 明确写了 Comware 才归为 h3c。
+            if vendor == 'hpe' and sys_descr and 'comware' in sys_descr.lower():
+                vendor = 'h3c'
 
             # Extract model from sysDescr
             model = 'Unknown'

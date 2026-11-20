@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 const Home = () => import('@/views/Home.vue')
 const Switches = () => import('@/views/Switches.vue')
 const SwitchDetail = () => import('@/views/SwitchDetail.vue')
+const Topology = () => import('@/views/Topology.vue')
 const History = () => import('@/views/History.vue')
 const Discovery = () => import('@/views/Discovery.vue')
 const IPAM = () => import('@/views/IPAM_Simple.vue')
@@ -16,6 +17,7 @@ const SNMPConfig = () => import('@/views/SNMPConfig.vue')
 const Settings = () => import('@/views/Settings.vue')
 const BMCReset = () => import('@/views/BMCReset.vue')
 const SubnetProbe = () => import('@/views/SubnetProbe.vue')
+const VisioViewer = () => import('@/views/VisioViewer.vue')
 const Login = () => import('@/views/Login.vue')
 
 const router = createRouter({
@@ -41,6 +43,12 @@ const router = createRouter({
       name: 'SwitchDetail',
       component: SwitchDetail,
       meta: { title: 'Switch Detail' }
+    },
+    {
+      path: '/topology',
+      name: 'Topology',
+      component: Topology,
+      meta: { title: 'Network Topology', icon: 'Share' }
     },
     {
       path: '/discovery',
@@ -119,6 +127,12 @@ const router = createRouter({
       name: 'SubnetProbe',
       component: SubnetProbe,
       meta: { title: '子网存活快速探测', icon: 'Search' }
+    },
+    {
+      path: '/visio',
+      name: 'VisioViewer',
+      component: VisioViewer,
+      meta: { title: 'Visio 图纸查看', icon: 'Document' }
     },
     {
       // Login (and temporary-password change). Browsing stays open to guests.

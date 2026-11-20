@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     COLLECTION_INTERVAL_MINUTES: int = 120
     IPAM_SCAN_INTERVAL_MINUTES: int = 30
     OPTICAL_MODULE_INTERVAL_MINUTES: int = 720
+    TOPOLOGY_COLLECTION_INTERVAL_MINUTES: int = 360
+    TOPOLOGY_MAX_COLLECT_CONCURRENCY: int = 5  # 1000 台同时 SNMP 会打爆网络，需限流
     ALARM_CLEANUP_HOUR: int = 3
     ALARM_RETENTION_DAYS: int = 30
     COLLECTION_JOB_RETENTION_DAYS: int = 30
@@ -216,6 +218,50 @@ class Settings(BaseSettings):
         description="Number of finished subnet probe tasks kept in memory for the UI"
     )
 
+    # Visio (.vsdx) read-only viewer limits
+    VSDX_MAX_FILE_MB: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description="Maximum accepted .vsdx upload size in MB"
+    )
+    VSDX_MAX_TOTAL_MB: int = Field(
+        default=80,
+        ge=1,
+        le=500,
+        description="Maximum total uncompressed size of all zip entries in an .vsdx file, in MB"
+    )
+    VSDX_MAX_ENTRIES: int = Field(
+        default=5000,
+        ge=10,
+        le=50000,
+        description="Maximum number of zip entries accepted in an .vsdx file"
+    )
+    VSDX_MAX_PAGES: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        description="Maximum number of pages parsed from an .vsdx file"
+    )
+    VSDX_MAX_SHAPES_PER_PAGE: int = Field(
+        default=5000,
+        ge=10,
+        le=50000,
+        description="Maximum number of shapes rendered per Visio page"
+    )
+    VSDX_MAX_IMAGE_MB: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Maximum size of a single embedded image in an .vsdx file, in MB"
+    )
+    VSDX_MAX_SVG_MB: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="Maximum generated SVG size per Visio page, in MB"
+    )
+
     # IP Scan Timeouts (seconds)
     IP_SCAN_DNS_TIMEOUT: int = Field(
         default=5,
@@ -324,6 +370,7 @@ class Settings(BaseSettings):
     FEATURE_PORT_ANALYSIS: bool = True
     FEATURE_STATUS_CHECKER: bool = True
     FEATURE_QUERY_HISTORY: bool = True
+    FEATURE_TOPOLOGY: bool = True
 
     # Lightweight switch reachability checker
     STATUS_CHECK_INTERVAL_SECONDS: int = 300

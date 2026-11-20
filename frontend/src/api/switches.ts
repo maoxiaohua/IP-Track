@@ -4,7 +4,7 @@ export interface Switch {
   id: number
   name: string
   ip_address: string
-  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper'
+  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'h3c'
   model?: string
   serial_number?: string | null
   enabled: boolean
@@ -24,6 +24,7 @@ export interface Switch {
   // Data collection
   auto_collect_arp: boolean
   auto_collect_mac: boolean
+  auto_collect_topology: boolean
   last_arp_collection_at?: string | null
   last_mac_collection_at?: string | null
   last_optical_collection_at?: string | null
@@ -34,6 +35,17 @@ export interface Switch {
   last_optical_collection_status?: string | null
   last_optical_collection_message?: string | null
   last_optical_modules_count?: number | null
+
+  // Topology collection
+  sys_name?: string | null
+  chassis_id?: string | null
+  bridge_mac?: string | null
+  topology_collection_method?: string | null
+  last_topology_collection_at?: string | null
+  last_topology_success_at?: string | null
+  last_topology_collection_status?: string | null
+  last_topology_collection_message?: string | null
+  last_topology_neighbors_count?: number | null
   trunk_review_completed: boolean
   trunk_review_completed_at?: string | null
   trunk_review_note?: string | null
@@ -63,7 +75,7 @@ export interface Switch {
 export interface SwitchCreate {
   name: string
   ip_address: string
-  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper'
+  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'h3c'
   model?: string
   enabled?: boolean
 
@@ -79,6 +91,7 @@ export interface SwitchCreate {
   // Data collection
   auto_collect_arp?: boolean
   auto_collect_mac?: boolean
+  auto_collect_topology?: boolean
 
   // SNMP fields (required)
   snmp_enabled?: boolean
@@ -97,7 +110,7 @@ export interface SwitchCreate {
 export interface SwitchUpdate {
   name?: string
   ip_address?: string
-  vendor?: 'cisco' | 'dell' | 'alcatel' | 'juniper'
+  vendor?: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'h3c'
   model?: string
   cli_enabled?: boolean
   cli_transport?: 'ssh' | 'telnet'
@@ -111,6 +124,7 @@ export interface SwitchUpdate {
   // Data collection
   auto_collect_arp?: boolean
   auto_collect_mac?: boolean
+  auto_collect_topology?: boolean
 
   // SNMP fields
   snmp_enabled?: boolean

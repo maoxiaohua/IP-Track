@@ -600,6 +600,8 @@ const loadIPs = async () => {
   try {
     const params: any = {
       subnet_id: subnetId,
+      // 库存视图必须包含全部地址，不能像扇形图那样隐藏归档设备
+      include_archived: true,
       skip: (pagination.value.currentPage - 1) * pagination.value.pageSize,
       limit: pagination.value.pageSize
     }
@@ -632,6 +634,8 @@ const refreshDataInBackground = async () => {
 
     const params: any = {
       subnet_id: subnetId,
+      // 库存视图必须包含全部地址，不能像扇形图那样隐藏归档设备
+      include_archived: true,
       skip: (pagination.value.currentPage - 1) * pagination.value.pageSize,
       limit: pagination.value.pageSize
     }

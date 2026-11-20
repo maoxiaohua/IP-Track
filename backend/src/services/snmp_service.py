@@ -19,6 +19,8 @@ Standard SNMP OIDs used:
 """
 
 import fnmatch
+import ipaddress
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from pysnmp.hlapi.v3arch.asyncio import (
     SnmpEngine, UsmUserData, UdpTransportTarget, ContextData,
@@ -28,7 +30,7 @@ from pysnmp.hlapi.v3arch.asyncio import (
     usmDESPrivProtocol, usmAesCfb128Protocol, usmAesCfb192Protocol, usmAesCfb256Protocol
 )
 from pysnmp.proto.rfc1902 import OctetString
-from pysnmp.proto.rfc1905 import EndOfMibView
+from pysnmp.proto.rfc1905 import EndOfMibView, NoSuchObject, NoSuchInstance
 import asyncio
 from utils.logger import logger
 from core.security import decrypt_password
@@ -422,6 +424,43 @@ class SNMPService:
     OID_ENTITY_PHYS_CONTAINED_IN = '1.3.6.1.2.1.47.1.1.1.1.4'  # entPhysicalContainedIn
     OID_ENTITY_PHYS_CLASS = '1.3.6.1.2.1.47.1.1.1.1.5'  # entPhysicalClass
     OID_IF_HIGH_SPEED = '1.3.6.1.2.1.31.1.1.1.15'  # ifHighSpeed (in Mbps)
+
+    # ---- Topology: IF-MIB interface inventory ----
+    OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2'           # ifDescr
+    OID_IF_TYPE = '1.3.6.1.2.1.2.2.1.3'            # ifType
+    OID_IF_PHYS_ADDRESS = '1.3.6.1.2.1.2.2.1.6'    # ifPhysAddress
+    OID_IF_ADMIN_STATUS = '1.3.6.1.2.1.2.2.1.7'    # ifAdminStatus
+    OID_IF_OPER_STATUS = '1.3.6.1.2.1.2.2.1.8'     # ifOperStatus
+    OID_IF_ALIAS = '1.3.6.1.2.1.31.1.1.1.18'       # ifAlias
+    OID_BRIDGE_ADDRESS = '1.3.6.1.2.1.17.1.1.0'    # dot1dBaseBridgeAddress
+
+    # ---- Topology: LLDP-MIB ----
+    OID_LLDP_LOC_CHASSIS_ID_SUBTYPE = '1.0.8802.1.1.2.1.3.1.0'  # lldpLocChassisIdSubtype
+    OID_LLDP_LOC_CHASSIS_ID = '1.0.8802.1.1.2.1.3.2.0'          # lldpLocChassisId
+    OID_LLDP_LOC_SYS_NAME = '1.0.8802.1.1.2.1.3.3.0'            # lldpLocSysName
+    OID_LLDP_LOC_PORT_ID = '1.0.8802.1.1.2.1.3.7.1.2'           # lldpLocPortId
+    OID_LLDP_LOC_PORT_DESC = '1.0.8802.1.1.2.1.3.7.1.3'         # lldpLocPortDesc
+    # lldpRemEntry 列：索引(不为列) 之后依次为 1=chassisIdSubtype 2=chassisId
+    # 3=portIdSubtype 4=portId 5=portDesc 6=sysName 7=sysDesc 8=capSupported 9=capEnabled
+    OID_LLDP_REM_CHASSIS_ID_SUBTYPE = '1.0.8802.1.1.2.1.4.1.1'
+    OID_LLDP_REM_CHASSIS_ID = '1.0.8802.1.1.2.1.4.1.2'
+    OID_LLDP_REM_PORT_ID_SUBTYPE = '1.0.8802.1.1.2.1.4.1.3'
+    OID_LLDP_REM_PORT_ID = '1.0.8802.1.1.2.1.4.1.4'
+    OID_LLDP_REM_PORT_DESC = '1.0.8802.1.1.2.1.4.1.5'
+    OID_LLDP_REM_SYS_NAME = '1.0.8802.1.1.2.1.4.1.6'
+    OID_LLDP_REM_SYS_DESC = '1.0.8802.1.1.2.1.4.1.7'
+    OID_LLDP_REM_CAP_SUPPORTED = '1.0.8802.1.1.2.1.4.1.8'
+    OID_LLDP_REM_CAP_ENABLED = '1.0.8802.1.1.2.1.4.1.9'
+    # 管理地址表的索引 = TimeMark.LocalPortNum.RemIndex.Subtype.ManAddr（变长）
+    OID_LLDP_REM_MAN_ADDR_SUBTYPE = '1.0.8802.1.1.2.1.4.2.1.1'
+
+    # ---- Topology: CISCO-CDP-MIB ----
+    OID_CDP_GLOBAL_DEVICE_ID = '1.3.6.1.4.1.9.9.23.1.2.1.3.0'
+    # cdpCacheEntry 列：1=addressType 2=address 3=version 4=deviceId 5=devicePort 6=platform
+    OID_CDP_CACHE_ADDRESS = '1.3.6.1.4.1.9.9.23.1.2.1.1.2'
+    OID_CDP_CACHE_DEVICE_ID = '1.3.6.1.4.1.9.9.23.1.2.1.1.4'
+    OID_CDP_CACHE_DEVICE_PORT = '1.3.6.1.4.1.9.9.23.1.2.1.1.5'
+    OID_CDP_CACHE_PLATFORM = '1.3.6.1.4.1.9.9.23.1.2.1.1.6'
 
     def __init__(self):
         # Don't create a singleton engine - create per-request to avoid event loop issues
@@ -988,6 +1027,512 @@ class SNMPService:
             logger.error(f"Failed to collect MAC table from {switch_ip}: {str(e)}")
             return []
 
+    # ------------------------------------------------------------------
+    # 拓扑采集：接口清单 / LLDP / CDP / 设备身份
+    #
+    # 这三个采集方法都返回 {'status': ..., 'entries': []}，因为「设备不支持」
+    # 「支持但没有邻居」「采集失败」对拓扑推导是完全不同的三种情况：
+    #   - ok          ：本轮是完整结果，允许删除旧事实
+    #   - unsupported ：设备没有该 MIB，保留旧事实
+    #   - error       ：采集失败，保留旧事实（不能把一次超时当成拓扑消失）
+    # ------------------------------------------------------------------
+
+    def _auth_from_config(self, switch_config: Dict) -> Tuple[Any, int]:
+        """按 switch_config 构造 SNMP 凭据，返回 (auth_data, port)。"""
+        auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
+        priv_password = self._decrypt_optional_password(
+            switch_config.get('snmp_priv_password_encrypted')
+        )
+        auth_data = self._create_snmp_auth(
+            username=switch_config.get('snmp_username'),
+            auth_protocol=switch_config.get('snmp_auth_protocol'),
+            auth_password=auth_password,
+            priv_protocol=switch_config.get('snmp_priv_protocol'),
+            priv_password=priv_password,
+            snmp_version=switch_config.get('snmp_version'),
+        )
+        return auth_data, switch_config.get('snmp_port', 161)
+
+    async def _probe_oid(
+        self,
+        target_ip: str,
+        oid: str,
+        auth_data: UsmUserData,
+        port: int = 161,
+        timeout: int = 5,
+        retries: int = 1
+    ) -> Tuple[str, Any]:
+        """
+        带状态的 GET。_get_oid() 把「无此对象」和「超时/异常」都折叠成 None，
+        拓扑无法据此区分「设备不支持 LLDP」和「这次采集失败」，所以单独实现。
+
+        Returns:
+            (status, value)，status ∈ {'ok', 'no_such', 'error'}
+        """
+        engine: Optional[SnmpEngine] = None
+        try:
+            engine = SnmpEngine()
+            transport = await UdpTransportTarget.create(
+                (target_ip, port), timeout=timeout, retries=retries
+            )
+            errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                engine, auth_data, transport, ContextData(),
+                ObjectType(ObjectIdentity(oid))
+            )
+            if errorIndication:
+                logger.debug(f"SNMP probe error on {target_ip} OID {oid}: {errorIndication}")
+                return 'error', str(errorIndication)
+            if errorStatus:
+                status_text = errorStatus.prettyPrint()
+                if status_text.replace(' ', '').lower() == 'nosuchname':
+                    return 'no_such', None
+                logger.debug(f"SNMP probe errorStatus on {target_ip} OID {oid}: {status_text}")
+                return 'error', status_text
+            for varBind in varBinds:
+                value = varBind[1]
+                if isinstance(value, (NoSuchObject, NoSuchInstance)):
+                    return 'no_such', None
+                text = str(value)
+                if 'No Such Object' in text or 'No Such Instance' in text:
+                    return 'no_such', None
+                return 'ok', value
+            return 'no_such', None
+        except Exception as e:
+            logger.debug(f"SNMP probe exception for {target_ip} OID {oid}: {e}")
+            return 'error', str(e)
+        finally:
+            self._dispose_engine(engine)
+
+    async def _walk_many(
+        self,
+        target_ip: str,
+        bases: List[str],
+        auth_data: UsmUserData,
+        port: int,
+        timeout: int = 5
+    ) -> Dict[str, List[Tuple[str, any]]]:
+        """并发 WALK 多个列族；单列失败返回空表，不影响其它列。"""
+        results = await asyncio.gather(*[
+            self._walk_oid(target_ip, base, auth_data, port, timeout=timeout, retries=0)
+            for base in bases
+        ])
+        return dict(zip(bases, results))
+
+    @staticmethod
+    def _raw_octets(value) -> bytes:
+        if isinstance(value, OctetString):
+            return value.asOctets()
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        return str(value).encode('utf-8', errors='replace')
+
+    @staticmethod
+    def _to_int(value) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _string_value(value) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            text = str(value).strip()
+        except Exception:
+            return None
+        return text or None
+
+    def _format_lldp_identifier(self, value, subtype: Optional[int]) -> Optional[str]:
+        """LLDP chassisId / portId 按子类型格式化。"""
+        if value is None:
+            return None
+        raw = self._raw_octets(value)
+        if not raw:
+            return None
+        if subtype == 4 and len(raw) == 6:  # macAddress
+            return self._format_mac_address(raw)
+        if subtype == 5:  # networkAddress
+            address = self._format_network_address(raw)
+            if address:
+                return address
+        try:
+            text = raw.decode('utf-8').strip()
+            if text and text.isprintable():
+                return text
+        except UnicodeDecodeError:
+            pass
+        return raw.hex()
+
+    @staticmethod
+    def _format_network_address(raw: bytes) -> Optional[str]:
+        """LLDP networkAddress 第 1 字节是地址族：1=IPv4，2=IPv6。"""
+        if len(raw) == 5 and raw[0] == 1:
+            return str(ipaddress.IPv4Address(raw[1:]))
+        if len(raw) == 17 and raw[0] == 2:
+            return str(ipaddress.IPv6Address(raw[1:]))
+        return None
+
+    @staticmethod
+    def _man_addr_from_index(
+        subtype: int,
+        addr_parts: List[str]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """lldpRemManAddrTable 的地址写在索引里（变长），需整体还原。"""
+        try:
+            raw = bytes(int(part) for part in addr_parts)
+        except (TypeError, ValueError):
+            return None, None
+        if subtype == 1 and len(raw) == 4:
+            return str(ipaddress.IPv4Address(raw)), 'ipv4'
+        if subtype == 2 and len(raw) == 16:
+            return str(ipaddress.IPv6Address(raw)), 'ipv6'
+        return None, None
+
+    @staticmethod
+    def normalize_lag_key(if_name: Optional[str]) -> Optional[str]:
+        """把 ae0 / Port-Channel1 / Bundle-Ether10 等归一成同一个 LAG 键。"""
+        from services.topology_utils import normalize_lag_key as _normalize
+        return _normalize(if_name)
+
+    async def collect_interfaces(
+        self,
+        switch_ip: str,
+        switch_config: Dict,
+        oid_overrides: Optional[Dict[str, str]] = None
+    ) -> Dict:
+        """采集 IF-MIB 接口清单（名称/描述/别名/状态/速率/物理地址/LAG 键）。"""
+        try:
+            auth_data, port = self._auth_from_config(switch_config)
+            if not auth_data:
+                return {'status': 'error', 'entries': [], 'message': 'SNMP credentials unavailable'}
+
+            bases = [
+                self.OID_IF_NAME,
+                self.OID_IF_DESCR,
+                self.OID_IF_ALIAS,
+                self.OID_IF_TYPE,
+                self.OID_IF_ADMIN_STATUS,
+                self.OID_IF_OPER_STATUS,
+                self.OID_IF_HIGH_SPEED,
+                self.OID_IF_PHYS_ADDRESS,
+            ]
+            walked = await self._walk_many(switch_ip, bases, auth_data, port)
+
+            def by_index(base: str) -> Dict[int, Any]:
+                rows = {}
+                for oid_str, value in walked.get(base, []):
+                    try:
+                        rows[int(str(oid_str).split('.')[-1])] = value
+                    except (ValueError, IndexError):
+                        continue
+                return rows
+
+            names = by_index(self.OID_IF_NAME)
+            descrs = by_index(self.OID_IF_DESCR)
+            aliases = by_index(self.OID_IF_ALIAS)
+            types = by_index(self.OID_IF_TYPE)
+            admin = by_index(self.OID_IF_ADMIN_STATUS)
+            oper = by_index(self.OID_IF_OPER_STATUS)
+            speeds = by_index(self.OID_IF_HIGH_SPEED)
+            phys = by_index(self.OID_IF_PHYS_ADDRESS)
+
+            if not names and not descrs:
+                return {'status': 'error', 'entries': [], 'message': 'interface table is empty'}
+
+            status_map = {
+                '1': 'up', '2': 'down', '3': 'testing', '4': 'unknown',
+                '5': 'dormant', '6': 'notPresent', '7': 'lowerLayerDown',
+            }
+
+            entries = []
+            for if_index in sorted(set(names) | set(descrs)):
+                if_name = self._string_value(names.get(if_index))
+                phys_value = phys.get(if_index)
+                raw_phys = self._raw_octets(phys_value) if phys_value is not None else b''
+                entries.append({
+                    'if_index': if_index,
+                    'if_name': if_name,
+                    'if_descr': self._string_value(descrs.get(if_index)),
+                    'if_alias': self._string_value(aliases.get(if_index)),
+                    'if_type': self._to_int(types.get(if_index)),
+                    'admin_status': status_map.get(str(admin.get(if_index))) if if_index in admin else None,
+                    'oper_status': status_map.get(str(oper.get(if_index))) if if_index in oper else None,
+                    'speed_mbps': self._to_int(speeds.get(if_index)),
+                    'phys_address': self._format_mac_address(raw_phys) if len(raw_phys) == 6 else None,
+                    'lag_key': self.normalize_lag_key(if_name),
+                })
+
+            logger.info(f"Collected {len(entries)} interfaces from {switch_ip}")
+            return {'status': 'ok', 'entries': entries}
+
+        except Exception as e:
+            logger.error(f"Failed to collect interfaces from {switch_ip}: {str(e)}")
+            return {'status': 'error', 'entries': [], 'message': str(e)}
+
+    async def collect_lldp_neighbors(
+        self,
+        switch_ip: str,
+        switch_config: Dict,
+        oid_overrides: Optional[Dict[str, str]] = None
+    ) -> Dict:
+        """采集 LLDP-MIB 邻居事实（一条 = 本端某端口的一个远端邻居）。"""
+        try:
+            auth_data, port = self._auth_from_config(switch_config)
+            if not auth_data:
+                return {'status': 'error', 'entries': [], 'message': 'SNMP credentials unavailable'}
+
+            # 先探测 LLDP 是否实现。没有该 MIB 时 GET 返回 NoSuchObject，
+            # 与「支持但当前没有邻居（walk 为空）」必须区分。
+            probe_status, probe_value = await self._probe_oid(
+                switch_ip, self.OID_LLDP_LOC_CHASSIS_ID_SUBTYPE, auth_data, port
+            )
+            if probe_status == 'no_such':
+                return {'status': 'unsupported', 'entries': []}
+            if probe_status == 'error':
+                return {'status': 'error', 'entries': [], 'message': str(probe_value)}
+
+            columns = {
+                'chassis_subtype': self.OID_LLDP_REM_CHASSIS_ID_SUBTYPE,
+                'chassis_id': self.OID_LLDP_REM_CHASSIS_ID,
+                'port_subtype': self.OID_LLDP_REM_PORT_ID_SUBTYPE,
+                'port_id': self.OID_LLDP_REM_PORT_ID,
+                'port_desc': self.OID_LLDP_REM_PORT_DESC,
+                'sys_name': self.OID_LLDP_REM_SYS_NAME,
+                'sys_desc': self.OID_LLDP_REM_SYS_DESC,
+                'cap_supported': self.OID_LLDP_REM_CAP_SUPPORTED,
+                'cap_enabled': self.OID_LLDP_REM_CAP_ENABLED,
+            }
+            bases = list(columns.values()) + [
+                self.OID_LLDP_LOC_PORT_ID,
+                self.OID_LLDP_LOC_PORT_DESC,
+                self.OID_LLDP_REM_MAN_ADDR_SUBTYPE,
+            ]
+            walked = await self._walk_many(switch_ip, bases, auth_data, port)
+
+            local_ids: Dict[int, str] = {}
+            for oid_str, value in walked.get(self.OID_LLDP_LOC_PORT_ID, []):
+                port_num = self._to_int(str(oid_str).split('.')[-1])
+                if port_num is not None:
+                    local_ids[port_num] = self._format_lldp_identifier(value, None) or ''
+            local_descs: Dict[int, str] = {}
+            for oid_str, value in walked.get(self.OID_LLDP_LOC_PORT_DESC, []):
+                port_num = self._to_int(str(oid_str).split('.')[-1])
+                if port_num is not None:
+                    local_descs[port_num] = self._string_value(value) or ''
+
+            # lldpRemTable 索引 = TimeMark.LocalPortNum.RemIndex（3 段）
+            rows: Dict[Tuple[int, int, int], Dict[str, Any]] = {}
+            for field, base in columns.items():
+                for oid_str, value in walked.get(base, []):
+                    parts = self._oid_index_suffix(oid_str, base).split('.')
+                    if len(parts) != 3:
+                        continue
+                    try:
+                        key = (int(parts[0]), int(parts[1]), int(parts[2]))
+                    except ValueError:
+                        continue
+                    rows.setdefault(key, {})[field] = value
+
+            # lldpRemManAddrTable 索引 = TimeMark.LocalPortNum.RemIndex.Subtype.ManAddr
+            man_addrs: Dict[Tuple[int, int, int], Tuple[Optional[str], Optional[str]]] = {}
+            for oid_str, value in walked.get(self.OID_LLDP_REM_MAN_ADDR_SUBTYPE, []):
+                parts = self._oid_index_suffix(
+                    oid_str, self.OID_LLDP_REM_MAN_ADDR_SUBTYPE
+                ).split('.')
+                if len(parts) < 6:
+                    continue
+                try:
+                    key = (int(parts[0]), int(parts[1]), int(parts[2]))
+                    subtype_int = int(parts[3])
+                except ValueError:
+                    continue
+                address, address_type = self._man_addr_from_index(subtype_int, parts[4:])
+                if not address:
+                    continue
+                # 链路本地 IPv6 不参与身份判定
+                if address.lower().startswith('fe80'):
+                    continue
+                current = man_addrs.get(key)
+                if current is None or (current[1] == 'ipv6' and address_type == 'ipv4'):
+                    man_addrs[key] = (address, address_type)
+
+            entries = []
+            for key, row in rows.items():
+                _, local_port_num, _ = key
+                chassis_subtype = self._to_int(row.get('chassis_subtype'))
+                port_subtype = self._to_int(row.get('port_subtype'))
+                capability = row.get('cap_supported')
+                if capability is None:
+                    capability = row.get('cap_enabled')
+                mgmt_addr, mgmt_type = man_addrs.get(key, (None, None))
+                entries.append({
+                    'protocol': 'lldp',
+                    'local_if_index': local_port_num,
+                    'local_port_id': local_ids.get(local_port_num) or None,
+                    'local_port_desc': local_descs.get(local_port_num) or None,
+                    'remote_chassis_id': self._format_lldp_identifier(
+                        row.get('chassis_id'), chassis_subtype
+                    ),
+                    'remote_chassis_id_subtype': (
+                        str(chassis_subtype) if chassis_subtype is not None else None
+                    ),
+                    'remote_port_id': self._format_lldp_identifier(
+                        row.get('port_id'), port_subtype
+                    ),
+                    'remote_port_id_subtype': (
+                        str(port_subtype) if port_subtype is not None else None
+                    ),
+                    'remote_port_desc': self._string_value(row.get('port_desc')),
+                    'remote_sys_name': self._string_value(row.get('sys_name')),
+                    'remote_sys_desc': self._string_value(row.get('sys_desc')),
+                    'remote_mgmt_addr': mgmt_addr,
+                    'remote_mgmt_addr_type': mgmt_type,
+                    'ttl': None,
+                    'capability': self._raw_octets(capability).hex() if capability is not None else None,
+                })
+
+            logger.info(f"Collected {len(entries)} LLDP neighbors from {switch_ip}")
+            return {'status': 'ok', 'entries': entries}
+
+        except Exception as e:
+            logger.error(f"Failed to collect LLDP neighbors from {switch_ip}: {str(e)}")
+            return {'status': 'error', 'entries': [], 'message': str(e)}
+
+    async def collect_cdp_neighbors(
+        self,
+        switch_ip: str,
+        switch_config: Dict,
+        oid_overrides: Optional[Dict[str, str]] = None
+    ) -> Dict:
+        """采集 CISCO-CDP-MIB 邻居事实（仅 Cisco 系设备会返回数据）。"""
+        try:
+            auth_data, port = self._auth_from_config(switch_config)
+            if not auth_data:
+                return {'status': 'error', 'entries': [], 'message': 'SNMP credentials unavailable'}
+
+            probe_status, probe_value = await self._probe_oid(
+                switch_ip, self.OID_CDP_GLOBAL_DEVICE_ID, auth_data, port
+            )
+            if probe_status == 'no_such':
+                return {'status': 'unsupported', 'entries': []}
+            if probe_status == 'error':
+                return {'status': 'error', 'entries': [], 'message': str(probe_value)}
+
+            columns = {
+                'address': self.OID_CDP_CACHE_ADDRESS,
+                'device_id': self.OID_CDP_CACHE_DEVICE_ID,
+                'device_port': self.OID_CDP_CACHE_DEVICE_PORT,
+                'platform': self.OID_CDP_CACHE_PLATFORM,
+            }
+            walked = await self._walk_many(switch_ip, list(columns.values()), auth_data, port)
+
+            # cdpCacheTable 索引 = cdpCacheIfIndex.cdpCacheDeviceIndex（2 段）
+            rows: Dict[Tuple[int, int], Dict[str, Any]] = {}
+            for field, base in columns.items():
+                for oid_str, value in walked.get(base, []):
+                    parts = self._oid_index_suffix(oid_str, base).split('.')
+                    if len(parts) != 2:
+                        continue
+                    try:
+                        key = (int(parts[0]), int(parts[1]))
+                    except ValueError:
+                        continue
+                    rows.setdefault(key, {})[field] = value
+
+            entries = []
+            for (if_index, _device_index), row in rows.items():
+                raw_addr = row.get('address')
+                mgmt_addr = None
+                mgmt_type = None
+                if raw_addr is not None:
+                    addr_bytes = self._raw_octets(raw_addr)
+                    if len(addr_bytes) == 4:
+                        mgmt_addr = str(ipaddress.IPv4Address(addr_bytes))
+                        mgmt_type = 'ipv4'
+                    elif len(addr_bytes) == 16:
+                        mgmt_addr = str(ipaddress.IPv6Address(addr_bytes))
+                        mgmt_type = 'ipv6'
+                entries.append({
+                    'protocol': 'cdp',
+                    'local_if_index': if_index,
+                    'local_port_id': None,
+                    'local_port_desc': None,
+                    'remote_chassis_id': None,
+                    'remote_chassis_id_subtype': None,
+                    'remote_port_id': self._string_value(row.get('device_port')),
+                    'remote_port_id_subtype': None,
+                    'remote_port_desc': None,
+                    'remote_sys_name': self._string_value(row.get('device_id')),
+                    'remote_sys_desc': self._string_value(row.get('platform')),
+                    'remote_mgmt_addr': mgmt_addr,
+                    'remote_mgmt_addr_type': mgmt_type,
+                    'ttl': None,
+                    'capability': None,
+                })
+
+            logger.info(f"Collected {len(entries)} CDP neighbors from {switch_ip}")
+            return {'status': 'ok', 'entries': entries}
+
+        except Exception as e:
+            logger.error(f"Failed to collect CDP neighbors from {switch_ip}: {str(e)}")
+            return {'status': 'error', 'entries': [], 'message': str(e)}
+
+    async def get_topology_identity(
+        self,
+        switch_ip: str,
+        switch_config: Dict
+    ) -> Dict:
+        """
+        采集用于「对端身份解析」的本机标识：sysName、LLDP chassisId、桥 MAC。
+        三者都是可选字段，取不到不影响拓扑采集本身。
+        """
+        result = {
+            'status': 'error',
+            'sys_name': None,
+            'chassis_id': None,
+            'bridge_mac': None,
+        }
+        try:
+            auth_data, port = self._auth_from_config(switch_config)
+            if not auth_data:
+                return result
+
+            value = await self._get_oid(
+                switch_ip, self.OID_SYS_NAME, auth_data, port, timeout=5, log_errors=False
+            )
+            result['sys_name'] = self._string_value(value)
+
+            probe_status, probe_value = await self._probe_oid(
+                switch_ip, self.OID_LLDP_LOC_CHASSIS_ID_SUBTYPE, auth_data, port
+            )
+            if probe_status == 'ok':
+                chassis_subtype = self._to_int(probe_value)
+                chassis_value = await self._get_oid(
+                    switch_ip, self.OID_LLDP_LOC_CHASSIS_ID, auth_data, port,
+                    timeout=5, log_errors=False
+                )
+                result['chassis_id'] = self._format_lldp_identifier(
+                    chassis_value, chassis_subtype
+                )
+
+            bridge_value = await self._get_oid(
+                switch_ip, self.OID_BRIDGE_ADDRESS, auth_data, port,
+                timeout=5, log_errors=False
+            )
+            if bridge_value is not None:
+                raw_bridge = self._raw_octets(bridge_value)
+                if len(raw_bridge) == 6:
+                    result['bridge_mac'] = self._format_mac_address(raw_bridge)
+
+            if any(result[k] for k in ('sys_name', 'chassis_id', 'bridge_mac')):
+                result['status'] = 'ok'
+            return result
+
+        except Exception as e:
+            logger.debug(f"Failed to get topology identity from {switch_ip}: {e}")
+            return result
+
     async def get_hostname(
         self,
         switch_ip: str,
@@ -1257,6 +1802,15 @@ class SNMPService:
             if match:
                 result['os_version'] = match.group(1)
 
+        # H3C / Comware（含 HP 品牌的 Comware 设备）
+        elif 'comware' in descr_lower or 'h3c' in descr_lower:
+            result['os_type'] = 'network'
+            result['os_name'] = 'H3C Comware'
+            # "Comware Software, Version 7.1.070, Release ..." / "... Software Version 5.20.99"
+            match = re.search(r'Version\s+([0-9]+\.[0-9]+[^\s,)]*)', sys_descr, re.IGNORECASE)
+            if match:
+                result['os_version'] = match.group(1)
+
         # Dell Force10 OS
         elif 'force10' in descr_lower or ('dell' in descr_lower and 'os' in descr_lower):
             result['os_type'] = 'network'
@@ -1384,6 +1938,9 @@ class SNMPService:
                 # Enhanced vendor detection
                 if 'cisco' in descr_lower:
                     result['vendor'] = 'Cisco'
+                elif 'h3c' in descr_lower or 'comware' in descr_lower:
+                    # HP 企业号设备也可能跑 Comware，必须早于 'hp' 判断
+                    result['vendor'] = 'H3C'
                 elif 'dell' in descr_lower:
                     result['vendor'] = 'Dell'
                 elif 'hp' in descr_lower or 'hewlett' in descr_lower or 'hewlett-packard' in descr_lower:

@@ -11,6 +11,7 @@ from schemas.discovery import (
 from schemas.switch import SwitchCreate, SwitchResponse
 from services.switch_discovery import switch_discovery_service
 from services.switch_manager import switch_manager
+from services.network_data_collector import network_data_collector
 from services.cli_service import cli_service
 # 统一凭据解析：交换机可能引用 SNMP 模板，凭据不在自己行上。任何按交换机取
 # 凭据的地方都必须走这两个函数，直接读 switch.snmp_auth_password_encrypted
@@ -714,15 +715,15 @@ async def refresh_all_device_info(db: AsyncSession = Depends(get_db)):
                             except Exception as cli_err:
                                 logger.debug(f"CLI model fallback failed for {switch.ip_address}: {cli_err}")
 
-                        # Collect chassis serial number for duplicate detection
+                        # Collect chassis serial number for duplicate detection.
+                        # 与定时采集/手动采集共用同一实现：Dell 走 CLI 'show inventory'，
+                        # 其余厂商先 SNMP 再按需回退 CLI。以前这里只走 SNMP，Dell 永远拿不到 SN。
                         try:
-                            serial = await snmp_service.get_chassis_serial(
-                                str(switch.ip_address), snmp_config
-                            )
-                            if serial and serial != switch.serial_number:
-                                switch.serial_number = serial
+                            previous_serial = switch.serial_number
+                            serial = await network_data_collector.collect_chassis_serial(db, switch)
+                            if serial and serial != previous_serial:
                                 if 'serial_number' not in changes:
-                                    changes['serial_number'] = (switch.serial_number, serial)
+                                    changes['serial_number'] = (previous_serial, serial)
                                 logger.info(
                                     f"Serial number for {switch.ip_address}: {serial}"
                                 )

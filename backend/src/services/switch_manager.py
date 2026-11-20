@@ -1,12 +1,14 @@
 from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoTimeoutException, NetmikoAuthenticationException
 from typing import Optional, Dict
+import re
 from utils.logger import logger
 from core.security import credential_encryption
 from services.vendors.base import VendorHandler
 from services.vendors.cisco import CiscoHandler
 from services.vendors.dell import DellHandler
 from services.vendors.alcatel import AlcatelHandler
+from services.vendors.h3c import H3CHandler
 from services.cli_service import cli_service
 from models.switch import Switch
 
@@ -24,6 +26,7 @@ class SwitchManager:
             'cisco': CiscoHandler(),
             'dell': DellHandler(),
             'alcatel': AlcatelHandler(),
+            'h3c': H3CHandler(),
         }
 
     def get_vendor_handler(self, vendor: str) -> VendorHandler:
@@ -46,6 +49,7 @@ class SwitchManager:
             'cisco': 'cisco_ios',
             'dell': 'dell_os10',
             'alcatel': 'alcatel_aos',
+            'h3c': 'hp_comware',
         }
 
         device_type = device_type_map.get(switch.vendor.lower(), 'cisco_ios')
@@ -86,8 +90,34 @@ class SwitchManager:
             device_params = self._get_device_params(switch)
 
             with ConnectHandler(**device_params) as connection:
-                # Try to get hostname as a simple test
-                output = connection.send_command("show version", read_timeout=10)
+                # Comware 不支持 'show version'，必须用 'display version'
+                probe_command = (
+                    'display version'
+                    if (device_params.get('device_type') or '').startswith('hp_comware')
+                    else 'show version'
+                )
+                output = connection.send_command(probe_command, read_timeout=10)
+
+                # 设备不认识命令时会回显错误提示（常见于厂商/设备类型选错），
+                # 这种情况不能算连接成功，否则就是「伪成功」。
+                if re.search(
+                    r'%\s*(wrong parameter|unrecognized command|incomplete command|'
+                    r'too many parameters|ambiguous command)',
+                    (output or '').lower()
+                ):
+                    logger.warning(
+                        f"Switch {switch.name} rejected probe command '{probe_command}'"
+                    )
+                    return {
+                        'success': False,
+                        'message': f"Device rejected command '{probe_command}', "
+                                   f"please check vendor/device type",
+                        'details': {
+                            'connected': True,
+                            'command': probe_command,
+                            'output': output[:500],
+                        }
+                    }
 
                 logger.info(f"Successfully connected to switch {switch.name}")
                 return {

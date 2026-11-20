@@ -67,6 +67,7 @@ import {
   Key,
   Search,
   Setting,
+  Share,
   Tools
 } from '@element-plus/icons-vue'
 import App from './App.vue'
@@ -142,6 +143,7 @@ app.component('Grid', Grid)
 app.component('Key', Key)
 app.component('Search', Search)
 app.component('Setting', Setting)
+app.component('Share', Share)
 app.component('Tools', Tools)
 
 app.use(pinia)

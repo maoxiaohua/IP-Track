@@ -111,10 +111,16 @@
 
           <el-divider content-position="left">SNMP 认证配置（用于设备识别）</el-divider>
           <div class="form-tip" style="margin-bottom: 12px">
-            SNMP 用于获取设备的主机名、厂商和型号信息，CLI 用于网络连接验证
+            SNMP 用于获取设备的主机名、厂商和型号信息（不支持 SNMP 的设备可关闭），CLI 用于网络连接验证
           </div>
 
           <el-card shadow="hover" style="margin-bottom: 15px">
+            <el-form-item label="启用 SNMP">
+              <el-switch v-model="snmpConfig.snmp_enabled" />
+              <span class="form-tip" style="margin-left: 10px">关闭后仅凭 CLI 识别并添加设备</span>
+            </el-form-item>
+
+            <template v-if="snmpConfig.snmp_enabled">
             <el-row :gutter="20">
               <el-col :span="12">
                 <el-form-item label="SNMP 版本">
@@ -192,6 +198,7 @@
                   </el-form-item>
                 </el-col>
               </el-row>
+            </template>
             </template>
           </el-card>
 
@@ -403,6 +410,7 @@ const scanForm = reactive({
 
 // SNMP configuration for batch adding
 const snmpConfig = reactive({
+  snmp_enabled: true,
   snmp_version: '3',
   snmp_port: 161,
   snmp_username: '',
@@ -517,7 +525,7 @@ const startScan = async () => {
       const response = await apiClient.post('/api/v1/discovery/scan-stream', {
         ip_range: scanForm.ip_range,
         credentials: validCredentials,
-        snmp_config: {
+        snmp_config: snmpConfig.snmp_enabled ? {
           snmp_version: snmpConfig.snmp_version,
           snmp_port: snmpConfig.snmp_port,
           snmp_username: snmpConfig.snmp_version === '3' ? snmpConfig.snmp_username : undefined,
@@ -526,7 +534,7 @@ const startScan = async () => {
           snmp_priv_protocol: snmpConfig.snmp_version === '3' ? snmpConfig.snmp_priv_protocol : undefined,
           snmp_priv_password: snmpConfig.snmp_version === '3' ? snmpConfig.snmp_priv_password : undefined,
           snmp_community: snmpConfig.snmp_version === '2c' ? snmpConfig.snmp_community : undefined
-        }
+        } : undefined
       })
 
       const sessionId = response.data.session_id
@@ -735,8 +743,8 @@ const batchAddSwitches = async () => {
     return
   }
 
-  // Validate SNMP configuration
-  if (snmpConfig.snmp_version === '3') {
+  // Validate SNMP configuration（关闭 SNMP 时不校验凭据，设备本就不支持）
+  if (snmpConfig.snmp_enabled && snmpConfig.snmp_version === '3') {
     if (!snmpConfig.snmp_username || !snmpConfig.snmp_auth_password) {
       ElMessage.error('请填写完整的 SNMPv3 配置（用户名、认证密码）')
       return
@@ -773,16 +781,16 @@ const batchAddSwitches = async () => {
       cli_enabled: true,
       auto_collect_arp: true,
       auto_collect_mac: true,
-      // SNMP configuration
-      snmp_enabled: true,
+      // SNMP configuration（关闭时不发任何凭据字段）
+      snmp_enabled: snmpConfig.snmp_enabled,
       snmp_version: snmpConfig.snmp_version,
       snmp_port: snmpConfig.snmp_port,
-      snmp_username: snmpConfig.snmp_version === '3' ? snmpConfig.snmp_username : undefined,
-      snmp_auth_protocol: snmpConfig.snmp_version === '3' ? snmpConfig.snmp_auth_protocol : undefined,
-      snmp_auth_password: snmpConfig.snmp_version === '3' ? snmpConfig.snmp_auth_password : undefined,
-      snmp_priv_protocol: snmpConfig.snmp_version === '3' ? snmpConfig.snmp_priv_protocol : undefined,
-      snmp_priv_password: snmpConfig.snmp_version === '3' ? snmpConfig.snmp_priv_password : undefined,
-      snmp_community: snmpConfig.snmp_version === '2c' ? snmpConfig.snmp_community : undefined
+      snmp_username: snmpConfig.snmp_enabled && snmpConfig.snmp_version === '3' ? snmpConfig.snmp_username : undefined,
+      snmp_auth_protocol: snmpConfig.snmp_enabled && snmpConfig.snmp_version === '3' ? snmpConfig.snmp_auth_protocol : undefined,
+      snmp_auth_password: snmpConfig.snmp_enabled && snmpConfig.snmp_version === '3' ? snmpConfig.snmp_auth_password : undefined,
+      snmp_priv_protocol: snmpConfig.snmp_enabled && snmpConfig.snmp_version === '3' ? snmpConfig.snmp_priv_protocol : undefined,
+      snmp_priv_password: snmpConfig.snmp_enabled && snmpConfig.snmp_version === '3' ? snmpConfig.snmp_priv_password : undefined,
+      snmp_community: snmpConfig.snmp_enabled && snmpConfig.snmp_version === '2c' ? snmpConfig.snmp_community : undefined
     }))
 
     console.log('Sending batch-add request with', switchesToAdd.length, 'switches')
@@ -807,7 +815,8 @@ const getVendorTagType = (vendor: string) => {
   const types: Record<string, any> = {
     cisco: 'primary',
     dell: 'success',
-    alcatel: 'warning'
+    alcatel: 'warning',
+    h3c: 'danger'
   }
   return types[vendor] || 'info'
 }

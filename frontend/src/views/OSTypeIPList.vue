@@ -163,10 +163,8 @@ async function loadData() {
     if (searchText.value.trim()) {
       params.search = searchText.value.trim()
     }
-    // Keep list counts consistent with the distribution chart's archived toggle
-    if (route.query.include_archived === '1') {
-      params.include_archived = true
-    }
+    // 从扇形图钻取时必须与扇区口径一致：显式传参，不能依赖后端默认全量
+    params.include_archived = route.query.include_archived === '1'
     const response = await ipamApi.getIPAddresses(params)
     ipList.value = response.items || []
     total.value = response.total || 0

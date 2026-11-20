@@ -113,8 +113,7 @@ watch(
 
 <style scoped>
 .home-view {
-  max-width: 1200px;
-  margin: 0 auto;
+  width: 100%;
 }
 
 .lookup-card {

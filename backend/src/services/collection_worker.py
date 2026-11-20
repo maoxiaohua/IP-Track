@@ -18,7 +18,12 @@ from models.collection_job import CollectionJob, JobType, JobStatus
 from services.network_data_collector import NetworkDataCollector
 from utils.logger import logger
 from services.alarm_service import alarm_service
+from services.topology_service import collect_switch_topology, derive_links
 from models.alarm import AlarmSeverity, AlarmSourceType, AlarmStatus
+
+# 告警标题前缀：既用于创建，也用于同类告警自动恢复（不能靠 severity 区分）。
+TOPOLOGY_ALARM_PREFIX = "Topology collection "
+COLLECTION_ALARM_PREFIX = "Collection "
 
 
 class CollectionWorker:
@@ -152,7 +157,30 @@ class CollectionWorker:
                 entries = await self.collector.collect_optical_single_switch(db, switch)
                 job.entries_collected = len(entries) if entries else 0
 
+            elif job.job_type == JobType.TOPOLOGY:
+                result = await collect_switch_topology(db, switch)
+                counts = result.get('counts') or {}
+                job.entries_collected = counts.get('lldp', 0) + counts.get('cdp', 0)
+                if result.get('status') == 'failed':
+                    # unsupported / partial 不算任务失败：设备不支持 LLDP 是正常状态，
+                    # 需要用 switch.last_topology_collection_status 在 UI 上展示。
+                    raise RuntimeError(
+                        switch.last_topology_collection_message
+                        or 'topology collection failed'
+                    )
+                await derive_links(db)
+
             elif job.job_type == JobType.ALL:
+                # 序列号回填：ALL 任务以前只跑 MAC/ARP/光模块，新加的交换机 SN 永远是空的。
+                # 这里复用采集器的统一实现（非 Dell 走 SNMP，Dell 走 CLI show inventory），
+                # 失败不影响整轮采集，仅记日志。
+                try:
+                    await self.collector.collect_chassis_serial(db, switch)
+                except Exception as serial_err:
+                    logger.warning(
+                        f"Serial number collection failed for {switch.name}: {serial_err}"
+                    )
+
                 mac_entries = await self.collector.collect_mac_single_switch(db, switch)
                 mac_result_message = switch.last_collection_message
                 arp_entries = await self.collector.collect_arp_single_switch(db, switch)
@@ -223,12 +251,20 @@ class CollectionWorker:
             # Ensure switch changes (capability learning) are committed
             db.add(switch)
             
-            # Only auto-resolve alarms when the switch collected usable ARP/MAC data.
-            if switch.last_collection_status == 'success':
+            # 只恢复同类告警：拓扑成功不能清掉 MAC/ARP 告警，反之亦然。
+            if job.job_type == JobType.TOPOLOGY:
                 await alarm_service.auto_resolve_alarms(
                     db=db,
                     source_type=AlarmSourceType.SWITCH,
-                    source_id=switch.id
+                    source_id=switch.id,
+                    title_prefix=TOPOLOGY_ALARM_PREFIX,
+                )
+            elif switch.last_collection_status == 'success':
+                await alarm_service.auto_resolve_alarms(
+                    db=db,
+                    source_type=AlarmSourceType.SWITCH,
+                    source_id=switch.id,
+                    title_prefix=COLLECTION_ALARM_PREFIX,
                 )
             
             await db.commit()
@@ -287,38 +323,59 @@ class CollectionWorker:
             logger.warning(f"Job {job.id} timeout")
 
         except Exception as e:
+            # 任何写库异常都会把事务置为 failed；不回滚的话，后面的查询与
+            # create_alarm 都会抛 "This Session's transaction has been rolled
+            # back"，失败原因只留在日志里，运维在告警页永远看不到。
+            await db.rollback()
+            try:
+                await db.refresh(job)
+            except Exception:
+                pass
+
+            error_text = str(e).replace('\x00', '')
             job.status = 'failed'
-            job.error_message = str(e)
+            job.error_message = error_text[:2000]
             job.completed_at = datetime.utcnow()
             job.duration_seconds = (job.completed_at - start_time).total_seconds()
             self.jobs_failed += 1
-            
+
             # Create alarm for failure
             try:
                 switch_result = await db.execute(
                     select(Switch).where(Switch.id == job.switch_id)
                 )
                 switch = switch_result.scalar_one_or_none()
-                
+
                 if switch:
-                    await self.collector._mark_switch_collection_failed(
-                        db,
-                        switch,
-                        reason=str(e),
-                        collected_at=start_time
-                    )
+                    is_topology = job.job_type == JobType.TOPOLOGY
+                    if is_topology:
+                        # 拓扑失败只更新拓扑状态，不能覆盖 ARP/MAC 的采集时间与结果。
+                        switch.last_topology_collection_at = start_time
+                        switch.last_topology_collection_status = 'failed'
+                        switch.last_topology_collection_message = error_text[:2000]
+                        db.add(switch)
+                    else:
+                        await self.collector._mark_switch_collection_failed(
+                            db,
+                            switch,
+                            reason=error_text,
+                            collected_at=start_time
+                        )
                     # Determine severity based on error message
                     severity = AlarmSeverity.ERROR
-                    if 'auth' in str(e).lower() or 'password' in str(e).lower():
+                    if 'auth' in error_text.lower() or 'password' in error_text.lower():
                         severity = AlarmSeverity.ERROR
-                    elif 'connect' in str(e).lower() or 'unreachable' in str(e).lower():
+                    elif 'connect' in error_text.lower() or 'unreachable' in error_text.lower():
                         severity = AlarmSeverity.WARNING
-                    
+
                     alarm = await alarm_service.create_alarm(
                         db=db,
                         severity=severity,
-                        title=f"Collection failed: {switch.name}",
-                        message=str(e),
+                        title=(
+                            f"{TOPOLOGY_ALARM_PREFIX}failed: {switch.name}"
+                            if is_topology else f"{COLLECTION_ALARM_PREFIX}failed: {switch.name}"
+                        ),
+                        message=error_text[:2000],
                         source_type=AlarmSourceType.SWITCH,
                         source_id=switch.id,
                         source_name=switch.name,
@@ -328,8 +385,22 @@ class CollectionWorker:
                             'job_id': job.id,
                             'switch_ip': str(switch.ip_address),
                             'vendor': switch.vendor,
-                            'model': switch.model
+                            'model': switch.model,
+                            'topology_message': (
+                                switch.last_topology_collection_message if is_topology else None
+                            ),
                         }
+                    )
+                    # 失败文案变化会让 severity 跳变，fingerprint 不同 → 旧告警残留；
+                    # 新建这条后把同设备同前缀的旧告警收掉（排除刚建的这条）。
+                    await alarm_service.auto_resolve_alarms(
+                        db=db,
+                        source_type=AlarmSourceType.SWITCH,
+                        source_id=switch.id,
+                        title_prefix=(
+                            TOPOLOGY_ALARM_PREFIX if is_topology else COLLECTION_ALARM_PREFIX
+                        ),
+                        exclude_id=alarm.id,
                     )
                     if alarm.occurrence_count >= settings.CONSECUTIVE_FAILURE_AUTO_RESOLVE:
                         alarm.status = AlarmStatus.AUTO_RESOLVED
