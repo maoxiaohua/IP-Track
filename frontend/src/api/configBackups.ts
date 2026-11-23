@@ -173,3 +173,60 @@ export const downloadBackup = async (backupId: number, fallbackName = 'config.cf
   document.body.removeChild(link)
   window.URL.revokeObjectURL(url)
 }
+
+export interface BatchDownloadResult {
+  /** 实际打包进 ZIP 的交换机数量 */
+  included: number
+  /** 因没有成功备份而被跳过的数量 */
+  skipped: number
+  /** 被跳过的交换机名称 */
+  skippedNames: string[]
+}
+
+// 下载失败时后端返回的是 JSON，但 responseType=blob 会把它包成 Blob
+const readBlobError = async (blob: Blob): Promise<string> => {
+  try {
+    const text = await blob.text()
+    const detail = JSON.parse(text)?.detail
+    if (typeof detail === 'string') return detail
+  } catch {
+    // 非 JSON，忽略
+  }
+  return '批量下载失败，请稍后重试'
+}
+
+export const downloadBackupsBatch = async (switchIds: number[]): Promise<BatchDownloadResult> => {
+  const params = new URLSearchParams()
+  switchIds.forEach(id => params.append('switch_ids', String(id)))
+  let response
+  try {
+    response = await apiClient.get(
+      `/api/v1/config-backups/batch-download?${params.toString()}`,
+      { responseType: 'blob', skipDefaultErrorHandler: true } as any
+    )
+  } catch (error: any) {
+    const data = error?.response?.data
+    throw new Error(data instanceof Blob ? await readBlobError(data) : '批量下载失败，请稍后重试')
+  }
+
+  const disposition: string = response.headers?.['content-disposition'] || ''
+  const match = /filename\*=UTF-8''([^;]+)/i.exec(disposition) || /filename="?([^";]+)"?/i.exec(disposition)
+  const filename = match ? decodeURIComponent(match[1]) : 'config-backups.zip'
+  const url = window.URL.createObjectURL(response.data)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  window.URL.revokeObjectURL(url)
+
+  const skippedRaw: string = response.headers?.['x-batch-skipped-names'] || ''
+  return {
+    included: Number(response.headers?.['x-batch-included'] || 0),
+    skipped: Number(response.headers?.['x-batch-skipped'] || 0),
+    skippedNames: skippedRaw
+      ? skippedRaw.split(',').filter(Boolean).map(name => decodeURIComponent(name))
+      : []
+  }
+}

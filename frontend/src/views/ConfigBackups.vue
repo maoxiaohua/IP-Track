@@ -80,6 +80,23 @@
             <el-tag size="small" effect="plain">{{ filteredItems.length }} / {{ overview.length }}</el-tag>
           </div>
           <div class="header-actions">
+            <el-tooltip
+              :content="selectedRows.length ? `把 ${selectedRows.length} 台交换机的最近成功备份打包成 ZIP` : '请先在下方勾选交换机'"
+              placement="top"
+            >
+              <span>
+                <el-button
+                  type="primary"
+                  plain
+                  :loading="batchDownloading"
+                  :disabled="!selectedRows.length"
+                  @click="handleBatchDownload"
+                >
+                  <template #icon><el-icon><FolderOpened /></el-icon></template>
+                  批量下载{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}
+                </el-button>
+              </span>
+            </el-tooltip>
             <el-select v-model="statusFilter" style="width: 150px" @change="loadOverview">
               <el-option label="全部状态" value="" />
               <el-option label="成功" value="success" />
@@ -97,7 +114,16 @@
         </div>
       </template>
 
-      <el-table v-loading="loading" :data="filteredItems" stripe empty-text="没有匹配的交换机">
+      <el-table
+        ref="overviewTable"
+        v-loading="loading"
+        :data="filteredItems"
+        row-key="switch_id"
+        stripe
+        empty-text="没有匹配的交换机"
+        @selection-change="handleSelectionChange"
+      >
+        <el-table-column type="selection" width="46" />
         <el-table-column label="交换机" min-width="180">
           <template #default="{ row }">
             <div class="switch-cell">
@@ -408,10 +434,11 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
+import { Refresh, FolderOpened } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import {
   downloadBackup,
+  downloadBackupsBatch,
   fetchBackupContent,
   fetchBackupDiff,
   fetchBackupGlobalSettings,
@@ -446,6 +473,9 @@ const overview = ref<BackupOverviewItem[]>([])
 const keyword = ref('')
 const statusFilter = ref('')
 const runningSwitchId = ref<number | null>(null)
+const overviewTable = ref()
+const selectedRows = ref<BackupOverviewItem[]>([])
+const batchDownloading = ref(false)
 
 const globalForm = reactive({ interval_minutes: 1440, retention_versions: 30 })
 const vendorPresets = ref<Record<string, { device_type: string; command: string }>>({})
@@ -478,6 +508,9 @@ const loadOverview = async () => {
     const data = await fetchBackupOverview(statusFilter.value || undefined)
     overview.value = data.items
     globalForm.interval_minutes = data.global_interval_minutes
+    // 列表重新加载后旧勾选已失效，清空避免误打包
+    selectedRows.value = []
+    overviewTable.value?.clearSelection?.()
   } catch {
     // apiClient 已统一提示错误
   } finally {
@@ -647,6 +680,26 @@ const handleDownload = async (backupId: number | null, row: Partial<BackupOvervi
   } catch {
     // apiClient/blob 下载失败在此兜底提示
     ElMessage.error('下载失败，请稍后重试')
+  }
+}
+
+const handleSelectionChange = (rows: BackupOverviewItem[]) => {
+  selectedRows.value = rows
+}
+
+const handleBatchDownload = async () => {
+  if (!selectedRows.value.length) return
+  batchDownloading.value = true
+  try {
+    const result = await downloadBackupsBatch(selectedRows.value.map(row => row.switch_id))
+    const skippedTip = result.skippedNames.length
+      ? `；跳过 ${result.skipped} 台没有成功备份：${result.skippedNames.slice(0, 5).join('、')}${result.skippedNames.length > 5 ? ' 等' : ''}`
+      : ''
+    ElMessage.success(`已打包 ${result.included} 台交换机的备份${skippedTip}`)
+  } catch (error: any) {
+    ElMessage.error(error?.message || '批量下载失败，请稍后重试')
+  } finally {
+    batchDownloading.value = false
   }
 }
 

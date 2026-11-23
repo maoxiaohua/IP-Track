@@ -7,7 +7,10 @@
 """
 
 import difflib
+import io
 import re
+import zipfile
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -33,6 +36,8 @@ from services.settings_service import SettingsService
 router = APIRouter(prefix="/config-backups", tags=["config-backups"])
 
 MAX_PAGE_SIZE = 200
+# 一次性打包的交换机数量上限，避免超大请求拖垮服务
+MAX_BATCH_SWITCHES = 500
 # 超大配置的 diff 文本会拖垮浏览器，超出部分截断并提示
 MAX_DIFF_CHARS = 500_000
 
@@ -269,6 +274,100 @@ async def download_version(backup_id: int, db: AsyncSession = Depends(get_db)):
     return Response(
         content=blob.content.encode('utf-8'),
         media_type='text/plain; charset=utf-8',
+        headers=headers,
+    )
+
+
+@router.get("/batch-download")
+async def batch_download(
+    # 用 Optional 自行校验：本版本 FastAPI 对缺失的必填 List 参数会序列化报错成 500
+    switch_ids: Optional[List[int]] = Query(None, description="要打包的交换机 id，可重复传参"),
+    db: AsyncSession = Depends(get_db),
+):
+    """把多台交换机各自最新的成功备份打包成一个 ZIP（只读，不触发备份）。"""
+    unique_ids = list(dict.fromkeys(switch_ids or []))
+    if not unique_ids:
+        raise HTTPException(status_code=422, detail="请至少选择一台交换机")
+    if len(unique_ids) > MAX_BATCH_SWITCHES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"一次最多打包 {MAX_BATCH_SWITCHES} 台交换机",
+        )
+
+    switches = (
+        await db.execute(select(Switch).where(Switch.id.in_(unique_ids)))
+    ).scalars().all()
+    switch_names = {s.id: s.name for s in switches}
+
+    # 每台交换机各自最近一条成功记录
+    rows = (
+        await db.execute(
+            select(ConfigBackup)
+            .where(
+                ConfigBackup.switch_id.in_(unique_ids),
+                ConfigBackup.status == 'success',
+                ConfigBackup.sha256.isnot(None),
+            )
+            .order_by(ConfigBackup.switch_id, ConfigBackup.started_at.desc())
+        )
+    ).scalars().all()
+    latest: Dict[int, ConfigBackup] = {}
+    for row in rows:
+        latest.setdefault(row.switch_id, row)
+
+    sha_list = list({row.sha256 for row in latest.values() if row.sha256})
+    blobs = {}
+    if sha_list:
+        blob_rows = (
+            await db.execute(select(ConfigBlob).where(ConfigBlob.sha256.in_(sha_list)))
+        ).scalars().all()
+        blobs = {b.sha256: b for b in blob_rows}
+
+    buffer = io.BytesIO()
+    used_names: set = set()
+    included = 0
+    skipped: List[str] = []
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for switch_id in unique_ids:
+            row = latest.get(switch_id)
+            blob = blobs.get(row.sha256) if row and row.sha256 else None
+            if not row or not blob:
+                skipped.append(switch_names.get(switch_id) or f'switch_{switch_id}')
+                continue
+            host = switch_names.get(switch_id) or f'switch_{switch_id}'
+            stamp = row.started_at.strftime('%Y%m%d-%H%M%S') if row.started_at else 'config'
+            base = f'{_safe_filename(host)}-{stamp}.cfg'
+            name = base
+            seq = 2
+            while name in used_names:
+                name = f'{base[:-4]}({seq}).cfg'
+                seq += 1
+            used_names.add(name)
+            archive.writestr(name, blob.content.encode('utf-8'))
+            included += 1
+
+    if not included:
+        raise HTTPException(
+            status_code=404,
+            detail='所选交换机都没有可下载的成功备份',
+        )
+
+    stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    filename = f'config-backups-{stamp}.zip'
+    headers = {
+        'Content-Disposition': (
+            f"attachment; filename=\"{filename}\"; "
+            f"filename*=UTF-8''{quote(filename)}"
+        ),
+        'X-Batch-Included': str(included),
+        'X-Batch-Skipped': str(len(skipped)),
+        # 交换机名可能是中文，响应头只能是 ASCII，用 URL 编码传给前端解码；
+        # 只回传前 100 个，避免超长响应头。
+        'X-Batch-Skipped-Names': ','.join(quote(name, safe='') for name in skipped[:100]),
+    }
+    return Response(
+        content=buffer.getvalue(),
+        media_type='application/zip',
         headers=headers,
     )
 
