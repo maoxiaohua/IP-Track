@@ -36,6 +36,10 @@ class SwitchInterface(Base):
     phys_address = Column(String(32))
     # 归一化后的聚合口键（ae0 / po1 / Bundle-Ether10 ...），用于展示层折叠 LAG
     lag_key = Column(String(128))
+    # ifLastChange：距设备启动的百分之一秒数（仅 SNMP 可采，CLI 回退时保留旧值）
+    last_change_ticks = Column(BigInteger)
+    # 由 sysUpTime 换算出的端口状态最后变更绝对时间，用来判断端口闲置多久
+    last_change_at = Column(DateTime(timezone=True))
 
     first_seen = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

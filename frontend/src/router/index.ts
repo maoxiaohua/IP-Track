@@ -18,6 +18,7 @@ const Settings = () => import('@/views/Settings.vue')
 const BMCReset = () => import('@/views/BMCReset.vue')
 const SubnetProbe = () => import('@/views/SubnetProbe.vue')
 const VisioViewer = () => import('@/views/VisioViewer.vue')
+const ConfigBackups = () => import('@/views/ConfigBackups.vue')
 const Login = () => import('@/views/Login.vue')
 
 const router = createRouter({
@@ -133,6 +134,12 @@ const router = createRouter({
       name: 'VisioViewer',
       component: VisioViewer,
       meta: { title: 'Visio 图纸查看', icon: 'Document' }
+    },
+    {
+      path: '/config-backups',
+      name: 'ConfigBackups',
+      component: ConfigBackups,
+      meta: { title: '配置备份', icon: 'Document' }
     },
     {
       // Login (and temporary-password change). Browsing stays open to guests.

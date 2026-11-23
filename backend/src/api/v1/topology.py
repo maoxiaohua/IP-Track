@@ -361,6 +361,8 @@ async def list_interfaces(
             'speed_mbps': row.speed_mbps,
             'phys_address': row.phys_address,
             'lag_key': row.lag_key,
+            'last_change_ticks': row.last_change_ticks,
+            'last_change_at': row.last_change_at.isoformat() if row.last_change_at else None,
             'last_seen': row.last_seen.isoformat() if row.last_seen else None,
         }
         for row in rows

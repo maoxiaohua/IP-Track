@@ -197,6 +197,17 @@ class NetworkCollectionScheduler:
                     max_instances=1
                 )
 
+            # 配置备份：每 tick 扫描到期设备（单机间隔来自每台覆盖或全局默认）
+            if settings.CONFIG_BACKUP_ENABLED:
+                self.scheduler.add_job(
+                    self._run_config_backup,
+                    trigger=IntervalTrigger(minutes=settings.CONFIG_BACKUP_TICK_MINUTES),
+                    id='config_backup',
+                    name='Switch Config Backup (read-only)',
+                    replace_existing=True,
+                    max_instances=1
+                )
+
             logger.info(f"Starting APScheduler with {len(self.scheduler.get_jobs())} jobs")
             self.scheduler.start()
             self.is_running = True
@@ -212,6 +223,10 @@ class NetworkCollectionScheduler:
                 logger.info(
                     f"Topology collection job scheduled "
                     f"(interval: {settings.TOPOLOGY_COLLECTION_INTERVAL_MINUTES} min)"
+                )
+            if settings.CONFIG_BACKUP_ENABLED:
+                logger.info(
+                    f"Config backup job scheduled (tick: {settings.CONFIG_BACKUP_TICK_MINUTES} min)"
                 )
             asyncio.create_task(
                 self.trigger_startup_catchup(
@@ -775,6 +790,20 @@ class NetworkCollectionScheduler:
         logger.info(f"Optical job creation finished in {elapsed:.1f}s (workers will execute asynchronously)")
 
 
+    async def _run_config_backup(self):
+        """按到期时间执行交换机配置备份（严格只读 show 命令）。"""
+        if not settings.CONFIG_BACKUP_ENABLED:
+            return
+        try:
+            from services.config_backup_service import run_due_backups
+
+            async for db in get_db():
+                stats = await run_due_backups(db)
+                if stats.get('due'):
+                    logger.info(f"Scheduled config backup finished: {stats}")
+        except Exception as e:
+            logger.error(f"Scheduled config backup failed: {e}", exc_info=True)
+
     async def _run_topology_collection(self):
         """Run scheduled topology collection, then rebuild derived links."""
         if not settings.FEATURE_TOPOLOGY:
@@ -884,6 +913,17 @@ async def start_collection_scheduler():
                     trigger=IntervalTrigger(minutes=settings.TOPOLOGY_COLLECTION_INTERVAL_MINUTES),
                     id='topology_collection',
                     name='Topology Collection (LLDP/CDP)',
+                    replace_existing=True,
+                    max_instances=1
+                )
+
+            # 配置备份：每 tick 扫描到期设备（单机间隔来自每台覆盖或全局默认）
+            if settings.CONFIG_BACKUP_ENABLED:
+                scheduler.add_job(
+                    network_scheduler._run_config_backup,
+                    trigger=IntervalTrigger(minutes=settings.CONFIG_BACKUP_TICK_MINUTES),
+                    id='config_backup',
+                    name='Switch Config Backup (read-only)',
                     replace_existing=True,
                     max_instances=1
                 )

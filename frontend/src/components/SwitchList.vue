@@ -43,6 +43,14 @@
         </template>
       </el-table-column>
 
+      <!-- 人工标注的物理位置 -->
+      <el-table-column prop="location" label="位置" min-width="120" sortable="custom">
+        <template #default="{ row }">
+          <span v-if="row.location" style="font-size: 12px;">{{ row.location }}</span>
+          <span v-else style="color: #909399; font-size: 12px;">-</span>
+        </template>
+      </el-table-column>
+
       <!-- Serial Number -->
       <el-table-column prop="serial_number" label="序列号" width="130">
         <template #default="{ row }">

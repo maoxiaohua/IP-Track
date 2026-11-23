@@ -89,6 +89,12 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false
         },
+        // 配置备份挂在 backend-collector；必须排在 '/api' 兜底之前，端口用容器内 8100
+        '/api/v1/config-backups': {
+          target: backendCollector,
+          changeOrigin: true,
+          secure: false
+        },
         '/api': {
           target: backendCore,
           changeOrigin: true,

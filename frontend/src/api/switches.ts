@@ -4,8 +4,9 @@ export interface Switch {
   id: number
   name: string
   ip_address: string
-  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'h3c'
+  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'arista' | 'hpe' | 'huawei' | 'h3c' | 'fortinet' | 'extreme' | 'aruba' | 'mikrotik' | 'paloalto' | 'other'
   model?: string
+  location?: string | null
   serial_number?: string | null
   enabled: boolean
 
@@ -75,8 +76,9 @@ export interface Switch {
 export interface SwitchCreate {
   name: string
   ip_address: string
-  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'h3c'
+  vendor: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'arista' | 'hpe' | 'huawei' | 'h3c' | 'fortinet' | 'extreme' | 'aruba' | 'mikrotik' | 'paloalto' | 'other'
   model?: string
+  location?: string
   enabled?: boolean
 
   // CLI fields
@@ -110,8 +112,9 @@ export interface SwitchCreate {
 export interface SwitchUpdate {
   name?: string
   ip_address?: string
-  vendor?: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'h3c'
+  vendor?: 'cisco' | 'dell' | 'alcatel' | 'juniper' | 'arista' | 'hpe' | 'huawei' | 'h3c' | 'fortinet' | 'extreme' | 'aruba' | 'mikrotik' | 'paloalto' | 'other'
   model?: string
+  location?: string
   cli_enabled?: boolean
   cli_transport?: 'ssh' | 'telnet'
   ssh_port?: number
@@ -155,7 +158,7 @@ export interface SwitchListParams {
   search?: string
   trunk_review_completed?: boolean
   collection_status?: string
-  sort_by?: 'id' | 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'last_successful_collection_time' | 'connection_status'
+  sort_by?: 'id' | 'name' | 'ip_address' | 'model' | 'location' | 'last_collection_time' | 'last_successful_collection_time' | 'connection_status'
   sort_order?: 'asc' | 'desc'
 }
 

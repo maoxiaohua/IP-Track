@@ -180,12 +180,26 @@
             <el-option label="Cisco" value="cisco" />
             <el-option label="Dell" value="dell" />
             <el-option label="Alcatel-Lucent" value="alcatel" />
+            <el-option label="Juniper" value="juniper" />
+            <el-option label="Arista" value="arista" />
+            <el-option label="HPE" value="hpe" />
+            <el-option label="Huawei" value="huawei" />
             <el-option label="H3C" value="h3c" />
+            <el-option label="Fortinet" value="fortinet" />
+            <el-option label="Extreme" value="extreme" />
+            <el-option label="Aruba" value="aruba" />
+            <el-option label="MikroTik" value="mikrotik" />
+            <el-option label="Palo Alto" value="paloalto" />
+            <el-option label="其他" value="other" />
           </el-select>
         </el-form-item>
 
         <el-form-item label="Model" prop="model">
           <el-input v-model="switchForm.model" placeholder="e.g., Catalyst 3850" />
+        </el-form-item>
+
+        <el-form-item label="位置" prop="location">
+          <el-input v-model="switchForm.location" placeholder="e.g., 机房A-机柜3" maxlength="100" />
         </el-form-item>
 
         <el-divider content-position="left">CLI 配置</el-divider>
@@ -512,7 +526,7 @@ const pageSize = ref(100)
 const totalSwitches = ref(0)
 const showPendingTrunkOnly = ref(false)
 const collectionStatusFilter = ref('')
-type SortField = 'name' | 'ip_address' | 'model' | 'last_collection_time' | 'last_successful_collection_time' | 'connection_status'
+type SortField = 'name' | 'ip_address' | 'model' | 'location' | 'last_collection_time' | 'last_successful_collection_time' | 'connection_status'
 type SortOption = SortField | 'collection_status_success' | 'collection_status_failed' | 'collection_status_partial'
 
 const sortBy = ref<SortField | null>(null)
@@ -523,6 +537,7 @@ const sortFieldOptions: Array<{ label: string; value: SortOption }> = [
   { label: '名称', value: 'name' },
   { label: 'IP 地址', value: 'ip_address' },
   { label: '厂商 / 型号', value: 'model' },
+  { label: '位置', value: 'location' },
   { label: '采集成功', value: 'collection_status_success' },
   { label: '采集失败', value: 'collection_status_failed' },
   { label: '采集部分成功', value: 'collection_status_partial' },
@@ -578,6 +593,7 @@ const switchForm = reactive<SwitchCreate>({
   ip_address: '',
   vendor: 'cisco',
   model: '',
+  location: '',
   cli_enabled: false,
   cli_transport: 'ssh',
   ssh_port: 22,
@@ -755,7 +771,7 @@ const clearSort = () => {
 }
 
 const handleSortChange = (newSortBy: string, newSortOrder: 'asc' | 'desc' | null) => {
-  const allowedSortFields = ['name', 'ip_address', 'model', 'last_collection_time', 'last_successful_collection_time', 'connection_status']
+  const allowedSortFields = ['name', 'ip_address', 'model', 'location', 'last_collection_time', 'last_successful_collection_time', 'connection_status']
   selectedSortField.value = newSortOrder && allowedSortFields.includes(newSortBy)
     ? newSortBy as SortOption
     : null
@@ -784,6 +800,7 @@ const resetForm = () => {
     ip_address: '',
     vendor: 'cisco',
     model: '',
+    location: '',
     cli_enabled: false,
     cli_transport: 'ssh',
     ssh_port: 22,
@@ -815,6 +832,7 @@ const handleEdit = (switchItem: Switch) => {
     ip_address: switchItem.ip_address,
     vendor: switchItem.vendor,
     model: switchItem.model || '',
+    location: switchItem.location || '',
     cli_enabled: switchItem.cli_enabled || false,
     cli_transport: switchItem.cli_transport || 'ssh',
     ssh_port: switchItem.ssh_port ?? defaultCliPort(switchItem.cli_transport || 'ssh'),

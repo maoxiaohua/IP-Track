@@ -182,6 +182,7 @@ async def create_switch(
             ip_address=str(switch_data.ip_address),
             vendor=switch_data.vendor,
             model=switch_data.model,
+            location=switch_data.location,
             enabled=switch_data.enabled,
 
             # SSH fields (optional)
@@ -249,7 +250,8 @@ async def list_switches(
             search_filter = (
                 Switch.name.ilike(f"%{search}%") |
                 cast(Switch.ip_address, String).ilike(f"%{search}%") |
-                Switch.serial_number.ilike(f"%{search}%")
+                Switch.serial_number.ilike(f"%{search}%") |
+                Switch.location.ilike(f"%{search}%")
             )
             query = query.where(search_filter)
 
@@ -291,6 +293,7 @@ async def list_switches(
             "name": Switch.name,
             "ip_address": Switch.ip_address,
             "model": Switch.model,
+            "location": Switch.location,
             "last_collection_time": collection_time_expr,
             "last_successful_collection_time": Switch.last_successful_collection_at,
             "connection_status": connection_status_expr,
@@ -811,6 +814,7 @@ async def bulk_create_switches(
                 ip_address=str(switch_data.ip_address),
                 vendor=switch_data.vendor,
                 model=switch_data.model,
+                location=switch_data.location,
                 cli_enabled=switch_data.cli_enabled,
                 cli_transport=cli_transport,
                 ssh_port=ssh_port,
@@ -988,6 +992,7 @@ async def export_switches(
                 "serial_number": sw.serial_number or "",
                 "vendor": sw.vendor,
                 "model": sw.model or "",
+                "location": sw.location or "",
                 "connection_status": _connection_status(sw),
                 "collection_method": _collection_method(sw),
                 "last_collection_status": sw.last_collection_status or "",

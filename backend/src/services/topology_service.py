@@ -542,6 +542,11 @@ async def _upsert_interfaces(
         row.speed_mbps = entry.get('speed_mbps')
         row.phys_address = _trunc(entry.get('phys_address'), 32)
         row.lag_key = _trunc(entry.get('lag_key'), 128) or normalize_lag_key(row.if_name)
+        # ifLastChange 只有 SNMP 能采到；CLI 回退那轮 entry 里没有这两个键，
+        # 此时保留库里旧值，避免一次 CLI 采集就把闲置时长清空。
+        if entry.get('last_change_ticks') is not None:
+            row.last_change_ticks = entry.get('last_change_ticks')
+            row.last_change_at = entry.get('last_change_at')
         row.last_seen = now
         row.collected_at = now
 

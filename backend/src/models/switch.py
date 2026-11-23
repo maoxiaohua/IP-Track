@@ -25,6 +25,8 @@ class Switch(Base):
     ip_address = Column(INET, nullable=False, unique=True, index=True)
     vendor = Column(String(50), nullable=False)  # 'cisco', 'dell', 'alcatel'
     model = Column(String(100), nullable=True)
+    # 人工标注的物理位置（机房/机柜/楼层），仅用于展示与排序，不参与采集
+    location = Column(String(100), nullable=True)
     serial_number = Column(String(200), nullable=True)  # Chassis serial from SNMP ENTITY-MIB
 
     # SSH/CLI fields
@@ -112,6 +114,14 @@ class Switch(Base):
     mac_collection_fail_count = Column(Integer, default=0)
     arp_collection_fail_count = Column(Integer, default=0)
     optical_collection_fail_count = Column(Integer, default=0)
+
+    # 配置备份：开关、间隔覆盖（空=全局默认）、device_type/命令覆盖（空=预设表）
+    backup_enabled = Column(Boolean, default=True, nullable=False)
+    backup_interval_minutes = Column(Integer, nullable=True)
+    backup_device_type = Column(String(50), nullable=True)
+    backup_config_command = Column(String(200), nullable=True)
+    # 最近一次备份因网络不可达失败：计划备份先暂停，TCP 探测恢复可达后自动解除
+    backup_unreachable = Column(Boolean, default=False, nullable=False)
 
     # Manual trunk-review workflow
     trunk_review_completed = Column(Boolean, default=False, nullable=False, index=True)

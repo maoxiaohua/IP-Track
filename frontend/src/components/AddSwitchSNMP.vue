@@ -21,6 +21,17 @@
           <el-option label="Cisco" value="cisco" />
           <el-option label="Dell" value="dell" />
           <el-option label="Alcatel" value="alcatel" />
+          <el-option label="Juniper" value="juniper" />
+          <el-option label="Arista" value="arista" />
+          <el-option label="HPE" value="hpe" />
+          <el-option label="Huawei" value="huawei" />
+          <el-option label="H3C" value="h3c" />
+          <el-option label="Fortinet" value="fortinet" />
+          <el-option label="Extreme" value="extreme" />
+          <el-option label="Aruba" value="aruba" />
+          <el-option label="MikroTik" value="mikrotik" />
+          <el-option label="Palo Alto" value="paloalto" />
+          <el-option label="其他" value="other" />
         </el-select>
       </el-form-item>
       

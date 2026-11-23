@@ -7,8 +7,9 @@ class SwitchBase(BaseModel):
     """Base switch schema"""
     name: str = Field(..., min_length=1, max_length=100)
     ip_address: IPvAnyAddress
-    vendor: str = Field(..., pattern="^(cisco|dell|alcatel|juniper|arista|hpe|huawei|h3c)$")
+    vendor: str = Field(..., pattern="^(cisco|dell|alcatel|juniper|arista|hpe|huawei|h3c|fortinet|extreme|aruba|mikrotik|paloalto|other)$")
     model: Optional[str] = Field(None, max_length=100)
+    location: Optional[str] = Field(None, max_length=100)
     serial_number: Optional[str] = Field(None, max_length=200)
     enabled: bool = True
 
@@ -85,8 +86,9 @@ class SwitchUpdate(BaseModel):
     """Schema for updating a switch"""
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     ip_address: Optional[IPvAnyAddress] = None
-    vendor: Optional[str] = Field(None, pattern="^(cisco|dell|alcatel|juniper|arista|hpe|huawei|h3c)$")
+    vendor: Optional[str] = Field(None, pattern="^(cisco|dell|alcatel|juniper|arista|hpe|huawei|h3c|fortinet|extreme|aruba|mikrotik|paloalto|other)$")
     model: Optional[str] = Field(None, max_length=100)
+    location: Optional[str] = Field(None, max_length=100)
     cli_enabled: Optional[bool] = None
     cli_transport: Optional[Literal['ssh', 'telnet']] = None
     ssh_port: Optional[int] = Field(None, ge=1, le=65535)
@@ -103,6 +105,12 @@ class SwitchUpdate(BaseModel):
     auto_collect_arp: Optional[bool] = None
     auto_collect_mac: Optional[bool] = None
     auto_collect_topology: Optional[bool] = None
+
+    # 配置备份设置（间隔为空表示使用全局默认）
+    backup_enabled: Optional[bool] = None
+    backup_interval_minutes: Optional[int] = Field(None, ge=5, le=43200)
+    backup_device_type: Optional[str] = Field(None, max_length=50)
+    backup_config_command: Optional[str] = Field(None, max_length=200)
 
     # SNMP fields
     snmp_enabled: Optional[bool] = None
@@ -197,6 +205,12 @@ class SwitchResponse(SwitchBase):
     trunk_review_completed: bool = False
     trunk_review_completed_at: Optional[datetime] = None
     trunk_review_note: Optional[str] = None
+
+    # 配置备份设置（仅设置项；最近备份状态走 /api/v1/config-backups）
+    backup_enabled: bool = True
+    backup_interval_minutes: Optional[int] = None
+    backup_device_type: Optional[str] = None
+    backup_config_command: Optional[str] = None
 
     # Collection method per data type
     mac_collection_method: Optional[str] = None

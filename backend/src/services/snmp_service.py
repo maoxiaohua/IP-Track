@@ -21,6 +21,7 @@ Standard SNMP OIDs used:
 import fnmatch
 import ipaddress
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from pysnmp.hlapi.v3arch.asyncio import (
     SnmpEngine, UsmUserData, UdpTransportTarget, ContextData,
@@ -431,6 +432,9 @@ class SNMPService:
     OID_IF_PHYS_ADDRESS = '1.3.6.1.2.1.2.2.1.6'    # ifPhysAddress
     OID_IF_ADMIN_STATUS = '1.3.6.1.2.1.2.2.1.7'    # ifAdminStatus
     OID_IF_OPER_STATUS = '1.3.6.1.2.1.2.2.1.8'     # ifOperStatus
+    # ifLastChange：该端口状态最后一次变化的时刻，单位是「距设备启动的百分之一秒」。
+    # 单看这个值无法判断闲置多久，必须同时读 sysUpTime 换算成绝对时间。
+    OID_IF_LAST_CHANGE = '1.3.6.1.2.1.2.2.1.9'     # ifLastChange
     OID_IF_ALIAS = '1.3.6.1.2.1.31.1.1.1.18'       # ifAlias
     OID_BRIDGE_ADDRESS = '1.3.6.1.2.1.17.1.1.0'    # dot1dBaseBridgeAddress
 
@@ -1216,8 +1220,21 @@ class SNMPService:
                 self.OID_IF_OPER_STATUS,
                 self.OID_IF_HIGH_SPEED,
                 self.OID_IF_PHYS_ADDRESS,
+                self.OID_IF_LAST_CHANGE,
             ]
             walked = await self._walk_many(switch_ip, bases, auth_data, port)
+
+            # ifLastChange 是相对设备启动的计数，必须配合 sysUpTime 才能变成绝对时间。
+            # 单次 GET 失败不影响接口清单，只是本轮算不出闲置时长（保持 None）。
+            device_boot: Optional[datetime] = None
+            uptime = await self._get_oid(
+                switch_ip, self.OID_SYS_UPTIME, auth_data, port, log_errors=False
+            )
+            uptime_ticks = self._to_int(uptime)
+            if uptime_ticks is not None:
+                device_boot = (
+                    datetime.now(timezone.utc) - timedelta(seconds=uptime_ticks / 100)
+                )
 
             def by_index(base: str) -> Dict[int, Any]:
                 rows = {}
@@ -1236,6 +1253,7 @@ class SNMPService:
             oper = by_index(self.OID_IF_OPER_STATUS)
             speeds = by_index(self.OID_IF_HIGH_SPEED)
             phys = by_index(self.OID_IF_PHYS_ADDRESS)
+            last_changes = by_index(self.OID_IF_LAST_CHANGE)
 
             if not names and not descrs:
                 return {'status': 'error', 'entries': [], 'message': 'interface table is empty'}
@@ -1250,6 +1268,16 @@ class SNMPService:
                 if_name = self._string_value(names.get(if_index))
                 phys_value = phys.get(if_index)
                 raw_phys = self._raw_octets(phys_value) if phys_value is not None else b''
+                # ifLastChange 折算成绝对时间：设备启动时刻 + 端口变更计数。
+                # walk 在 GET sysUpTime 之后完成，极少数情况下计数会超过 uptime，
+                # 折算出「未来时间」，统一夹到当前时刻。
+                change_ticks = self._to_int(last_changes.get(if_index))
+                change_at = None
+                if change_ticks is not None and device_boot is not None:
+                    change_at = min(
+                        device_boot + timedelta(seconds=change_ticks / 100),
+                        datetime.now(timezone.utc),
+                    )
                 entries.append({
                     'if_index': if_index,
                     'if_name': if_name,
@@ -1261,6 +1289,8 @@ class SNMPService:
                     'speed_mbps': self._to_int(speeds.get(if_index)),
                     'phys_address': self._format_mac_address(raw_phys) if len(raw_phys) == 6 else None,
                     'lag_key': self.normalize_lag_key(if_name),
+                    'last_change_ticks': change_ticks,
+                    'last_change_at': change_at,
                 })
 
             logger.info(f"Collected {len(entries)} interfaces from {switch_ip}")

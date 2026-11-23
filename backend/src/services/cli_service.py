@@ -204,7 +204,9 @@ class CLIService:
         timeout: int = 30,
         enable_secret: str = None,
         transport: str = 'ssh',
-        raise_on_error: bool = False
+        raise_on_error: bool = False,
+        banner_timeout: Optional[int] = None,
+        auth_timeout: Optional[int] = None,
     ) -> Optional[ConnectHandler]:
         """
         Create CLI connection to network device.
@@ -240,6 +242,11 @@ class CLIService:
                 'session_timeout': timeout,
                 'conn_timeout': timeout,
             }
+            # 仅调用方显式给出时生效：慢链路上放宽 SSH 握手/认证超时
+            if banner_timeout:
+                device['banner_timeout'] = banner_timeout
+            if auth_timeout:
+                device['auth_timeout'] = auth_timeout
 
             # Add enable secret if provided (for Cisco and Dell Force10)
             if enable_secret and base_device_type in self.ENABLE_MODE_DEVICE_TYPES:
@@ -337,7 +344,9 @@ class CLIService:
         device_type: str = 'dell_os10',
         port: int = 22,
         timeout: int = 30,
-        enable_secret: str = None
+        enable_secret: str = None,
+        banner_timeout: Optional[int] = None,
+        auth_timeout: Optional[int] = None,
     ) -> Optional[ConnectHandler]:
         """Backward-compatible wrapper for legacy SSH-only call sites."""
         return self._create_cli_connection(
@@ -348,7 +357,9 @@ class CLIService:
             port=port,
             timeout=timeout,
             enable_secret=enable_secret,
-            transport='ssh'
+            transport='ssh',
+            banner_timeout=banner_timeout,
+            auth_timeout=auth_timeout,
         )
 
     async def _get_cached_command(
@@ -2869,6 +2880,79 @@ class CLIService:
                 try:
                     connection.disconnect()
                     logger.debug(f"CLI connection closed to {switch_ip}")
+                except Exception:
+                    pass
+
+    def fetch_running_config(
+        self,
+        switch_ip: str,
+        switch_config: Dict,
+        device_type: str,
+        command: str
+    ) -> str:
+        """
+        只读拉取设备配置文本（供配置备份模块使用）。
+
+        严格只读：只执行调用方给出的 show/display 类命令，绝不调用
+        save_config()/config_mode()，也不向设备下发任何写配置命令。
+        连接或命令失败时抛出原始异常，由调用方记录失败原因。
+        """
+        connection = None
+        transport = switch_config.get('cli_transport', 'ssh')
+        try:
+            password = decrypt_password(switch_config['password_encrypted'])
+            enable_secret = None
+            if switch_config.get('enable_password_encrypted'):
+                enable_secret = decrypt_password(switch_config['enable_password_encrypted'])
+
+            connection = self._create_cli_connection(
+                host=switch_ip,
+                username=switch_config['username'],
+                password=password,
+                device_type=device_type,
+                port=switch_config.get('ssh_port'),
+                timeout=switch_config.get('connection_timeout', 30),
+                enable_secret=enable_secret,
+                transport=transport,
+                raise_on_error=True,
+                banner_timeout=switch_config.get('handshake_timeout'),
+                auth_timeout=switch_config.get('handshake_timeout'),
+            )
+            if not connection:
+                raise RuntimeError('CLI 连接失败')
+
+            output = self._execute_command(
+                connection,
+                command,
+                device_type=device_type,
+                transport=transport,
+                read_timeout=120,
+                delay_factor=3 if self.normalize_cli_transport(transport) == 'telnet' else 2,
+                max_loops=400 if self.normalize_cli_transport(transport) == 'telnet' else 300,
+            )
+            cleaned = self._strip_ansi_codes(output or '')
+            # 部分设备（如 Nokia MD-CLI）会把提示符回显在命令回显行里，
+            # 使 send_command 误判命令已结束，只拿到 banner/回显（约 160 字节）。
+            # 输出明显偏短时清空通道，用 timing 方式重读同一只读命令，取更长者。
+            if len(cleaned.strip()) < 1024:
+                try:
+                    connection.clear_buffer()
+                except Exception:
+                    pass
+                output = connection.send_command_timing(
+                    command,
+                    read_timeout=120,
+                    delay_factor=3 if self.normalize_cli_transport(transport) == 'telnet' else 2,
+                    max_loops=400 if self.normalize_cli_transport(transport) == 'telnet' else 300,
+                )
+                retry_cleaned = self._strip_ansi_codes(output or '')
+                if len(retry_cleaned.strip()) > len(cleaned.strip()):
+                    cleaned = retry_cleaned
+            return cleaned
+        finally:
+            if connection:
+                try:
+                    connection.disconnect()
                 except Exception:
                     pass
 

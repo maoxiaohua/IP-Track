@@ -118,6 +118,8 @@ export interface TopologyInterface {
   speed_mbps: number | null
   phys_address: string | null
   lag_key: string | null
+  last_change_ticks: number | null
+  last_change_at: string | null
   last_seen: string | null
 }
 

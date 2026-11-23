@@ -183,7 +183,16 @@
             <el-option label="Dell" value="dell" />
             <el-option label="Alcatel-Lucent" value="alcatel" />
             <el-option label="Juniper" value="juniper" />
+            <el-option label="Arista" value="arista" />
+            <el-option label="HPE" value="hpe" />
+            <el-option label="Huawei" value="huawei" />
             <el-option label="H3C" value="h3c" />
+            <el-option label="Fortinet" value="fortinet" />
+            <el-option label="Extreme" value="extreme" />
+            <el-option label="Aruba" value="aruba" />
+            <el-option label="MikroTik" value="mikrotik" />
+            <el-option label="Palo Alto" value="paloalto" />
+            <el-option label="其他" value="other" />
           </el-select>
         </el-form-item>
 
@@ -780,6 +789,46 @@
         </el-card>
       </el-tab-pane>
 
+      <el-tab-pane label="端口清单" name="interfaces">
+        <el-card>
+          <template #header>
+            <div class="card-header">
+              <span class="section-title">端口清单 ({{ topologyInterfaces.length }} 个端口)</span>
+              <el-text type="info" size="small">闲置时长仅对「链路非 up」的端口计算（当前时间 - ifLastChange，含 admin 禁用的端口）；up 端口为使用中，不计闲置</el-text>
+            </div>
+          </template>
+          <el-empty
+            v-if="!topologyInterfaces.length && !topologyLoading"
+            description="该交换机暂无接口采集数据，请先到「邻居 / 拓扑」页执行采集"
+            :image-size="60"
+          />
+          <el-table v-else :data="topologyInterfaces" stripe border size="small" v-loading="topologyLoading">
+            <el-table-column label="接口" min-width="150">
+              <template #default="{ row }">
+                {{ row.if_name || row.if_descr || row.if_index }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="if_alias" label="描述" min-width="140" />
+            <el-table-column label="状态" width="120">
+              <template #default="{ row }">
+                {{ row.admin_status || '-' }} / {{ row.oper_status || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="speed_mbps" label="速率(Mbps)" width="110" />
+            <el-table-column prop="last_change_at" label="最后变更" min-width="170" sortable>
+              <template #default="{ row }">
+                {{ formatDateTime(row.last_change_at) }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="last_change_at" label="闲置时长" width="110">
+              <template #default="{ row }">
+                {{ formatIdleDuration(row) }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-tab-pane>
+
       <el-tab-pane label="邻居 / 拓扑" name="topology">
         <el-card>
           <template #header>
@@ -866,27 +915,130 @@
               </el-table>
             </el-tab-pane>
 
-            <el-tab-pane label="接口" name="interfaces">
-              <el-empty v-if="!topologyInterfaces.length && !topologyLoading" description="该交换机暂无已采集的接口" :image-size="60" />
-              <el-table v-else :data="topologyInterfaces" stripe border size="small" v-loading="topologyLoading">
-                <el-table-column label="接口" min-width="150">
-                  <template #default="{ row }">
-                    {{ row.if_name || row.if_descr || row.if_index }}
-                  </template>
-                </el-table-column>
-                <el-table-column prop="if_alias" label="描述" min-width="140" />
-                <el-table-column label="状态" width="120">
-                  <template #default="{ row }">
-                    {{ row.admin_status || '-' }} / {{ row.oper_status || '-' }}
-                  </template>
-                </el-table-column>
-                <el-table-column prop="speed_mbps" label="速率(Mbps)" width="110" />
-              </el-table>
-            </el-tab-pane>
           </el-tabs>
         </el-card>
       </el-tab-pane>
+
+      <el-tab-pane label="配置备份" name="backup">
+        <el-card shadow="never">
+          <template #header>
+            <div class="backup-header">
+              <span>配置备份（只读抓取 running-config）</span>
+              <el-button size="small" :loading="backupLoading" @click="loadBackupData">
+                <template #icon><el-icon><Refresh /></el-icon></template>
+                刷新
+              </el-button>
+            </div>
+          </template>
+
+          <template v-if="backupOverview">
+            <el-alert
+              v-if="!backupOverview.supported"
+              type="warning"
+              :closable="false"
+              show-icon
+              :title="backupOverview.unsupported_reason || '暂不支持该厂商的配置备份，可在配置备份模块中手动指定驱动和命令'"
+              style="margin-bottom: 12px;"
+            />
+            <el-descriptions :column="3" border size="small" style="margin-bottom: 12px;">
+              <el-descriptions-item label="备份状态">
+                <el-tag :type="backupStatusType(backupOverview.status)" size="small">{{ backupStatusText(backupOverview.status) }}</el-tag>
+                <div v-if="backupOverview.message" class="backup-msg">{{ backupOverview.message }}</div>
+              </el-descriptions-item>
+              <el-descriptions-item label="上次备份">{{ formatBackupTime(backupOverview.last_backup_at) }}</el-descriptions-item>
+              <el-descriptions-item label="上次成功">{{ formatBackupTime(backupOverview.last_success_at) }}</el-descriptions-item>
+              <el-descriptions-item label="版本数">{{ backupOverview.version_count }}</el-descriptions-item>
+              <el-descriptions-item label="配置大小">{{ formatBackupBytes(backupOverview.last_success_size) }}</el-descriptions-item>
+              <el-descriptions-item label="备份间隔">
+                {{ backupOverview.interval_minutes }} 分钟（{{ backupOverview.backup_interval_minutes ? '单台设置' : '全局默认' }}）
+              </el-descriptions-item>
+            </el-descriptions>
+
+            <div class="backup-actions">
+              <el-tooltip :content="backupRunTooltip" placement="top">
+                <span>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    :loading="backupRunning"
+                    :disabled="!canBackupNow"
+                    @click="handleBackupNow"
+                  >
+                    立即备份
+                  </el-button>
+                </span>
+              </el-tooltip>
+              <el-button size="small" :disabled="!backupOverview.last_success_id" @click="openBackupContent(backupOverview.last_success_id)">
+                查看最新配置
+              </el-button>
+              <el-button size="small" :disabled="!backupOverview.last_success_id" @click="downloadBackupLatest">
+                下载最新
+              </el-button>
+              <router-link to="/config-backups" class="backup-link">在「配置备份」模块中管理 →</router-link>
+            </div>
+
+            <el-table :data="backupHistory" size="small" stripe v-loading="backupLoading" empty-text="暂无备份记录">
+              <el-table-column label="开始时间" min-width="160">
+                <template #default="{ row }">{{ formatBackupTime(row.started_at) }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="90">
+                <template #default="{ row }">
+                  <el-tag :type="backupStatusType(row.status)" size="small">{{ backupStatusText(row.status) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="触发" width="80">
+                <template #default="{ row }">{{ row.trigger_source === 'manual' ? '手动' : '定时' }}</template>
+              </el-table-column>
+              <el-table-column label="大小" width="90">
+                <template #default="{ row }">{{ formatBackupBytes(row.size_bytes) }}</template>
+              </el-table-column>
+              <el-table-column label="耗时" width="90">
+                <template #default="{ row }">{{ row.duration_ms != null ? `${(row.duration_ms / 1000).toFixed(1)} s` : '—' }}</template>
+              </el-table-column>
+              <el-table-column label="说明" min-width="200" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.message || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="190" fixed="right">
+                <template #default="{ row }">
+                  <el-button link size="small" :disabled="!row.sha256" @click="openBackupContent(row.id)">查看</el-button>
+                  <el-button link size="small" :disabled="!row.sha256" @click="downloadBackupRecord(row.id)">下载</el-button>
+                  <el-button link size="small" :disabled="!previousSuccessId(row)" @click="openBackupDiff(row)">对比</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </template>
+          <el-empty v-else-if="!backupLoading" description="暂无备份信息" :image-size="60" />
+        </el-card>
+      </el-tab-pane>
     </el-tabs>
+
+    <el-dialog v-model="backupContentVisible" :title="backupContentTitle" width="1000px" destroy-on-close>
+      <div v-loading="backupContentLoading">
+        <div v-if="backupContentMeta" class="backup-content-meta">
+          <el-tag size="small" effect="plain">#{{ backupContentMeta.id }}</el-tag>
+          <span>{{ formatBackupTime(backupContentMeta.started_at) }}</span>
+          <span>{{ formatBackupBytes(backupContentMeta.size_bytes) }}</span>
+          <el-button link type="primary" size="small" @click="downloadBackupRecord(backupContentMeta.id)">下载</el-button>
+        </div>
+        <pre class="backup-config-content">{{ backupContent || '（空）' }}</pre>
+      </div>
+    </el-dialog>
+
+    <el-dialog v-model="backupDiffVisible" title="配置版本对比" width="1100px" destroy-on-close>
+      <el-alert
+        v-if="backupDiffResult?.truncated"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="差异过大已截断显示"
+        style="margin-bottom: 8px;"
+      />
+      <div v-loading="backupDiffLoading" class="backup-diff-box">
+        <div v-if="!backupDiffResult" class="backup-diff-empty">加载中…</div>
+        <div v-else-if="!backupDiffLines.length" class="backup-diff-empty">两个版本内容完全一致</div>
+        <pre v-else class="backup-diff-content"><div v-for="line in backupDiffLines" :key="line.key" :class="line.cls">{{ line.text || ' ' }}</div></pre>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -917,6 +1069,21 @@ import {
   type TopologyLink,
   type TopologyNeighbor,
 } from '@/api/topology'
+import {
+  downloadBackup,
+  fetchBackupContent,
+  fetchBackupDiff,
+  fetchBackupHistory,
+  fetchBackupOverview,
+  runBackupNow,
+} from '@/api/configBackups'
+import type {
+  BackupDiffResponse,
+  BackupOverviewItem,
+  BackupRecord,
+  BackupStatus,
+  BackupVersionContent,
+} from '@/api/configBackups'
 
 const route = useRoute()
 const router = useRouter()
@@ -1163,6 +1330,21 @@ const formatDateTime = (dateStr?: string | null) => {
     minute: '2-digit',
     second: '2-digit'
   })
+}
+
+// 端口闲置时长：除「链路 up」外的端口都算闲置（admin down 同样是闲置，只是被人为关闭）。
+// 闲置时长 = 现在 - ifLastChange；up 端口正在使用，不显示时长。
+const formatIdleDuration = (row: TopologyInterface) => {
+  const oper = (row.oper_status || '').toLowerCase()
+  if (oper === 'up') return '使用中'
+  if (!row.last_change_at) return '-'
+  const ms = Date.now() - new Date(row.last_change_at).getTime()
+  if (!Number.isFinite(ms) || ms < 0) return '-'
+  const days = Math.floor(ms / 86400000)
+  if (days >= 1) return `${days} 天`
+  const hours = Math.floor(ms / 3600000)
+  if (hours >= 1) return `${hours} 小时`
+  return `${Math.floor(ms / 60000)} 分钟`
 }
 
 const getRoleType = (role?: string) => {
@@ -1795,9 +1977,175 @@ const collectTopologyData = async () => {
   }
 }
 
-// 页签首次切到「邻居 / 拓扑」时才真正发请求。
+// ---------- 配置备份 ----------
+const BACKUP_STATUS_META: Record<BackupStatus, { text: string; type: 'info' | 'primary' | 'success' | 'danger' | 'warning' }> = {
+  never: { text: '未备份', type: 'info' },
+  running: { text: '备份中', type: 'primary' },
+  success: { text: '成功', type: 'success' },
+  failed: { text: '失败', type: 'danger' },
+  unsupported: { text: '不支持', type: 'info' },
+  skipped: { text: '已跳过', type: 'warning' },
+}
+
+const backupLoading = ref(false)
+const backupRunning = ref(false)
+const backupOverview = ref<BackupOverviewItem | null>(null)
+const backupHistory = ref<BackupRecord[]>([])
+const backupSuccessVersions = ref<BackupRecord[]>([])
+const backupContentVisible = ref(false)
+const backupContentLoading = ref(false)
+const backupContent = ref('')
+const backupContentMeta = ref<BackupVersionContent | null>(null)
+const backupDiffVisible = ref(false)
+const backupDiffLoading = ref(false)
+const backupDiffResult = ref<BackupDiffResponse | null>(null)
+
+const backupStatusText = (status: string) => BACKUP_STATUS_META[status as BackupStatus]?.text || status
+const backupStatusType = (status: string) => BACKUP_STATUS_META[status as BackupStatus]?.type || 'info'
+
+const formatBackupTime = (value: string | null | undefined) => {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+const formatBackupBytes = (value: number | null | undefined) => {
+  if (value == null) return '—'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(2)} MB`
+}
+
+const canBackupNow = computed(() =>
+  !!backupOverview.value &&
+  authStore.isLoggedIn &&
+  backupOverview.value.enabled &&
+  backupOverview.value.backup_enabled &&
+  backupOverview.value.supported
+)
+
+const backupRunTooltip = computed(() => {
+  if (!authStore.isLoggedIn) return '访客只读，请登录后备份'
+  if (!backupOverview.value) return '暂无备份信息'
+  if (!backupOverview.value.enabled) return '交换机已停用'
+  if (!backupOverview.value.backup_enabled) return '该交换机已关闭自动备份'
+  if (!backupOverview.value.supported) return backupOverview.value.unsupported_reason || '缺少可用驱动或命令'
+  return '立即执行一次只读备份'
+})
+
+const loadBackupData = async () => {
+  backupLoading.value = true
+  try {
+    const [overviewData, historyData, successData] = await Promise.all([
+      fetchBackupOverview(),
+      fetchBackupHistory(switchId.value, { page: 1, page_size: 20 }),
+      fetchBackupHistory(switchId.value, { page: 1, page_size: 100, status: 'success' }),
+    ])
+    backupOverview.value = overviewData.items.find(item => item.switch_id === switchId.value) || null
+    backupHistory.value = historyData.items
+    backupSuccessVersions.value = successData.items
+  } catch {
+    // apiClient 已统一提示错误
+  } finally {
+    backupLoading.value = false
+  }
+}
+
+const handleBackupNow = async () => {
+  backupRunning.value = true
+  try {
+    const result = await runBackupNow(switchId.value)
+    if (result.status === 'success') {
+      ElMessage.success(result.message || '备份成功')
+    } else {
+      ElMessage.warning(result.message || `备份未成功（${result.status}）`)
+    }
+    await loadBackupData()
+  } catch {
+    // apiClient 已统一提示错误
+  } finally {
+    backupRunning.value = false
+  }
+}
+
+const backupContentTitle = computed(() =>
+  backupContentMeta.value ? `配置内容 #${backupContentMeta.value.id}` : '配置内容'
+)
+
+const openBackupContent = async (backupId: number | null) => {
+  if (!backupId) return
+  backupContentVisible.value = true
+  backupContentLoading.value = true
+  backupContent.value = ''
+  backupContentMeta.value = null
+  try {
+    const data = await fetchBackupContent(backupId)
+    backupContentMeta.value = data
+    backupContent.value = data.content
+  } catch {
+    backupContentVisible.value = false
+  } finally {
+    backupContentLoading.value = false
+  }
+}
+
+const downloadBackupRecord = async (backupId: number) => {
+  try {
+    await downloadBackup(backupId, `${switchInfo.value?.name || 'switch'}.cfg`)
+  } catch {
+    ElMessage.error('下载失败，请稍后重试')
+  }
+}
+
+const downloadBackupLatest = () => {
+  const id = backupOverview.value?.last_success_id
+  if (id) void downloadBackupRecord(id)
+}
+
+// 同一交换机的成功版本按时间倒序，取当前行之后的下一条即为更早的成功版本
+const previousSuccessId = (row: BackupRecord) => {
+  const index = backupSuccessVersions.value.findIndex(item => item.id === row.id)
+  if (index < 0) return null
+  const previous = backupSuccessVersions.value[index + 1]
+  return previous ? previous.id : null
+}
+
+const openBackupDiff = async (row: BackupRecord) => {
+  const fromId = previousSuccessId(row)
+  if (!fromId) return
+  backupDiffVisible.value = true
+  backupDiffLoading.value = true
+  backupDiffResult.value = null
+  try {
+    backupDiffResult.value = await fetchBackupDiff(fromId, row.id)
+  } catch {
+    // apiClient 已统一提示错误
+  } finally {
+    backupDiffLoading.value = false
+  }
+}
+
+const backupDiffLines = computed(() => {
+  if (!backupDiffResult.value) return []
+  return backupDiffResult.value.diff.split('\n').map((text, index) => {
+    let cls = 'backup-diff-line'
+    if (text.startsWith('+++') || text.startsWith('---')) {
+      cls += ' diff-meta'
+    } else if (text.startsWith('@@')) {
+      cls += ' diff-hunk'
+    } else if (text.startsWith('+')) {
+      cls += ' diff-add'
+    } else if (text.startsWith('-')) {
+      cls += ' diff-del'
+    }
+    return { text, cls, key: index }
+  })
+})
+
+// 页签首次切到「端口清单 / 邻居 / 拓扑 / 配置备份」时才真正发请求。
 watch(activeTab, (tab) => {
-  if (tab === 'topology') loadTopologyData()
+  if (tab === 'topology' || tab === 'interfaces') loadTopologyData()
+  if (tab === 'backup' && !backupOverview.value) loadBackupData()
 })
 
 const refreshDeviceInfo = async () => {
@@ -1978,5 +2326,108 @@ onMounted(async () => {
 
 :deep(.el-card__header .el-button--info) {
   color: #fff !important;
+}
+
+/* ---------- 配置备份页签 ---------- */
+.backup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.backup-msg {
+  margin-top: 4px;
+  color: #909399;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.backup-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.backup-link {
+  color: #409eff;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.backup-content-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  color: #606266;
+  font-size: 12px;
+}
+
+.backup-config-content {
+  margin: 0;
+  padding: 12px;
+  max-height: 60vh;
+  overflow: auto;
+  background: #f5f7fa;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  color: #303133;
+}
+
+.backup-diff-box {
+  min-height: 200px;
+}
+
+.backup-diff-empty {
+  padding: 40px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+}
+
+.backup-diff-content {
+  margin: 0;
+  padding: 12px;
+  max-height: 56vh;
+  overflow: auto;
+  background: #ffffff;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #303133;
+}
+
+.backup-diff-line {
+  white-space: pre;
+  padding: 0 4px;
+}
+
+.backup-diff-line.diff-add {
+  background: #e7f7e7;
+  color: #1a7f37;
+}
+
+.backup-diff-line.diff-del {
+  background: #fdecea;
+  color: #b42318;
+}
+
+.backup-diff-line.diff-hunk {
+  background: #eef4ff;
+  color: #2f54eb;
+}
+
+.backup-diff-line.diff-meta {
+  color: #909399;
 }
 </style>

@@ -80,6 +80,18 @@ class Settings(BaseSettings):
     OPTICAL_MODULE_INTERVAL_MINUTES: int = 720
     TOPOLOGY_COLLECTION_INTERVAL_MINUTES: int = 360
     TOPOLOGY_MAX_COLLECT_CONCURRENCY: int = 5  # 1000 台同时 SNMP 会打爆网络，需限流
+    # 配置备份（只读）：每 CONFIG_BACKUP_TICK_MINUTES 扫描一次到期设备
+    CONFIG_BACKUP_ENABLED: bool = True
+    CONFIG_BACKUP_TICK_MINUTES: int = 5
+    CONFIG_BACKUP_MAX_CONCURRENCY: int = 3  # 同时 SSH 备份的设备数上限
+    CONFIG_BACKUP_DIR: str = "/app/data/config_backups"
+    # 拥堵/慢速链路上 SSH banner 与认证响应可能远超 Netmiko 默认 15s，
+    # 放宽握手超时，避免把“网络慢”误判成“认证失败”。
+    CONFIG_BACKUP_HANDSHAKE_TIMEOUT_SECONDS: int = 90
+    # 登录耗时达到该秒数仍失败，判为“网络慢”而非凭据错误
+    CONFIG_BACKUP_SLOW_CONNECT_SECONDS: int = 10
+    # 备份失败后到下次重试的最小间隔（分钟），与成功后的备份间隔独立
+    CONFIG_BACKUP_RETRY_MINUTES: int = 15
     ALARM_CLEANUP_HOUR: int = 3
     ALARM_RETENTION_DAYS: int = 30
     COLLECTION_JOB_RETENTION_DAYS: int = 30

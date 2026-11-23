@@ -78,6 +78,9 @@
                 <el-dropdown-item command="/subnet-probe">
                   <el-icon><Search /></el-icon> 子网存活探测
                 </el-dropdown-item>
+                <el-dropdown-item command="/config-backups">
+                  <el-icon><Document /></el-icon> 配置备份
+                </el-dropdown-item>
                 <el-dropdown-item command="/visio">
                   <el-icon><Document /></el-icon> Visio 图纸查看
                 </el-dropdown-item>
