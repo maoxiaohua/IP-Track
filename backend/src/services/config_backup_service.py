@@ -51,7 +51,9 @@ VENDOR_PRESETS: Dict[str, Tuple[str, str]] = {
     'huawei': ('huawei', 'display current-configuration'),
     'h3c': ('hp_comware', 'display current-configuration'),
     'hpe': ('hp_comware', 'display current-configuration'),
-    'alcatel': ('nokia_sros', 'admin display-config'),
+    # MD-CLI 设备（7220 IXR-D1/D2 等）用 info flat，输出统一的 "set /" 逐条格式；
+    # 经典 CLI 设备由 VENDOR_FALLBACK_TARGETS 回退到 admin display-config。
+    'alcatel': ('nokia_sros', 'info flat'),
     'dell': ('dell_force10', 'show running-config'),
     'fortinet': ('fortinet', 'show full-configuration'),
     'extreme': ('extreme_exos', 'show configuration'),
@@ -64,14 +66,14 @@ VENDOR_PRESETS: Dict[str, Tuple[str, str]] = {
 # Dell：dell_force10 驱动 + show running-config 在 OS9(FTOS) 与 OS10(10.5.x) 上均实测可行，
 # 所以默认先试它；OS10 另有 show running-configuration（dell_os10 驱动）作为后备。
 # 不能先试 dell_os10：OS9 机器上提示符不匹配，要白等约 90~130 秒才超时。
-# Nokia SR OS 经典 CLI 用 admin display-config，MD-CLI 用 info flat / info。
+# Nokia SR OS：MD-CLI 用 info flat（set / 格式，默认），经典 CLI 回退 admin display-config，
+# 最后才用 info。统一优先 info flat，避免同一厂商备份出两种文本格式。
 VENDOR_FALLBACK_TARGETS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     'dell': (
         ('dell_os10', 'show running-configuration'),
     ),
     'alcatel': (
         ('nokia_sros', 'admin display-config'),
-        ('nokia_sros', 'info flat'),
         ('nokia_sros', 'info'),
     ),
 }
