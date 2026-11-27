@@ -529,8 +529,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .subnet-probe {
-  max-width: 1500px;
-  margin: 0 auto;
+  width: 100%;
 }
 
 .card-header {

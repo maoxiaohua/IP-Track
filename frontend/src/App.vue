@@ -202,8 +202,6 @@ const handleMoreNav = (path: string) => {
   align-items: center;
   height: 100%;
   padding: 0 30px;
-  max-width: 1800px;
-  margin: 0 auto;
 }
 
 .header-content h1 {
@@ -289,8 +287,6 @@ const handleMoreNav = (path: string) => {
 
 .el-main {
   padding: 30px;
-  max-width: 1800px;
-  margin: 0 auto;
   width: 100%;
 }
 

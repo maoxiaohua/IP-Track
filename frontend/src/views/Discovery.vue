@@ -853,8 +853,7 @@ onUnmounted(() => {
 
 <style scoped>
 .discovery-view {
-  max-width: 1400px;
-  margin: 0 auto;
+  width: 100%;
 }
 
 .card-header h2 {

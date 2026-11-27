@@ -274,8 +274,7 @@ function closeDocument() {
 
 <style scoped>
 .visio-viewer {
-  max-width: 1400px;
-  margin: 0 auto;
+  width: 100%;
 }
 
 .card-header {
