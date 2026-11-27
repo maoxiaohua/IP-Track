@@ -814,6 +814,20 @@
                 {{ row.admin_status || '-' }} / {{ row.oper_status || '-' }}
               </template>
             </el-table-column>
+            <el-table-column label="对端设备" min-width="150">
+              <template #default="{ row }">
+                <el-tooltip
+                  v-if="portDeviceOf(row) && portDeviceOf(row)!.port_device"
+                  :content="portDeviceTooltip(portDeviceOf(row)!)"
+                  placement="top"
+                >
+                  <el-tag :type="portDeviceTagType(portDeviceOf(row)!)" effect="dark" size="small">
+                    {{ portDeviceLabel(portDeviceOf(row)!) }}
+                  </el-tag>
+                </el-tooltip>
+                <span v-else class="port-device-empty">-</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="speed_mbps" label="速率(Mbps)" width="110" />
             <el-table-column prop="last_change_at" label="最后变更" min-width="170" sortable>
               <template #default="{ row }">
@@ -1062,9 +1076,11 @@ import { useSNMPProfilesStore } from '@/stores/snmpProfiles'
 import { useAuthStore } from '@/stores/auth'
 import {
   collectTopology,
+  getSwitchPortDevices,
   getTopologyGraph,
   getTopologyInterfaces,
   getTopologyNeighbors,
+  type SwitchPortDevice,
   type TopologyInterface,
   type TopologyLink,
   type TopologyNeighbor,
@@ -1127,6 +1143,8 @@ const topologyCollecting = ref(false)
 const topologyNeighbors = ref<TopologyNeighbor[]>([])
 const topologyInterfaces = ref<TopologyInterface[]>([])
 const topologyLinks = ref<TopologyLink[]>([])
+// 端口 ↔ 对端设备（后端统一判定，避免前端重复实现分类规则）
+const topologyPortDevices = ref<SwitchPortDevice[]>([])
 
 const arpCurrentPage = ref(1)
 const macCurrentPage = ref(1)
@@ -1923,6 +1941,40 @@ const linkStatusTagType = (status: string) => {
   }
 }
 
+// 对端设备（后端统一判定）：if_index 在同一交换机内唯一，直接按索引关联。
+const portDeviceOf = (row: TopologyInterface) =>
+  topologyPortDevices.value.find((item) => item.if_index === row.if_index)
+
+const PORT_DEVICE_LABEL: Record<string, string> = {
+  switch: '交换机',
+  router: '路由器',
+  'wlan-ap': '无线 AP',
+  hub: '集线器',
+  phone: 'IP 话机',
+  host: 'PC / 服务器',
+  unknown: '未识别'
+}
+
+const portDeviceLabel = (device: SwitchPortDevice) =>
+  PORT_DEVICE_LABEL[device.port_device_class || ''] || '未识别'
+
+const portDeviceTagType = (device: SwitchPortDevice) => {
+  const cls = device.port_device_class
+  if (cls === 'switch' || cls === 'router') return 'success'
+  if (cls === 'hub' || cls === 'wlan-ap') return 'warning'
+  return 'info'
+}
+
+const portDeviceTooltip = (device: SwitchPortDevice) => {
+  const info = device.port_device
+  if (!info) return '无邻居信息'
+  const parts = [`置信度 ${info.confidence}%`]
+  if (info.sys_name) parts.push(`名称 ${info.sys_name}`)
+  if (info.reasons?.length) parts.push(info.reasons.join('；'))
+  if (device.status === 'multiple') parts.push(`该端口有 ${device.candidates} 个邻居`)
+  return parts.join(' · ')
+}
+
 const isLocalA = (link: TopologyLink) => link.a_switch_id === switchId.value
 const localPortName = (link: TopologyLink) => (isLocalA(link) ? link.a_port_name : link.b_port_name)
 const remotePortName = (link: TopologyLink) => (isLocalA(link) ? link.b_port_name : link.a_port_name)
@@ -1934,13 +1986,16 @@ const remoteLabel = (link: TopologyLink) => {
 const loadTopologyData = async () => {
   topologyLoading.value = true
   try {
-    const [neighborRes, interfaceRes, graphRes] = await Promise.all([
+    const [neighborRes, interfaceRes, graphRes, portDeviceRes] = await Promise.all([
       getTopologyNeighbors({ switch_id: switchId.value, limit: 1000 }),
       getTopologyInterfaces({ switch_id: switchId.value, limit: 2000 }),
-      getTopologyGraph({ focus_switch_id: switchId.value, depth: 1 })
+      getTopologyGraph({ focus_switch_id: switchId.value, depth: 1 }),
+      // 端口设备联动失败不应拖垮整页拓扑，单独兜底为空。
+      getSwitchPortDevices(switchId.value).catch(() => ({ data: [] as SwitchPortDevice[] }))
     ])
     topologyNeighbors.value = neighborRes.data || []
     topologyInterfaces.value = interfaceRes.data || []
+    topologyPortDevices.value = portDeviceRes.data || []
     topologyLinks.value = (graphRes.data.links || []).filter(
       (link) => link.a_switch_id === switchId.value || link.b_switch_id === switchId.value
     )
@@ -2428,6 +2483,10 @@ onMounted(async () => {
 }
 
 .backup-diff-line.diff-meta {
+  color: #909399;
+}
+
+.port-device-empty {
   color: #909399;
 }
 </style>

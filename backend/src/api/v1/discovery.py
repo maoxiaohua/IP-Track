@@ -12,6 +12,8 @@ from schemas.switch import SwitchCreate, SwitchResponse
 from services.switch_discovery import switch_discovery_service
 from services.switch_manager import switch_manager
 from services.network_data_collector import network_data_collector
+from services.collection_worker import worker_pool
+from models.collection_job import JobType
 from services.cli_service import cli_service
 # 统一凭据解析：交换机可能引用 SNMP 模板，凭据不在自己行上。任何按交换机取
 # 凭据的地方都必须走这两个函数，直接读 switch.snmp_auth_password_encrypted
@@ -968,7 +970,14 @@ async def batch_add_switches(
         if skipped_count > 0:
             message += f"，跳过 {skipped_count} 个已存在的交换机"
         logger.info(message)
-        
+
+        # 发现新增的交换机立即排队首轮全量采集，避免首次数据要等全局调度间隔
+        if added_switches:
+            try:
+                await worker_pool.create_jobs(db, added_switches, JobType.ALL, priority=5)
+            except Exception as enqueue_err:
+                logger.warning(f"Failed to enqueue initial collection after discovery: {enqueue_err}")
+
         return added_switches
 
     except HTTPException:

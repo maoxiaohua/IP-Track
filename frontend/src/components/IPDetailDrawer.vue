@@ -113,6 +113,20 @@
             <el-descriptions-item label="VLAN">
               {{ ipDetail.vlan_id || '-' }}
             </el-descriptions-item>
+            <el-descriptions-item label="对端设备">
+              <template v-if="ipDetail.port_device_class">
+                <el-tag :type="peerTagType" effect="dark" size="small">
+                  {{ peerClassLabel }}
+                </el-tag>
+                <span v-if="ipDetail.port_device_confidence != null" class="peer-confidence">
+                  置信度 {{ ipDetail.port_device_confidence }}%
+                </span>
+              </template>
+              <span v-else style="color: #909399">-</span>
+            </el-descriptions-item>
+            <el-descriptions-item v-if="ipDetail.port_device_reasons" label="判定依据">
+              {{ ipDetail.port_device_reasons }}
+            </el-descriptions-item>
             <el-descriptions-item label="Location">
               {{ ipDetail.location || '-' }}
             </el-descriptions-item>
@@ -160,6 +174,38 @@
             </el-descriptions-item>
             <el-descriptions-item label="Last Boot">
               {{ ipDetail.last_boot_time ? formatDateTime(ipDetail.last_boot_time) : '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="SN 序列号">
+              <span class="hardware-serial">{{ ipDetail.serial_number || '-' }}</span>
+              <el-tag
+                v-if="ipDetail.hardware_source"
+                size="small"
+                :type="hardwareSourceTagType"
+                class="hardware-source-tag"
+              >
+                {{ hardwareSourceLabel }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="设备型号">
+              {{ ipDetail.device_model || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="硬件厂商">
+              {{ ipDetail.hardware_vendor || '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="采集时间">
+              {{ ipDetail.hardware_collected_at ? formatDateTime(ipDetail.hardware_collected_at) : '-' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="硬件采集">
+              <el-button
+                type="primary"
+                size="small"
+                :loading="hardwareLoading"
+                :disabled="hardwareLoading || !ipDetail.is_reachable"
+                @click="collectHardware"
+              >
+                {{ hardwareLoading ? '采集中…' : '立即采集' }}
+              </el-button>
+              <span v-if="!ipDetail.is_reachable" class="hardware-hint">设备当前离线</span>
             </el-descriptions-item>
           </el-descriptions>
         </el-collapse-item>
@@ -249,8 +295,9 @@ import {
   Connection,
   Monitor
 } from '@element-plus/icons-vue'
-import { ipamApi } from '@/api/ipam'
+import { ipamApi, hardwareApi } from '@/api/ipam'
 import type { IPAddressDetail, IPScanHistory } from '@/api/ipam'
+import { ElMessage } from 'element-plus'
 
 interface Props {
   modelValue: boolean
@@ -261,6 +308,7 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
+  refreshed: []
 }>()
 
 const visible = computed({
@@ -269,7 +317,30 @@ const visible = computed({
 })
 const loading = ref(false)
 const historyLoading = ref(false)
+const hardwareLoading = ref(false)
 const ipDetail = ref<IPAddressDetail>({} as IPAddressDetail)
+
+// 对端设备（后端统一判定）：只展示类别+置信度+依据，不在前端重复推断。
+const PEER_CLASS_LABEL: Record<string, string> = {
+  switch: '交换机',
+  router: '路由器',
+  'wlan-ap': '无线 AP',
+  hub: '集线器',
+  phone: 'IP 话机',
+  host: 'PC / 服务器',
+  unknown: '未识别'
+}
+
+const peerClassLabel = computed(
+  () => PEER_CLASS_LABEL[ipDetail.value.port_device_class || ''] || '未识别'
+)
+
+const peerTagType = computed<'success' | 'warning' | 'info'>(() => {
+  const cls = ipDetail.value.port_device_class
+  if (cls === 'switch' || cls === 'router') return 'success'
+  if (cls === 'hub' || cls === 'wlan-ap') return 'warning'
+  return 'info'
+})
 const scanHistory = ref<IPScanHistory[]>([])
 const activeCollapse = ref<string[]>(['location'])
 let detailRequestSeq = 0
@@ -372,6 +443,50 @@ const handleClose = (done?: () => void) => {
 const formatDateTime = (dateString: string) => {
   const date = new Date(dateString)
   return date.toLocaleString('zh-CN')
+}
+
+// 硬件资产来源（SN/型号），与后端 hardware_source 取值保持一致
+const HARDWARE_SOURCE_LABEL: Record<string, string> = {
+  entity: 'SNMP ENTITY',
+  printer: 'SNMP Printer',
+  'host-resources': 'SNMP Host',
+  sysdescr: 'SNMP sysDescr',
+  wmi: 'WMI',
+  winrm: 'WinRM',
+  bmc: 'BMC',
+  manual: '手工录入'
+}
+
+const hardwareSourceLabel = computed(
+  () => HARDWARE_SOURCE_LABEL[ipDetail.value.hardware_source || ''] || ipDetail.value.hardware_source || ''
+)
+
+const hardwareSourceTagType = computed<'success' | 'warning' | 'info' | 'danger'>(() => {
+  const source = ipDetail.value.hardware_source
+  if (source === 'wmi' || source === 'winrm') return 'success'
+  if (source === 'manual') return 'warning'
+  if (source === 'sysdescr') return 'info'
+  return 'info'
+})
+
+const collectHardware = async () => {
+  if (!props.ipId || hardwareLoading.value) return
+  hardwareLoading.value = true
+  try {
+    const result = await hardwareApi.collect({ ip_address_ids: [props.ipId], force: true })
+    if (result.queued > 0) {
+      ElMessage.success(result.message || '采集完成')
+      await loadIPDetail()
+      emit('refreshed')
+    } else {
+      ElMessage.warning('未获取到硬件信息，请确认设备已开启 SNMP，或已配置 WMI / WinRM 凭据')
+    }
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(detail || '硬件采集失败')
+  } finally {
+    hardwareLoading.value = false
+  }
 }
 
 const getDisplayHostname = (detail: Partial<IPAddressDetail>) => {
@@ -507,6 +622,21 @@ const hasChanges = (record: IPScanHistory) => {
   font-weight: 500;
 }
 
+.hardware-serial {
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.hardware-source-tag {
+  margin-left: 8px;
+}
+
+.hardware-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #909399;
+}
+
 .history-card {
   margin-bottom: 8px;
 }
@@ -579,5 +709,11 @@ const hasChanges = (record: IPScanHistory) => {
 :deep(.el-timeline-item__timestamp) {
   font-size: 12px;
   color: #909399;
+}
+
+.peer-confidence {
+  margin-left: 8px;
+  color: #606266;
+  font-size: 12px;
 }
 </style>

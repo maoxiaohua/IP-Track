@@ -13,6 +13,17 @@ export interface IPLookupResult {
   switch_ip?: string
   port_name?: string
   vlan_id?: number
+  // 端口↔设备联动：端口对面设备的类别、置信度与判定依据
+  port_device?: {
+    device_class: string
+    confidence: number
+    reasons: string[]
+    managed?: boolean
+    sys_name?: string | null
+    mgmt_ip?: string | null
+    status?: string
+    candidates?: number
+  } | null
   query_time_ms: number
   query_mode?: string  // 'cache', 'realtime', 'auto_fallback'
   data_age_seconds?: number  // How old is the cached data

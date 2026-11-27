@@ -48,6 +48,12 @@ WRITE_GET_PATHS = frozenset({
 # Paths whose GET variants also require a login.
 WRITE_PATH_PREFIXES = (f"{settings.API_V1_PREFIX}/auth/",)
 
+# Per-account UI preferences (column visibility). Still requires a valid token,
+# but read-only roles must be allowed to save their own view preferences.
+ROLE_EXEMPT_WRITE_PREFIXES = WRITE_PATH_PREFIXES + (
+    f"{settings.API_V1_PREFIX}/ipam/preferences/",
+)
+
 # Read-only work done through POST (query / compute only, no state change).
 PUBLIC_READ_POST_PATHS = frozenset({
     f"{settings.API_V1_PREFIX}/lookup/ip",
@@ -160,7 +166,7 @@ class ReadOnlyGuestMiddleware(BaseHTTPMiddleware):
         # Role-based check for write operations (auth endpoints stay self-service).
         if (
             settings.WRITE_ROLES
-            and not normalized.startswith(WRITE_PATH_PREFIXES)
+            and not normalized.startswith(ROLE_EXEMPT_WRITE_PREFIXES)
             and payload.get("role") not in settings.WRITE_ROLES
         ):
             return JSONResponse(

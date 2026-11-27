@@ -2,6 +2,8 @@ import apiClient, { API_BASE_URL } from './index'
 
 export interface IPAddressDetail {
   id: number
+  subnet_id?: number
+  subnet_name?: string
   ip_address: string
   status: string
   is_reachable: boolean
@@ -11,6 +13,13 @@ export interface IPAddressDetail {
   dns_name?: string
   system_name?: string
   machine_type?: string
+  // 硬件资产（SN/型号）：SNMP / WMI / WinRM 采集，也可手工录入
+  serial_number?: string | null
+  device_model?: string | null
+  hardware_vendor?: string | null
+  hardware_source?: string | null
+  hardware_collected_at?: string | null
+  hardware_attempted_at?: string | null
   vendor?: string
   contact?: string
   location?: string
@@ -23,10 +32,17 @@ export interface IPAddressDetail {
   switch_name?: string
   switch_port?: string
   vlan_id?: number
+  // 端口↔设备联动（后端 classify_unknown 判定结果）
+  port_device_class?: string | null
+  port_device_confidence?: number | null
+  port_device_reasons?: string | null
   last_seen_at?: string
   last_boot_time?: string
   last_scan_at?: string
   last_enrichment_at?: string
+  scan_count?: number
+  created_at?: string
+  updated_at?: string
   description?: string
 }
 
@@ -125,6 +141,51 @@ export interface OSTypeStatisticsResponse {
 export interface IPAddressListResponse {
   items: IPAddressDetail[]
   total: number
+}
+
+export interface HardwareInventorySettings {
+  enabled: boolean
+  retry_hours: number
+  wmi_concurrency: number
+  wmi_max_per_sweep: number
+  default_community_configured: boolean
+  wmi_domain: string
+  wmi_username: string
+  wmi_password_configured: boolean
+}
+
+export interface HardwareInventorySettingsUpdate {
+  enabled?: boolean
+  retry_hours?: number
+  wmi_concurrency?: number
+  wmi_max_per_sweep?: number
+  // 仅在填写新值时才覆盖，留空保持原值
+  default_community?: string
+  wmi_domain?: string
+  wmi_username?: string
+  wmi_password?: string
+}
+
+export interface HardwareCollectResult {
+  queued: number
+  message: string
+}
+
+export const hardwareApi = {
+  async getSettings(): Promise<HardwareInventorySettings> {
+    const response = await apiClient.get('/api/v1/ipam/hardware/settings')
+    return response.data
+  },
+
+  async updateSettings(payload: HardwareInventorySettingsUpdate): Promise<HardwareInventorySettings> {
+    const response = await apiClient.put('/api/v1/ipam/hardware/settings', payload)
+    return response.data
+  },
+
+  async collect(payload: { ip_address_ids?: number[]; subnet_id?: number; force?: boolean }): Promise<HardwareCollectResult> {
+    const response = await apiClient.post('/api/v1/ipam/hardware/collect', payload)
+    return response.data
+  }
 }
 
 export const ipamApi = {

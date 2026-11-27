@@ -227,6 +227,8 @@ async def topology_graph(
             'chassis_id': node.chassis_id if node else None,
             'vendor_hint': node.vendor_hint if node else None,
             'device_class': node.device_class if node else None,
+            'device_confidence': node.device_confidence if node else None,
+            'device_reasons': list(node.device_reasons) if node and node.device_reasons else None,
             'seen_count': node.seen_count if node else None,
             'degree': degree[node_id],
         }
@@ -385,12 +387,31 @@ async def list_unknown_nodes(db: AsyncSession = Depends(get_db)):
             'sys_name': row.sys_name,
             'vendor_hint': row.vendor_hint,
             'device_class': row.device_class,
+            'device_confidence': row.device_confidence,
+            'device_reasons': list(row.device_reasons) if row.device_reasons else None,
             'seen_count': row.seen_count,
             'first_seen': row.first_seen.isoformat() if row.first_seen else None,
             'last_seen': row.last_seen.isoformat() if row.last_seen else None,
         }
         for row in rows
     ]
+
+
+@router.get("/port-devices")
+async def get_port_devices(
+    switch_id: int = Query(..., ge=1),
+    port: Optional[str] = Query(None, min_length=1, max_length=128),
+    db: AsyncSession = Depends(get_db),
+):
+    """端口 ↔ 设备联动：返回该端口对面的设备类别、置信度与判定依据。
+
+    不传 port 时返回该交换机全部端口的结果（端口清单页一次取齐）。
+    """
+    from services.port_device_service import describe_port_devices, load_switch_port_devices
+
+    if port:
+        return await describe_port_devices(db, switch_id, port)
+    return await load_switch_port_devices(db, switch_id)
 
 
 @router.post("/collect")

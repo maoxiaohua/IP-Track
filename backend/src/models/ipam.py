@@ -122,6 +122,14 @@ class IPAddress(Base):
     location = Column(String(255), nullable=True)  # From SNMP sysLocation
     machine_type = Column(String(255), nullable=True)  # From SNMP or OS detection (increased from 100)
 
+    # 硬件资产（SNMP ENTITY-MIB/Printer-MIB/HOST-RESOURCES 或 Windows WMI 采集）
+    serial_number = Column(String(200), nullable=True, index=True)
+    device_model = Column(String(200), nullable=True, index=True)
+    hardware_vendor = Column(String(200), nullable=True)  # 硬件厂商，区别于 MAC OUI 的 vendor
+    hardware_source = Column(String(32), nullable=True)  # entity/printer/host-resources/sysdescr/wmi/winrm/bmc/manual
+    hardware_collected_at = Column(DateTime(timezone=True), nullable=True)  # 最近一次成功采集
+    hardware_attempted_at = Column(DateTime(timezone=True), nullable=True)  # 最近一次尝试（失败退避用）
+
     # Network information
     is_reachable = Column(Boolean, default=False, nullable=False)
     response_time = Column(Integer, nullable=True)  # Ping 响应时间（毫秒）

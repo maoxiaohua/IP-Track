@@ -9,7 +9,7 @@
 
 from sqlalchemy import (
     Column, Integer, String, Text, Boolean, DateTime, BigInteger,
-    ForeignKey, UniqueConstraint, Index
+    ForeignKey, UniqueConstraint, Index, SmallInteger, JSON
 )
 from sqlalchemy.sql import func
 from core.database import Base
@@ -157,6 +157,9 @@ class TopologyUnknownNode(Base):
     vendor_hint = Column(String(100))
     # switch / router / wlan-ap / phone / host / hub / unknown，用于过滤非网络设备
     device_class = Column(String(20))
+    # 判定置信度（0-100）与判定依据，展示层用来解释分类结果
+    device_confidence = Column(SmallInteger)
+    device_reasons = Column(JSON)
     seen_count = Column(Integer, nullable=False, default=1)
     first_seen = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_seen = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

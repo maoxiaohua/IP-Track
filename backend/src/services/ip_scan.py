@@ -646,7 +646,8 @@ class IPScanService:
         ip: str,
         scan_type: str = "full",
         snmp_profile: Optional[Dict] = None,
-        dns_servers: Optional[List[str]] = None
+        dns_servers: Optional[List[str]] = None,
+        hardware_attempts: Optional[List[Dict]] = None
     ) -> Dict:
         """
         Scan a single IP address with integrated Ping+DNS+SNMP workflow
@@ -655,9 +656,10 @@ class IPScanService:
             ip: IP address to scan
             scan_type: 'quick' (ping only) or 'full' (ping + DNS + SNMP + MAC + OS)
             snmp_profile: Optional SNMP profile for device identification
-                          Dict with keys: username, auth_protocol, auth_password_encrypted,
-                          priv_protocol, priv_password_encrypted, port, timeout
+                          Dict normalized by snmp_service.build_ipam_snmp_profile
+                          (snmp_version / snmp_auth_password_encrypted / snmp_port / timeout ...)
             dns_servers: Optional list of DNS server IPs for PTR lookups
+            hardware_attempts: 已按“在线+无SN+过重试窗口”筛好的候选凭据（空/None 表示不采集硬件）
 
         Returns:
             Dict with scan results including:
@@ -678,7 +680,8 @@ class IPScanService:
                 result=result,
                 ip=ip,
                 snmp_profile=snmp_profile,
-                dns_servers=dns_servers
+                dns_servers=dns_servers,
+                hardware_attempts=hardware_attempts
             )
 
         # Step 1: Ping check
@@ -698,7 +701,8 @@ class IPScanService:
             result=result,
             ip=ip,
             snmp_profile=snmp_profile,
-            dns_servers=dns_servers
+            dns_servers=dns_servers,
+            hardware_attempts=hardware_attempts
         )
 
     def _enrich_single_ip(
@@ -707,7 +711,8 @@ class IPScanService:
         result: Dict[str, Any],
         ip: str,
         snmp_profile: Optional[Dict] = None,
-        dns_servers: Optional[List[str]] = None
+        dns_servers: Optional[List[str]] = None,
+        hardware_attempts: Optional[List[Dict]] = None
     ) -> Dict[str, Any]:
         # Step 3: OS detection baseline
         # Keep the baseline lightweight for subnet sweeps. Running nmap against
@@ -796,6 +801,34 @@ class IPScanService:
             except Exception as e:
                 logger.debug(f"SNMP device identification failed for {ip}: {str(e)}")
 
+        # Step 6b: Hardware inventory (SN / model / hardware vendor)
+        # Gate is decided by the caller (online + no serial yet + past retry window),
+        # deliberately independent from should_try_snmp: a PC with a known hostname
+        # still needs its serial number collected.
+        if hardware_attempts:
+            try:
+                from services.hardware_inventory_service import collect_hardware_sync
+
+                hardware = collect_hardware_sync(ip, hardware_attempts)
+                if hardware:
+                    # 无论是否采到值都记录本次尝试，供失败退避使用
+                    result['hardware_attempted_at'] = hardware.get('hardware_attempted_at')
+                    for field in (
+                        'serial_number',
+                        'device_model',
+                        'hardware_vendor',
+                        'hardware_source',
+                    ):
+                        if hardware.get(field):
+                            result[field] = hardware[field]
+                    if hardware.get('serial_number'):
+                        logger.debug(
+                            f"Hardware collected for {ip}: "
+                            f"SN={hardware['serial_number']} ({hardware.get('hardware_source')})"
+                        )
+            except Exception as e:
+                logger.debug(f"Hardware collection failed for {ip}: {str(e)}")
+
         # Step 7: Get MAC address (can be used for ARP-based hostname later)
         mac = self._get_mac_address(ip)
         if mac:
@@ -841,7 +874,8 @@ class IPScanService:
         ip: str,
         scan_type: str = "full",
         snmp_profile: Optional[Dict] = None,
-        dns_servers: Optional[List[str]] = None
+        dns_servers: Optional[List[str]] = None,
+        hardware_attempts: Optional[List[Dict]] = None
     ) -> Dict:
         """
         Async wrapper for scanning a single IP with optional SNMP profile
@@ -851,6 +885,7 @@ class IPScanService:
             scan_type: 'quick' or 'full'
             snmp_profile: Optional SNMP profile for device identification
             dns_servers: Optional list of DNS server IPs for PTR lookups
+            hardware_attempts: Optional hardware-collection credential list for this IP
 
         Note: Uses semaphore to limit concurrency and prevent resource exhaustion
         """
@@ -863,7 +898,8 @@ class IPScanService:
                 ip=ip,
                 scan_type=scan_type,
                 snmp_profile=snmp_profile,
-                dns_servers=dns_servers
+                dns_servers=dns_servers,
+                hardware_attempts=hardware_attempts
             )
             return await loop.run_in_executor(self.executor, scan_func)
 
@@ -873,7 +909,8 @@ class IPScanService:
         scan_type: str = "full",
         snmp_profile: Optional[Dict] = None,
         dns_servers: Optional[List[str]] = None,
-        progress_callback: Optional[Callable[[Dict, int, int], Awaitable[None] | None]] = None
+        progress_callback: Optional[Callable[[Dict, int, int], Awaitable[None] | None]] = None,
+        hardware_attempts_map: Optional[Dict[str, List[Dict]]] = None
     ) -> List[Dict]:
         """
         Scan multiple IPs concurrently with optional SNMP profile
@@ -883,6 +920,7 @@ class IPScanService:
             scan_type: 'quick' or 'full'
             snmp_profile: Optional SNMP profile for all IPs
             dns_servers: Optional list of DNS server IPs for PTR lookups
+            hardware_attempts_map: Optional {ip: credential list} for hardware inventory
         """
         logger.info(f"Starting scan of {len(ip_list)} IPs (type: {scan_type}, SNMP: {'enabled' if snmp_profile else 'disabled'})")
         start_time = time.time()
@@ -895,7 +933,13 @@ class IPScanService:
 
         tasks = [
             asyncio.create_task(
-                self.scan_ip_async(ip, scan_type, snmp_profile, dns_servers)
+                self.scan_ip_async(
+                    ip,
+                    scan_type,
+                    snmp_profile,
+                    dns_servers,
+                    (hardware_attempts_map or {}).get(ip)
+                )
             )
             for ip in ip_list
         ]
@@ -930,7 +974,8 @@ class IPScanService:
         ip_list: List[str],
         snmp_profile: Optional[Dict] = None,
         dns_servers: Optional[List[str]] = None,
-        progress_callback: Optional[Callable[[Dict, int, int], Awaitable[None] | None]] = None
+        progress_callback: Optional[Callable[[Dict, int, int], Awaitable[None] | None]] = None,
+        hardware_attempts_map: Optional[Dict[str, List[Dict]]] = None
     ) -> List[Dict]:
         """Enrich already-reachable IPs without repeating the full subnet sweep."""
         return await self.scan_multiple_ips(
@@ -938,7 +983,8 @@ class IPScanService:
             scan_type="enrich",
             snmp_profile=snmp_profile,
             dns_servers=dns_servers,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            hardware_attempts_map=hardware_attempts_map
         )
 
     async def shutdown(self):

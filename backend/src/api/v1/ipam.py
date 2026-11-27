@@ -5,6 +5,7 @@ from sqlalchemy import cast, func, Integer, String
 from typing import List, Optional
 import asyncio
 import json
+import re
 from api.deps import get_db
 from core.database import AsyncSessionLocal
 from schemas.ipam import (
@@ -30,9 +31,15 @@ from schemas.ipam import (
     SubnetCalculatorRequest,
     SubnetCalculatorResponse,
     OSTypeStatItem,
-    OSTypeStatisticsResponse
+    OSTypeStatisticsResponse,
+    HardwareInventorySettingsUpdate,
+    HardwareInventorySettingsResponse,
+    HardwareCollectRequest,
+    HardwareCollectResponse,
+    UIPreferenceUpdate,
 )
 from services.ipam_service import ipam_service, subnet_scope_condition
+from core.auth import get_current_user
 from services.ipam_scan_status import ipam_scan_status_service
 from services.network_scheduler import network_scheduler
 from core.config import settings
@@ -515,6 +522,57 @@ async def delete_subnet(
     await db.commit()
 
 
+def _serialize_ip_address(ip_addr, subnet_name, switch_name, overlay):
+    """IP 行的唯一序列化入口（列表 + 详情共用）。
+
+    新增列只需在这里加一次，列表页、下钻页、子网详情、全局搜索会同步生效
+    （CLAUDE.md 规则 12：同一功能多处必须同步）。
+    """
+    overlay = overlay or {}
+    return {
+        'id': ip_addr.id,
+        'subnet_id': ip_addr.subnet_id,
+        'subnet_name': subnet_name,
+        'ip_address': str(ip_addr.ip_address),
+        'status': ip_addr.status,
+        'is_reachable': ip_addr.is_reachable,
+        'response_time': ip_addr.response_time,
+        'hostname': ip_addr.hostname,
+        'hostname_source': ip_addr.hostname_source,
+        'dns_name': ip_addr.dns_name,
+        'system_name': ip_addr.system_name,
+        'mac_address': str(ip_addr.mac_address) if ip_addr.mac_address else overlay.get('mac_address'),
+        'vendor': ip_addr.vendor,
+        'machine_type': ip_addr.machine_type,
+        'serial_number': ip_addr.serial_number,
+        'device_model': ip_addr.device_model,
+        'hardware_vendor': ip_addr.hardware_vendor,
+        'hardware_source': ip_addr.hardware_source,
+        'hardware_collected_at': ip_addr.hardware_collected_at,
+        'hardware_attempted_at': ip_addr.hardware_attempted_at,
+        'contact': ip_addr.contact,
+        'location': ip_addr.location,
+        'switch_id': ip_addr.switch_id or overlay.get('switch_id'),
+        'switch_name': switch_name or overlay.get('switch_name'),
+        'switch_port': ip_addr.switch_port or overlay.get('switch_port'),
+        'vlan_id': ip_addr.vlan_id or overlay.get('vlan_id'),
+        'port_device_class': overlay.get('port_device_class'),
+        'port_device_confidence': overlay.get('port_device_confidence'),
+        'port_device_reasons': overlay.get('port_device_reasons'),
+        'os_type': ip_addr.os_type,
+        'os_name': ip_addr.os_name,
+        'os_version': ip_addr.os_version,
+        'os_vendor': ip_addr.os_vendor,
+        'description': ip_addr.description,
+        'last_boot_time': ip_addr.last_boot_time,
+        'last_seen_at': ip_addr.last_seen_at,
+        'last_scan_at': ip_addr.last_scan_at,
+        'scan_count': ip_addr.scan_count,
+        'created_at': ip_addr.created_at,
+        'updated_at': ip_addr.updated_at,
+    }
+
+
 # IP Address endpoints
 @router.get("/ip-addresses", response_model=IPAddressListResponse)
 async def list_ip_addresses(
@@ -544,10 +602,15 @@ async def list_ip_addresses(
     - **limit**: Maximum number of records to return (1-10000)
     """
     from sqlalchemy import select, and_, or_
+    from models.ipam import IPSubnet
     from models.switch import Switch
 
-    # Build query with switch join
-    query = select(IPAddress, Switch.name.label('switch_name')).outerjoin(
+    # Build query with switch + subnet joins (subnet name feeds the shared columns)
+    query = select(
+        IPAddress, IPSubnet.name.label('subnet_name'), Switch.name.label('switch_name')
+    ).outerjoin(
+        IPSubnet, IPAddress.subnet_id == IPSubnet.id
+    ).outerjoin(
         Switch, IPAddress.switch_id == Switch.id
     )
 
@@ -588,6 +651,8 @@ async def list_ip_addresses(
                 IPAddress.dns_name.ilike(f'%{search}%'),
                 IPAddress.system_name.ilike(f'%{search}%'),
                 IPAddress.machine_type.ilike(f'%{search}%'),
+                IPAddress.serial_number.ilike(f'%{search}%'),
+                IPAddress.device_model.ilike(f'%{search}%'),
                 IPAddress.vendor.ilike(f'%{search}%'),
                 IPAddress.os_type.ilike(f'%{search}%'),
                 IPAddress.os_name.ilike(f'%{search}%'),
@@ -625,44 +690,14 @@ async def list_ip_addresses(
 
     overlays = await ipam_service.get_live_location_overlays(
         db,
-        [ip_addr for ip_addr, _ in rows]
+        [ip_addr for ip_addr, _, _ in rows]
     )
 
     # Convert to response format
-    items = []
-    for ip_addr, switch_name in rows:
-        overlay = overlays.get(ip_addr.id, {})
-        ip_dict = {
-            'id': ip_addr.id,
-            'subnet_id': ip_addr.subnet_id,
-            'ip_address': str(ip_addr.ip_address),
-            'status': ip_addr.status,
-            'is_reachable': ip_addr.is_reachable,
-            'response_time': ip_addr.response_time,
-            'hostname': ip_addr.hostname,
-            'hostname_source': ip_addr.hostname_source,
-            'dns_name': ip_addr.dns_name,
-            'system_name': ip_addr.system_name,
-            'mac_address': str(ip_addr.mac_address) if ip_addr.mac_address else overlay.get('mac_address'),
-            'vendor': ip_addr.vendor,
-            'machine_type': ip_addr.machine_type,
-            'switch_id': ip_addr.switch_id or overlay.get('switch_id'),
-            'switch_name': switch_name or overlay.get('switch_name'),
-            'switch_port': ip_addr.switch_port or overlay.get('switch_port'),
-            'vlan_id': ip_addr.vlan_id or overlay.get('vlan_id'),
-            'os_type': ip_addr.os_type,
-            'os_name': ip_addr.os_name,
-            'os_version': ip_addr.os_version,
-            'os_vendor': ip_addr.os_vendor,
-            'description': ip_addr.description,
-            'last_boot_time': ip_addr.last_boot_time,
-            'last_seen_at': ip_addr.last_seen_at,
-            'last_scan_at': ip_addr.last_scan_at,
-            'scan_count': ip_addr.scan_count,
-            'created_at': ip_addr.created_at,
-            'updated_at': ip_addr.updated_at
-        }
-        items.append(ip_dict)
+    items = [
+        _serialize_ip_address(ip_addr, subnet_name, switch_name, overlays.get(ip_addr.id, {}))
+        for ip_addr, subnet_name, switch_name in rows
+    ]
 
     return IPAddressListResponse(items=items, total=total)
 
@@ -693,39 +728,7 @@ async def get_ip_address(
 
     ip_addr, subnet_name, switch_name = row
     overlay = (await ipam_service.get_live_location_overlays(db, [ip_addr])).get(ip_addr.id, {})
-    return {
-        'id': ip_addr.id,
-        'subnet_id': ip_addr.subnet_id,
-        'ip_address': str(ip_addr.ip_address),
-        'status': ip_addr.status,
-        'is_reachable': ip_addr.is_reachable,
-        'response_time': ip_addr.response_time,
-        'hostname': ip_addr.hostname,
-        'hostname_source': ip_addr.hostname_source,
-        'dns_name': ip_addr.dns_name,
-        'system_name': ip_addr.system_name,
-        'machine_type': ip_addr.machine_type,
-        'vendor': ip_addr.vendor,
-        'contact': ip_addr.contact,
-        'location': ip_addr.location,
-        'mac_address': str(ip_addr.mac_address) if ip_addr.mac_address else overlay.get('mac_address'),
-        'os_type': ip_addr.os_type,
-        'os_name': ip_addr.os_name,
-        'os_version': ip_addr.os_version,
-        'os_vendor': ip_addr.os_vendor,
-        'switch_id': ip_addr.switch_id or overlay.get('switch_id'),
-        'switch_port': ip_addr.switch_port or overlay.get('switch_port'),
-        'vlan_id': ip_addr.vlan_id or overlay.get('vlan_id'),
-        'last_seen_at': ip_addr.last_seen_at,
-        'last_boot_time': ip_addr.last_boot_time,
-        'last_scan_at': ip_addr.last_scan_at,
-        'scan_count': ip_addr.scan_count,
-        'description': ip_addr.description,
-        'created_at': ip_addr.created_at,
-        'updated_at': ip_addr.updated_at,
-        'subnet_name': subnet_name,
-        'switch_name': switch_name or overlay.get('switch_name')
-    }
+    return _serialize_ip_address(ip_addr, subnet_name, switch_name, overlay)
 
 
 @router.put("/ip-addresses/{ip_id}", response_model=IPAddressResponse)
@@ -741,7 +744,9 @@ async def update_ip_address(
         status=update_data.status,
         hostname=update_data.hostname,
         mac_address=update_data.mac_address,
-        description=update_data.description
+        description=update_data.description,
+        serial_number=update_data.serial_number,
+        device_model=update_data.device_model,
     )
 
     if not ip_addr:
@@ -1252,6 +1257,56 @@ async def search_network(
         )
 
 
+# Hardware Inventory endpoints
+@router.get("/hardware/settings", response_model=HardwareInventorySettingsResponse)
+async def get_hardware_settings(
+    db: AsyncSession = Depends(get_db)
+):
+    """硬件盘点设置（口令类字段只返回是否已配置，不回显）"""
+    from services import hardware_inventory_service
+    return await hardware_inventory_service.get_inventory_settings(db)
+
+
+@router.put("/hardware/settings", response_model=HardwareInventorySettingsResponse)
+async def update_hardware_settings(
+    payload: HardwareInventorySettingsUpdate,
+    db: AsyncSession = Depends(get_db)
+):
+    """更新硬件盘点设置；口令类字段留空表示不修改"""
+    from services import hardware_inventory_service
+    ok = await hardware_inventory_service.update_inventory_settings(db, payload)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update hardware inventory settings"
+        )
+    return await hardware_inventory_service.get_inventory_settings(db)
+
+
+@router.post("/hardware/collect", response_model=HardwareCollectResponse)
+async def collect_hardware(
+    payload: HardwareCollectRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """对指定 IP（或整个子网）立即执行一次 SNMP 硬件采集"""
+    from services import hardware_inventory_service
+    if not payload.ip_address_ids and not payload.subnet_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ip_address_ids or subnet_id is required"
+        )
+    queued = await hardware_inventory_service.collect_for_ips(
+        db,
+        ip_address_ids=payload.ip_address_ids,
+        subnet_id=payload.subnet_id,
+        force=payload.force,
+    )
+    return HardwareCollectResponse(
+        queued=queued,
+        message=f"Hardware collection finished for {queued} IP(s)",
+    )
+
+
 # Subnet Calculator endpoint
 @router.post("/subnet-calculator", response_model=SubnetCalculatorResponse)
 async def calculate_subnet(
@@ -1288,3 +1343,72 @@ async def calculate_subnet(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to calculate subnet"
         )
+
+
+# ---- 按账号保存的界面偏好（列显示选择） ----
+_PREF_KEY_PATTERN = re.compile(r'^[A-Za-z0-9_.:-]{1,80}$')
+
+
+def _validate_pref_key(pref_key: str) -> None:
+    if not _PREF_KEY_PATTERN.match(pref_key):
+        raise HTTPException(status_code=400, detail="preference key 不合法")
+
+
+def _token_user_id(user: dict) -> int:
+    try:
+        uid = int(user.get('uid') or 0)
+    except (TypeError, ValueError):
+        uid = 0
+    if not uid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
+    return uid
+
+
+@router.get("/preferences/{pref_key}")
+async def get_ui_preference(
+    pref_key: str,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """读取当前账号的界面偏好。未保存过时 value 为 null，前端使用默认值。"""
+    from sqlalchemy import select
+    from models.user_ui_preference import UserUIPreference
+
+    _validate_pref_key(pref_key)
+    uid = _token_user_id(user)
+    result = await db.execute(
+        select(UserUIPreference).where(
+            UserUIPreference.user_id == uid,
+            UserUIPreference.pref_key == pref_key,
+        )
+    )
+    row = result.scalar_one_or_none()
+    return {"key": pref_key, "value": row.value if row else None}
+
+
+@router.put("/preferences/{pref_key}")
+async def put_ui_preference(
+    pref_key: str,
+    payload: UIPreferenceUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """写入当前账号的界面偏好（只影响本人，其他账号不受影响）。"""
+    from sqlalchemy import select
+    from models.user_ui_preference import UserUIPreference
+
+    _validate_pref_key(pref_key)
+    uid = _token_user_id(user)
+    result = await db.execute(
+        select(UserUIPreference).where(
+            UserUIPreference.user_id == uid,
+            UserUIPreference.pref_key == pref_key,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row:
+        row.value = payload.value
+    else:
+        db.add(UserUIPreference(user_id=uid, pref_key=pref_key, value=payload.value))
+    await db.commit()
+    return {"key": pref_key, "value": payload.value}

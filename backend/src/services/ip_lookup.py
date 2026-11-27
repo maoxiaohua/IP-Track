@@ -11,6 +11,7 @@ from models.mac_cache import MACAddressCache
 from services.port_lookup_policy_service import resolve_lookup_policy, is_port_lookup_eligible
 from services.data_freshness_service import build_lookup_result_freshness
 from services.port_analysis_service import port_analysis_service
+from services.port_device_service import describe_port_devices, compact_port_device
 from services.switch_manager import switch_manager, SwitchConnectionError
 from core.config import settings
 from utils.logger import logger
@@ -370,6 +371,15 @@ class IPLookupService:
                 last_seen_at=arp_entry.last_seen
             )
 
+            # 端口↔设备联动：只做展示增强，失败不影响定位结果。
+            port_device = None
+            try:
+                port_device = compact_port_device(
+                    await describe_port_devices(db, switch.id, port_name)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Port device linkage failed for switch {switch.id} port {port_name}: {exc}")
+
             return {
                 'found': True,
                 'target_ip': target_ip,
@@ -379,6 +389,7 @@ class IPLookupService:
                 'switch_ip': str(switch.ip_address),
                 'port_name': port_name,
                 'vlan_id': vlan_id or 1,
+                'port_device': port_device,
                 'query_time_ms': query_time_ms,
                 'query_mode': 'cache',
                 'data_age_seconds': data_age_seconds,

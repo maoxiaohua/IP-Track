@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from models.alarm import AlarmSeverity, AlarmSourceType
+from models.mac_table import MACTable
 from models.switch import Switch
 from models.topology import (
     LldpNeighbor,
@@ -37,6 +38,10 @@ from services.snmp_service import (
 from services.cli_service import cli_service
 from services.alarm_service import alarm_service
 from services.topology_utils import normalize_lag_key, normalize_mac
+from services.lldp_signals import parse_capabilities
+from services.device_classifier import classify_unknown
+from services.ipam_device_hints import lookup_ipam_profiles
+from services.port_analysis_service import port_analysis_service
 from utils.logger import logger
 
 
@@ -134,102 +139,18 @@ def _vendor_matches(vendor: Optional[str], *texts: Optional[str]) -> bool:
     return any(hint in blob for hint in hints)
 
 
-# IEEE 802.1AB lldpRemSysCapSupported 位（BITS 从最高位编号）；SNMP 侧存 hex，
-# CLI 侧存文本，两种格式都要认。按字节数换算位掩码，1/2 字节编码都能解。
-_CAPABILITY_POSITIONS = (
-    ('repeater', 1),
-    ('bridge', 2),
-    ('wlan-ap', 3),
-    ('router', 4),
-    ('phone', 5),
-    ('docsis', 6),
-    ('host', 7),
-)
-_CAPABILITY_WORDS = (
-    ('access point', 'wlan-ap'),
-    ('wlan', 'wlan-ap'),
-    ('router', 'router'),
-    ('bridge', 'bridge'),
-    ('switch', 'bridge'),
-    ('repeater', 'repeater'),
-    ('telephone', 'phone'),
-    ('phone', 'phone'),
-    ('station', 'host'),
-    ('host', 'host'),
-    ('docsis', 'docsis'),
-)
-# 文本兜底：只在没有 capability 时使用，宁可判 unknown 也不乱归类。
-_SERVER_HINTS = (
-    'windows', 'linux', 'vmware', 'esxi', 'hyper-v', 'server', 'workstation',
-    'ubuntu', 'debian', 'centos', 'red hat', 'mac os', 'iphone', 'ipad',
-    'android', 'printer', 'camera', 'apc ', 'ups ',
-)
-_ROUTER_HINTS = ('router', 'gateway', 'firewall', 'srx', 'fortigate')
-_SWITCH_HINTS = (
-    # 'ios' 会误命中服务器 BIOS，网络系统已可由 cisco/nx-os/comware 等词覆盖，故不单列。
-    'switch', 'catalyst', 'nexus', 'nx-os', 'comware', 'sros', 'sr os', 'srlinux',
-    'alcatel', 'nokia', 'h3c', 'huawei', 'cisco', 'juniper', 'aruba',
-    'procurve', 'quidway', 'omniswitch', 'edge-core', 'dell',
-)
-
-
-def _parse_capabilities(value: Any) -> Set[str]:
-    """把 capability（SNMP hex / CLI 文本）归一为类别集合。"""
-    text = str(value or '').strip().lower()
-    if not text:
-        return set()
-    hex_text = text[2:] if text.startswith('0x') else text
-    if re.fullmatch(r'[0-9a-f]{2,}', hex_text) and len(hex_text) % 2 == 0:
-        try:
-            bits = int(hex_text, 16)
-        except ValueError:
-            bits = 0
-        total = len(hex_text) * 4  # 每个 hex 字符 4 位
-        found = {
-            name for name, position in _CAPABILITY_POSITIONS
-            if position < total and bits & (1 << (total - 1 - position))
-        }
-        if found:
-            return found
-    found: Set[str] = set()
-    padded = f' {text} '
-    for word, name in _CAPABILITY_WORDS:
-        if re.search(rf'(?<![a-z]){re.escape(word)}(?![a-z])', padded):
-            found.add(name)
-    return found
+# capability 词表与解析已抽到 services/lldp_signals.py，拓扑与端口联动共用。
+_parse_capabilities = parse_capabilities
 
 
 def _device_class(capabilities: Set[str], *texts: Optional[str]) -> str:
-    """未纳管节点的设备类别：switch / router / wlan-ap / phone / host / hub / unknown。
-
-    LLDP capability 优先；没有 capability 时按描述文本启发式判断。
-    标准没有单独的 HUB 位：只有会发 LLDP 的重复器带 repeater 位，非网管 HUB
-    通常不发 LLDP，无法可靠识别，这里只做 best-effort 归类。
-    """
-    # 三层交换机 / 路由器都会同时报 bridge + router，按 bridge 判交换机更贴近实际；
-    # 只有单独报 router（无 bridge）才判路由器。
-    if 'bridge' in capabilities:
-        return 'switch'
-    if 'router' in capabilities:
-        return 'router'
-    if 'wlan-ap' in capabilities:
-        return 'wlan-ap'
-    if 'phone' in capabilities:
-        return 'phone'
-    if 'host' in capabilities:
-        return 'host'
-    if 'repeater' in capabilities:
-        return 'hub'
-    blob = ' '.join(str(t).lower() for t in texts if t)
-    if not blob:
-        return 'unknown'
-    if any(hint in blob for hint in _ROUTER_HINTS):
-        return 'router'
-    if any(hint in blob for hint in _SWITCH_HINTS):
-        return 'switch'
-    if any(hint in blob for hint in _SERVER_HINTS):
-        return 'host'
-    return 'unknown'
+    """未纳管节点的设备类别（兼容旧签名，判定逻辑统一在 device_classifier）。"""
+    cleaned = [str(t) for t in texts if t]
+    return classify_unknown(
+        capabilities=capabilities,
+        sys_name=cleaned[0] if cleaned else None,
+        sys_desc=' '.join(cleaned[1:]) or None,
+    ).device_class
 
 
 def _build_cli_config(switch: Switch) -> Dict:
@@ -243,6 +164,8 @@ def _build_cli_config(switch: Switch) -> Dict:
         'ssh_port': switch.ssh_port,
         'connection_timeout': switch.connection_timeout,
         'enable_password_encrypted': switch.enable_password_encrypted,
+        # 慢链路/并发登录时放宽 Netmiko 握手，避免误报认证超时
+        'handshake_timeout': settings.CLI_HANDSHAKE_TIMEOUT_SECONDS,
     }
 
 
@@ -1004,7 +927,63 @@ def _switch_endpoint(
     }
 
 
-def _unknown_endpoint(fact: LldpNeighbor, node_key: str) -> Dict:
+async def _load_port_mac_stats(
+    db: AsyncSession,
+    switch_ids: Iterable[int],
+) -> Dict[Tuple[int, str], Dict]:
+    """按 (switch_id, 端口键) 汇总 MAC 学习数，作为 unknown 节点的结构性证据。
+
+    一次查询、Python 侧归键；任何失败都返回空表（只降级为 unknown，不影响派生）。
+    """
+    ids = {int(sid) for sid in switch_ids if sid is not None}
+    if not ids:
+        return {}
+    rows = await db.execute(
+        select(MACTable.switch_id, MACTable.port_name, MACTable.mac_address)
+        .where(MACTable.switch_id.in_(ids))
+    )
+    stats: Dict[Tuple[int, str], Dict] = {}
+    for switch_id, port_name, mac_address in rows.all():
+        key = port_analysis_service.normalize_port_key(port_name)
+        if not key:
+            continue
+        entry = stats.setdefault((switch_id, key), {'mac_count': 0, 'macs': set()})
+        mac = normalize_mac(str(mac_address)) if mac_address else None
+        if mac:
+            entry['macs'].add(mac)
+    for entry in stats.values():
+        entry['mac_count'] = len(entry['macs'])
+    return stats
+
+
+def _port_structural(
+    src: Switch,
+    fact: LldpNeighbor,
+    src_iface: Optional[SwitchInterface],
+    port_stats: Optional[Dict],
+) -> Optional[Dict]:
+    """从本端端口的 MAC 学习情况推导结构性证据，无数据返回 None。"""
+    if not port_stats:
+        return None
+    raw_name = src_iface.if_name if src_iface is not None and src_iface.if_name else fact.local_port_id
+    key = port_analysis_service.normalize_port_key(raw_name)
+    if not key:
+        return None
+    entry = port_stats.get((src.id, key))
+    if entry is None:
+        return None
+    chassis = normalize_mac(str(fact.remote_chassis_id)) if fact.remote_chassis_id else None
+    return {
+        'mac_count': entry['mac_count'],
+        'self_chassis_learned': bool(chassis and chassis in entry['macs']),
+    }
+
+
+def _unknown_endpoint(
+    fact: LldpNeighbor,
+    node_key: str,
+    structural: Optional[Dict] = None,
+) -> Dict:
     return {
         'kind': 'unknown',
         'key': f'un:{node_key}',
@@ -1018,6 +997,7 @@ def _unknown_endpoint(fact: LldpNeighbor, node_key: str) -> Dict:
         'lag_key': None,
         'capabilities': _parse_capabilities(fact.capability),
         'sys_desc': _trunc(fact.remote_sys_desc, 255),
+        'structural': structural,
     }
 
 
@@ -1040,6 +1020,7 @@ def _compute_links(
     switches: List[Switch],
     facts: List[LldpNeighbor],
     interfaces: List[SwitchInterface],
+    port_stats: Optional[Dict] = None,
 ) -> Tuple[List[Dict], Dict[str, Dict], int]:
     switches_by_id = {s.id: s for s in switches}
     endpoints = _Endpoints(switches, interfaces)
@@ -1096,7 +1077,9 @@ def _compute_links(
             node_key = _unknown_node_key(fact)
             if not node_key:
                 continue
-            dst_ep = _unknown_endpoint(fact, node_key)
+            dst_ep = _unknown_endpoint(
+                fact, node_key, _port_structural(src, fact, src_iface, port_stats)
+            )
 
         key = _link_key(src_ep['key'], dst_ep['key'])
         bucket = buckets.setdefault(key, {'ep_a': src_ep, 'ep_b': dst_ep, 'dirs': {}, 'flag': None})
@@ -1216,7 +1199,17 @@ async def derive_links(db: AsyncSession, now: Optional[datetime] = None) -> Dict
     facts = (await db.execute(select(LldpNeighbor))).scalars().all()
     interfaces = (await db.execute(select(SwitchInterface))).scalars().all()
 
-    rows, fresh_map, lag_folded = _compute_links(list(switches), list(facts), list(interfaces))
+    # 端口 MAC 学习数只作结构性佐证；事实量过大或查询失败时降级为空表。
+    port_stats: Dict = {}
+    if len(facts) <= 20000:
+        try:
+            port_stats = await _load_port_mac_stats(db, [s.id for s in switches])
+        except Exception as exc:  # noqa: BLE001 - 证据缺失只影响分类精度
+            logger.warning(f"Load port MAC stats failed, classification degrades to unknown: {exc}")
+
+    rows, fresh_map, lag_folded = _compute_links(
+        list(switches), list(facts), list(interfaces), port_stats
+    )
     stale_ids = {
         s.id for s in switches
         if s.last_topology_collection_status in ('failed', 'unsupported')
@@ -1273,6 +1266,10 @@ async def derive_links(db: AsyncSession, now: Optional[datetime] = None) -> Dict
                     'sys_name': side['sys_name'],
                     'sys_desc': side.get('sys_desc'),
                     'capabilities': set(side.get('capabilities') or ()),
+                    'mac_count': (side.get('structural') or {}).get('mac_count'),
+                    'self_chassis_learned': bool(
+                        (side.get('structural') or {}).get('self_chassis_learned')
+                    ),
                 }
                 node_info[node_key] = info
                 continue
@@ -1282,6 +1279,28 @@ async def derive_links(db: AsyncSession, now: Optional[datetime] = None) -> Dict
             info['sys_name'] = info['sys_name'] or side['sys_name']
             info['chassis_id'] = info['chassis_id'] or side['chassis_id']
             info['mgmt_ip'] = info['mgmt_ip'] or side['mgmt_ip']
+            mac_count = (side.get('structural') or {}).get('mac_count')
+            if mac_count is not None:
+                info['mac_count'] = max(info.get('mac_count') or 0, mac_count)
+            info['self_chassis_learned'] = info['self_chassis_learned'] or bool(
+                (side.get('structural') or {}).get('self_chassis_learned')
+            )
+
+    # 跨表关联本系统 IPAM 档案，补充 os_type 等 LLDP 拿不到的依据。
+    # 关联失败只降级为「没有补充依据」，不影响派生。
+    try:
+        ipam_hints = await lookup_ipam_profiles(db, [
+            {
+                'key': node_key,
+                'mgmt_ip': info.get('mgmt_ip'),
+                'sys_name': info.get('sys_name'),
+                'chassis_id': info.get('chassis_id'),
+            }
+            for node_key, info in node_info.items()
+        ])
+    except Exception as e:
+        logger.warning(f"IPAM profile hints unavailable: {e}")
+        ipam_hints = {}
 
     existing_nodes = {
         node.node_key: node
@@ -1302,11 +1321,22 @@ async def derive_links(db: AsyncSession, now: Optional[datetime] = None) -> Dict
         node.vendor_hint = _trunc(
             _vendor_hint(info['sys_name'], info['chassis_id'], info.get('sys_desc')), 100
         )
-        node.device_class = _trunc(
-            _device_class(
-                info['capabilities'], info['sys_name'], info.get('sys_desc'), info['chassis_id']
-            ), 20
+        hint = ipam_hints.get(node_key) or {}
+        classification = classify_unknown(
+            capabilities=info['capabilities'],
+            sys_name=info['sys_name'],
+            sys_desc=info.get('sys_desc'),
+            chassis_id=info['chassis_id'],
+            mgmt_ip=info['mgmt_ip'],
+            mac_count=info.get('mac_count'),
+            self_chassis_learned=info.get('self_chassis_learned', False),
+            os_type=hint.get('os_type'),
+            ipam_vendor=hint.get('vendor'),
+            ipam_matched_by=hint.get('matched_by'),
         )
+        node.device_class = _trunc(classification.device_class, 20)
+        node.device_confidence = classification.confidence
+        node.device_reasons = list(classification.reasons)
 
     for node_key, node in existing_nodes.items():
         if node_key not in node_info:

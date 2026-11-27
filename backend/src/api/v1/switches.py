@@ -32,6 +32,8 @@ from services.data_freshness_service import (
     build_optical_module_freshness,
 )
 from services.network_data_collector import network_data_collector
+from services.collection_worker import worker_pool
+from models.collection_job import JobType
 from services.status_checker import switch_status_checker
 from services.alarm_service import alarm_service
 from models.alarm import AlarmSourceType
@@ -216,6 +218,14 @@ async def create_switch(
         await db.refresh(switch)
 
         logger.info(f"Created switch: {switch.name} ({switch.ip_address}), snmp_enabled={switch.snmp_enabled}")
+
+        # 新增交换机立即排队一次全量采集（含光模块/序列号/型号），
+        # 否则首次数据要等调度器按全局间隔追赶，可能拖几小时。
+        try:
+            await worker_pool.create_jobs(db, [switch], JobType.ALL, priority=5)
+        except Exception as enqueue_err:
+            logger.warning(f"Failed to enqueue initial collection for {switch.name}: {enqueue_err}")
+
         return switch
 
     except HTTPException:
@@ -855,6 +865,14 @@ async def bulk_create_switches(
         await db.refresh(switch)
 
     logger.info(f"Bulk created {len(created_switches)} switches")
+
+    # 同新增单台：立即排队首轮全量采集
+    if created_switches:
+        try:
+            await worker_pool.create_jobs(db, created_switches, JobType.ALL, priority=5)
+        except Exception as enqueue_err:
+            logger.warning(f"Failed to enqueue initial collection for bulk add: {enqueue_err}")
+
     return created_switches
 
 

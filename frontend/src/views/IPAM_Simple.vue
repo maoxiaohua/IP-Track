@@ -5,6 +5,16 @@
         <div style="display: flex; justify-content: space-between; align-items: center">
           <h2 style="margin: 0">IP Address Management</h2>
           <div style="display: flex; gap: 10px">
+            <el-button
+              type="danger"
+              plain
+              :disabled="selectedSubnets.length === 0"
+              :loading="batchDeleting"
+              @click="batchDeleteSubnets"
+            >
+              <el-icon><Delete /></el-icon>
+              批量删除{{ selectedSubnets.length ? ` (${selectedSubnets.length})` : '' }}
+            </el-button>
             <el-button type="primary" :loading="exportLoading" @click="exportToExcel">
               <el-icon><Download /></el-icon>
               导出 Excel
@@ -154,9 +164,12 @@
         v-loading="initialLoading"
         element-loading-text="正在加载子网数据..."
         style="width: 100%"
+        row-key="subnet_id"
         @row-click="handleRowClick"
+        @selection-change="handleSelectionChange"
         :row-style="{ cursor: 'pointer' }"
       >
+        <el-table-column type="selection" width="48" reserve-selection />
         <el-table-column label="Subnet" min-width="200">
           <template #default="{ row }">
             <router-link
@@ -428,64 +441,26 @@
       :close-on-click-modal="false"
     >
       <div v-if="globalSearchResults.length > 0">
-        <p style="margin-bottom: 12px; color: #909399">
-          搜索 "<strong>{{ globalSearchText }}</strong>" ，共找到 <strong>{{ globalSearchTotal }}</strong> 条记录
-        </p>
-        <el-table
-          :data="globalSearchResults"
-          stripe
+        <div class="global-search-toolbar">
+          <p style="margin-bottom: 12px; color: #909399">
+            搜索 "<strong>{{ globalSearchText }}</strong>" ，共找到 <strong>{{ globalSearchTotal }}</strong> 条记录
+          </p>
+          <ColumnSettings
+            :columns="columns"
+            :is-visible="isVisible"
+            :saving="columnSaving"
+            @toggle="toggle"
+            @reset="resetColumns"
+            @save="saveColumns"
+          />
+        </div>
+        <IPAddressTable
+          :rows="globalSearchResults"
+          :columns="visibleColumns"
           max-height="500"
-          style="width: 100%"
-        >
-          <el-table-column prop="ip_address" label="IP 地址" width="150" />
-          <el-table-column label="主机名 (DNS)" min-width="180">
-            <template #default="{ row }">
-              <span v-if="row.hostname" style="font-weight: 500">{{ row.hostname }}</span>
-              <span v-else style="color: #c0c4cc">-</span>
-              <span v-if="row.hostname_source" style="font-size: 11px; color: #909399; margin-left: 6px">
-                ({{ row.hostname_source }})
-              </span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="dns_name" label="DNS 名称" min-width="180">
-            <template #default="{ row }">
-              <span v-if="row.dns_name">{{ row.dns_name }}</span>
-              <span v-else style="color: #c0c4cc">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="system_name" label="系统名称" min-width="150">
-            <template #default="{ row }">
-              <span v-if="row.system_name">{{ row.system_name }}</span>
-              <span v-else style="color: #c0c4cc">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="os_type" label="OS 类型" width="100">
-            <template #default="{ row }">
-              <el-tag v-if="row.os_type" size="small" type="info">{{ row.os_type }}</el-tag>
-              <span v-else style="color: #c0c4cc">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="vendor" label="厂商" width="120">
-            <template #default="{ row }">
-              <span v-if="row.vendor">{{ row.vendor }}</span>
-              <span v-else style="color: #c0c4cc">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="status" label="状态" width="90">
-            <template #default="{ row }">
-              <el-tag v-if="row.status === 'used'" size="small" type="success">使用中</el-tag>
-              <el-tag v-else-if="row.status === 'available'" size="small" type="info">可用</el-tag>
-              <el-tag v-else-if="row.status === 'reserved'" size="small" type="warning">保留</el-tag>
-              <el-tag v-else-if="row.status === 'offline'" size="small" type="danger">离线</el-tag>
-              <el-tag v-else size="small">{{ row.status }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="last_seen_at" label="最后在线" width="160">
-            <template #default="{ row }">
-              {{ row.last_seen_at ? formatDateTime(row.last_seen_at) : '-' }}
-            </template>
-          </el-table-column>
-        </el-table>
+          default-sort-prop="ip_address"
+          @ip-click="openGlobalSearchRow"
+        />
         <el-pagination
           v-if="globalSearchTotal > globalSearchPageSize"
           v-model:current-page="globalSearchPage"
@@ -509,12 +484,15 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Upload, Download, Search } from '@element-plus/icons-vue'
+import { Plus, Upload, Download, Search, Delete } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
 import { ipamApi, type IPAMScanStatus, type IPAddressDetail } from '@/api/ipam'
 import { useIPAMScanMonitor } from '@/composables/useIPAMScanMonitor'
-import { formatLastResponse, formatDateTime as formatAbsoluteDateTime } from '@/utils/time'
 import Chart from '@/components/Chart.vue'
+import IPAddressTable from '@/components/ipam/IPAddressTable.vue'
+import ColumnSettings from '@/components/ipam/ColumnSettings.vue'
+import { buildIPExportRows, IP_EXPORT_EXTRAS } from '@/components/ipam/ipColumns'
+import { useColumnPreferences } from '@/composables/useColumnPreferences'
 
 interface Subnet {
   subnet_id: number
@@ -532,12 +510,15 @@ interface Subnet {
 }
 
 const router = useRouter()
+
 const subnets = ref<Subnet[]>([])
 const loading = ref(false)
 const exportLoading = ref(false)
 const initialLoading = ref(true)
 const refreshing = ref(false)
 const scanning = ref<Record<number, boolean>>({})
+const selectedSubnets = ref<Subnet[]>([])
+const batchDeleting = ref(false)
 const showAddSubnetDialog = ref(false)
 const showBatchImportDialog = ref(false)
 const editMode = ref(false)
@@ -561,6 +542,37 @@ const globalSearchResults = ref<IPAddressDetail[]>([])
 const globalSearchTotal = ref(0)
 const globalSearchPage = ref(1)
 const globalSearchPageSize = ref(50)
+
+// 列显示偏好（按账号保存），与子网详情、下钻页共用同一套列定义
+const {
+  columns,
+  visibleColumns,
+  isVisible,
+  saving: columnSaving,
+  load: loadColumnPreferences,
+  save: handleColumnSave,
+  toggle,
+  reset
+} = useColumnPreferences('ipam.global-search-table')
+
+const saveColumns = async () => {
+  try {
+    await handleColumnSave()
+  } catch (error) {
+    ElMessage.error('列设置保存失败')
+  }
+}
+
+const resetColumns = async () => {
+  reset()
+  await saveColumns()
+}
+
+const openGlobalSearchRow = (row: IPAddressDetail) => {
+  if (!row.subnet_id) return
+  showGlobalSearchDialog.value = false
+  router.push(`/ipam/subnets/${row.subnet_id}`)
+}
 
 // OS type statistics
 const osTypeStats = ref<{ os_types: { os_type: string; count: number; label: string }[]; total_classified: number; active_classified?: number; stale_classified?: number; archived_classified?: number; data_as_of?: string | null } | null>(null)
@@ -1097,8 +1109,57 @@ const deleteSubnet = async (subnet: Subnet) => {
   }
 }
 
+// Batch selection
+const handleSelectionChange = (rows: Subnet[]) => {
+  selectedSubnets.value = rows
+}
+
+// Batch delete subnets
+const batchDeleteSubnets = async () => {
+  const targets = [...selectedSubnets.value]
+  if (targets.length === 0) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${targets.length} 个子网吗？此操作将删除这些子网下的所有 IP 地址记录。`,
+      '警告',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    batchDeleting.value = true
+    let succeeded = 0
+    const failed: string[] = []
+    for (const subnet of targets) {
+      try {
+        await apiClient.delete(`/api/v1/ipam/subnets/${subnet.subnet_id}`)
+        succeeded++
+      } catch (error: any) {
+        failed.push(`${subnet.network}（${error.response?.data?.detail || '删除失败'}）`)
+      }
+    }
+    if (failed.length === 0) {
+      ElMessage.success(`已删除 ${succeeded} 个子网`)
+    } else if (succeeded === 0) {
+      ElMessage.error(`删除失败：${failed.join('；')}`)
+    } else {
+      ElMessage.warning(`成功删除 ${succeeded} 个，失败 ${failed.length} 个：${failed.join('；')}`)
+    }
+    selectedSubnets.value = []
+    await loadSubnets()
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      ElMessage.error(error.response?.data?.detail || '批量删除失败')
+    }
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
 // Handle row click
-const handleRowClick = (row: Subnet) => {
+const handleRowClick = (row: Subnet, column: any) => {
+  if (column?.type === 'selection') return
   router.push(`/ipam/subnets/${row.subnet_id}`)
 }
 
@@ -1366,28 +1427,13 @@ const exportToExcel = async () => {
         })
         const items = result.items || []
 
-        items.forEach(ip => {
+        // 与表格共用同一套列定义，页面新增列后导出自动跟随
+        const baseRows = buildIPExportRows(items, IP_EXPORT_EXTRAS)
+        items.forEach((_ip, index) => {
           rows.push({
             '所属子网': subnet.subnet_name,
             '网段': subnet.network,
-            'Status': ip.is_reachable ? 'Reachable' : 'Unreachable',
-            'IP Address': ip.ip_address,
-            'Last Response': formatLastResponse(ip.last_seen_at),
-            'Response Time': ip.response_time != null ? `${ip.response_time} ms` : '',
-            'DNS': ip.dns_name || ip.hostname || '',
-            'System Name': ip.system_name || '',
-            'Machine Type': ip.machine_type || '',
-            'Vendor': ip.vendor || '',
-            'Switch': ip.switch_name || '',
-            'Port': ip.switch_port || '',
-            'OS Type': ip.os_type || '',
-            'OS Name': ip.os_name || '',
-            'OS Version': ip.os_version || '',
-            'Last Boot Time': ip.last_boot_time ? formatAbsoluteDateTime(ip.last_boot_time) : '',
-            'MAC 地址': ip.mac_address || '',
-            'VLAN ID': ip.vlan_id ?? '',
-            '备注/描述': ip.description || '',
-            '最近扫描时间': ip.last_scan_at ? formatAbsoluteDateTime(ip.last_scan_at) : ''
+            ...baseRows[index]
           })
         })
 
@@ -1503,6 +1549,7 @@ onMounted(() => {
   loadSubnets()
   loadOSTypeStats()
   loadVendorStats()
+  void loadColumnPreferences()
   void loadInitialStatus().then((supported) => {
     if (supported && monitorSupported.value) {
       connectScanMonitor()
@@ -1515,6 +1562,13 @@ onMounted(() => {
 .ipam-simple-view {
   padding: 20px;
   padding-bottom: 84px;
+}
+
+.global-search-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .scan-status-panel {

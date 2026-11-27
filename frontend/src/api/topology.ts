@@ -55,6 +55,8 @@ export interface TopologyUnknownNode {
   chassis_id: string | null
   vendor_hint: string | null
   device_class: string | null
+  device_confidence?: number | null
+  device_reasons?: string[] | null
   seen_count: number | null
   degree: number
 }
@@ -161,6 +163,37 @@ export function getTopologyInterfaces(params: { switch_id?: number; limit?: numb
 
 export function getTopologyUnknownNodes() {
   return apiClient.get<TopologyUnknownNode[]>('/api/v1/topology/unknown-nodes')
+}
+
+export interface PortDeviceInfo {
+  device_class: string
+  confidence: number
+  reasons: string[]
+  managed: boolean
+  sys_name: string | null
+  mgmt_ip: string | null
+  status: string
+  candidates: number
+}
+
+export interface SwitchPortDevice {
+  if_index: number
+  if_name: string | null
+  if_alias: string | null
+  admin_status: string | null
+  oper_status: string | null
+  status: string
+  candidates: number
+  port_device: PortDeviceInfo | null
+  port_device_class: string | null
+  port_device_confidence: number | null
+  port_device_reasons: string | null
+}
+
+export function getSwitchPortDevices(switchId: number) {
+  return apiClient.get<SwitchPortDevice[]>('/api/v1/topology/port-devices', {
+    params: { switch_id: switchId }
+  })
 }
 
 export function collectTopology(switchIds?: number[]) {

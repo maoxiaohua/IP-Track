@@ -99,156 +99,30 @@
       </el-row>
 
       <!-- IP Table with pagination -->
-      <div style="margin-bottom: 10px; color: #909399; font-size: 13px">
-        显示全部 {{ totalIPCount }} 个 IP 地址（当前页 {{ ipAddresses.length }} 条）
+      <div class="table-toolbar">
+        <span style="color: #909399; font-size: 13px">
+          显示全部 {{ totalIPCount }} 个 IP 地址（当前页 {{ ipAddresses.length }} 条）
+        </span>
+        <ColumnSettings
+          :columns="columns"
+          :is-visible="isVisible"
+          :saving="columnSaving"
+          @toggle="toggle"
+          @reset="resetColumns"
+          @save="saveColumns"
+        />
       </div>
-      <div class="table-scroll-wrapper">
-      <el-table
-        :data="ipAddresses"
-        v-loading="initialLoading"
-        element-loading-text="正在加载 IP 地址..."
-        stripe
-        size="small"
-        :default-sort="{ prop: 'ip_address', order: 'ascending' }"
+      <IPAddressTable
+        :rows="ipAddresses"
+        :columns="visibleColumns"
+        :loading="initialLoading"
+        loading-text="正在加载 IP 地址..."
+        wrapper-max-height="75vh"
         highlight-current-row
         :current-row-key="selectedIpId || undefined"
-        row-key="id"
-        class="subnet-ip-table"
-      >
-        <!-- Status Icon -->
-        <el-table-column label="Status" width="60" align="center">
-          <template #default="{ row }">
-            <el-tooltip :content="getStatusTooltip(row)" placement="top">
-              <div style="display: flex; align-items: center; justify-content: center">
-                <el-icon v-if="row.is_reachable" :size="18" style="color: #67c23a">
-                  <CircleCheckFilled />
-                </el-icon>
-                <el-icon v-else-if="row.status === 'used'" :size="18" style="color: #f56c6c">
-                  <CircleCloseFilled />
-                </el-icon>
-                <el-icon v-else-if="row.status === 'reserved'" :size="18" style="color: #e6a23c">
-                  <WarningFilled />
-                </el-icon>
-                <el-icon v-else :size="18" style="color: #909399">
-                  <Remove />
-                </el-icon>
-              </div>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-
-        <!-- IP Address -->
-        <el-table-column prop="ip_address" label="IP Address" width="135" sortable :sort-method="sortByIpAddress">
-          <template #default="{ row }">
-            <span
-              class="ip-address-link"
-              @click="openIPDetail(row.id)"
-            >{{ row.ip_address }}</span>
-          </template>
-        </el-table-column>
-
-        <!-- Last Response (IMPORTANT!) -->
-        <el-table-column label="Last Response" width="120" sortable :sort-method="sortByLastResponse">
-          <template #default="{ row }">
-            <span :style="{ color: getLastResponseColor(row) }">
-              {{ getLastResponse(row) }}
-            </span>
-          </template>
-        </el-table-column>
-
-        <!-- Response Time -->
-        <el-table-column label="Response Time" width="100" align="right">
-          <template #default="{ row }">
-            <span v-if="row.response_time != null" class="response-time-cell">{{ row.response_time }} ms</span>
-            <span v-else style="color: #909399">-</span>
-          </template>
-        </el-table-column>
-
-        <!-- DNS Name -->
-        <el-table-column prop="dns_name" label="DNS" min-width="140" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row.dns_name || row.hostname || '-' }}
-          </template>
-        </el-table-column>
-
-        <!-- System Name -->
-        <el-table-column prop="system_name" label="System Name" min-width="120" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row.system_name || '-' }}
-          </template>
-        </el-table-column>
-
-        <!-- Machine Type -->
-        <el-table-column prop="machine_type" label="Machine Type" min-width="110" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row.machine_type || '-' }}
-          </template>
-        </el-table-column>
-
-        <!-- Vendor -->
-        <el-table-column prop="vendor" label="Vendor" width="100" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row.vendor || '-' }}
-          </template>
-        </el-table-column>
-
-        <!-- Switch Name -->
-        <el-table-column prop="switch_name" label="Switch" min-width="150" show-overflow-tooltip>
-          <template #default="{ row }">
-            <router-link
-              v-if="row.switch_id"
-              :to="`/switches/${row.switch_id}`"
-              style="color: var(--primary-color); text-decoration: none"
-            >
-              {{ row.switch_name || '-' }}
-            </router-link>
-            <span v-else style="color: #909399">-</span>
-          </template>
-        </el-table-column>
-
-        <!-- Switch Port -->
-        <el-table-column prop="switch_port" label="Port" width="110" show-overflow-tooltip>
-          <template #default="{ row }">
-            <el-tooltip v-if="row.switch_port" :content="row.switch_port" placement="top" :disabled="(row.switch_port || '').length <= 12">
-              <el-tag type="success" size="small" class="port-tag">{{ row.switch_port }}</el-tag>
-            </el-tooltip>
-            <span v-else style="color: #909399">-</span>
-          </template>
-        </el-table-column>
-
-        <!-- OS Type -->
-        <el-table-column prop="os_type" label="OS Type" width="95">
-          <template #default="{ row }">
-            <el-tag v-if="row.os_type === 'windows'" type="primary" size="small">Windows</el-tag>
-            <el-tag v-else-if="row.os_type === 'linux'" type="success" size="small">Linux</el-tag>
-            <el-tag v-else-if="row.os_type === 'network'" type="warning" size="small">Network</el-tag>
-            <el-tag v-else-if="row.os_type === 'unix'" type="info" size="small">Unix</el-tag>
-            <span v-else style="color: #909399">-</span>
-          </template>
-        </el-table-column>
-
-        <!-- OS Name -->
-        <el-table-column prop="os_name" label="OS Name" min-width="110" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row.os_name || '-' }}
-          </template>
-        </el-table-column>
-
-        <!-- OS Version -->
-        <el-table-column prop="os_version" label="OS Version" width="100" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row.os_version || '-' }}
-          </template>
-        </el-table-column>
-
-        <!-- Last Boot Time -->
-        <el-table-column label="Last Boot Time" min-width="130" show-overflow-tooltip>
-          <template #default="{ row }">
-            {{ row.last_boot_time ? formatDateTime(row.last_boot_time) : '-' }}
-          </template>
-        </el-table-column>
-      </el-table>
-      </div>
+        default-sort-prop="ip_address"
+        @ip-click="(row) => openIPDetail(row.id)"
+      />
 
       <!-- Pagination -->
       <el-pagination
@@ -269,6 +143,7 @@
       v-model="showDrawer"
       :ip-id="selectedIpId"
       :refresh-key="detailDrawerRefreshKey"
+      @refreshed="loadIPs"
     />
 
     <!-- Edit Subnet Dialog -->
@@ -305,47 +180,16 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import {
-  Back,
-  Edit,
-  Refresh,
-  Search,
-  CircleCheckFilled,
-  CircleCloseFilled,
-  WarningFilled,
-  Remove,
-  Loading
-} from '@element-plus/icons-vue'
+import { Back, Edit, Refresh, Search, Loading } from '@element-plus/icons-vue'
 import apiClient from '@/api/index'
-import { ipamApi, type IPAMScanStatus } from '@/api/ipam'
+import { ipamApi, type IPAMScanStatus, type IPAddressDetail } from '@/api/ipam'
 import IPDetailDrawer from '@/components/IPDetailDrawer.vue'
+import IPAddressTable from '@/components/ipam/IPAddressTable.vue'
+import ColumnSettings from '@/components/ipam/ColumnSettings.vue'
+import { sortByIpAddress } from '@/components/ipam/ipColumns'
+import { useColumnPreferences } from '@/composables/useColumnPreferences'
 import { useIPAMScanMonitor } from '@/composables/useIPAMScanMonitor'
-import { formatLastResponse, formatDateTime } from '@/utils/time'
-
-interface IPAddress {
-  id: number
-  ip_address: string
-  status: string
-  is_reachable: boolean
-  response_time?: number
-  hostname?: string
-  dns_name?: string
-  system_name?: string
-  machine_type?: string
-  vendor?: string
-  switch_id?: number
-  switch_name?: string
-  switch_port?: string
-  vlan_id?: number
-  os_type?: string
-  os_name?: string
-  os_version?: string
-  last_boot_time?: string
-  description?: string
-  last_seen_at?: string
-  last_scan_at?: string
-  last_enrichment_at?: string
-}
+import { formatDateTime } from '@/utils/time'
 
 interface Subnet {
   id?: number
@@ -370,7 +214,7 @@ const subnet = ref<Subnet>({
   used_ips: 0,
   last_scan_at: ''
 })
-const ipAddresses = ref<IPAddress[]>([])
+const ipAddresses = ref<IPAddressDetail[]>([])
 const loading = ref(false)
 const initialLoading = ref(true)
 const refreshing = ref(false)
@@ -403,6 +247,31 @@ const selectedIpId = ref<number | null>(null)
 const detailDrawerRefreshKey = ref(0)
 const totalIPCount = ref(0)
 let lastStatusNotificationKey = ''
+
+// 列显示偏好（按账号保存）
+const {
+  columns,
+  visibleColumns,
+  isVisible,
+  saving: columnSaving,
+  load: loadColumnPreferences,
+  save: handleColumnSave,
+  toggle,
+  reset
+} = useColumnPreferences('ipam.subnet-ip-table')
+
+const saveColumns = async () => {
+  try {
+    await handleColumnSave()
+  } catch (error) {
+    ElMessage.error('列设置保存失败')
+  }
+}
+
+const resetColumns = async () => {
+  reset()
+  await saveColumns()
+}
 
 const openIPDetail = (ipId: number) => {
   if (selectedIpId.value === ipId && showDrawer.value) {
@@ -688,51 +557,12 @@ const scanSubnet = async () => {
   }
 }
 
-// Get Last Response (CRITICAL FUNCTION!) — shared with the IPAM Excel export
-const getLastResponse = (ip: IPAddress): string => formatLastResponse(ip.last_seen_at)
-
-// Get color for Last Response
-const getLastResponseColor = (ip: IPAddress): string => {
-  const dateStr = ip.last_seen_at
-  if (!dateStr) return '#909399'
-
-  const diffMs = new Date().getTime() - new Date(dateStr).getTime()
-  const diffDays = Math.floor(diffMs / 86400000)
-
-  if (diffDays === 0) return '#67c23a'  // Green - Today
-  if (diffDays <= 7) return '#409eff'   // Blue - This week
-  if (diffDays <= 30) return '#e6a23c'  // Orange - This month
-  return '#f56c6c'                       // Red - Long time ago
-}
-
-// Sort by last response
-const sortByLastResponse = (a: IPAddress, b: IPAddress): number => {
-  const dateA = new Date(a.last_seen_at || 0).getTime()
-  const dateB = new Date(b.last_seen_at || 0).getTime()
-  return dateB - dateA  // Most recent first
-}
-
-const ipToNumber = (ip: string): number => {
-  return ip.split('.').reduce((acc, octet) => acc * 256 + Number(octet), 0)
-}
-
-const sortByIpAddress = (a: IPAddress, b: IPAddress): number => {
-  return ipToNumber(a.ip_address) - ipToNumber(b.ip_address)
-}
-
-// Get status tooltip
-const getStatusTooltip = (ip: IPAddress): string => {
-  if (ip.is_reachable) return 'Online - IP is reachable'
-  if (ip.status === 'used') return 'Offline - IP was used but not reachable'
-  if (ip.status === 'reserved') return 'Reserved - IP is reserved'
-  return 'Available - IP is not in use'
-}
-
 // Format datetime: see @/utils/time (shared with the IPAM Excel export)
 
 onMounted(() => {
   loadSubnet()
   loadIPs()
+  void loadColumnPreferences()
   void loadInitialStatus().then((supported) => {
     if (supported && monitorSupported.value) {
       connectScanMonitor()
@@ -801,93 +631,12 @@ onMounted(() => {
   color: #22324d;
 }
 
-:deep(.el-table) {
-  font-size: 13px;
-}
-
-:deep(.el-table th) {
-  background-color: #f5f7fa;
-  color: #1f2937 !important;
-  font-weight: 600;
-}
-:deep(.el-table th .cell) {
-  color: #1f2937 !important;
-}
-
-.ip-address-link {
-  font-family: 'SFMono-Regular', 'Cascadia Code', 'Consolas', 'Liberation Mono',
-    'Courier New', monospace;
-  font-size: 13px;
-  font-weight: 700;
-  color: #1d4ed8;
-  letter-spacing: 0.02em;
-  font-variant-numeric: tabular-nums;
-  cursor: pointer;
-  transition: color 0.2s ease;
-}
-
-.ip-address-link:hover {
-  color: #1e3a8a;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-/* Table horizontal scroll — table expands to its natural width, wrapper scrolls when needed */
-.table-scroll-wrapper {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: thin;
-  scrollbar-color: #c0c4cc transparent;
-  /* sticky scrollbar at bottom of viewport so user always sees it */
-  max-height: 75vh;
-}
-
-.subnet-ip-table {
-  /* Let the table take its natural width based on column definitions.
-     When it exceeds the wrapper, the wrapper's overflow-x handles scrolling. */
-  width: auto !important;
-  min-width: 100%;
-}
-
-/* Tighter, readable cell styling — similar to Excel data density */
-.subnet-ip-table :deep(.el-table__body-wrapper) {
-  overflow-y: auto;
-}
-
-.subnet-ip-table :deep(.cell) {
-  padding: 4px 8px;
-  font-size: 13px;
-  line-height: 1.4;
-  word-break: break-word;
-}
-
-.table-scroll-wrapper::-webkit-scrollbar {
-  height: 8px;
-}
-
-.table-scroll-wrapper::-webkit-scrollbar-track {
-  background: #f0f2f5;
-  border-radius: 4px;
-}
-
-.table-scroll-wrapper::-webkit-scrollbar-thumb {
-  background: #c0c4cc;
-  border-radius: 4px;
-}
-
-.table-scroll-wrapper::-webkit-scrollbar-thumb:hover {
-  background: #909399;
-}
-
-.response-time-cell {
-  font-variant-numeric: tabular-nums;
-}
-
-.port-tag {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
 }
 
 @media (max-width: 768px) {

@@ -15,6 +15,10 @@ redis==5.0.1
 netmiko==4.3.0
 paramiko==3.4.0
 dnspython==2.4.2
+# Windows WMI 硬件资产采集（IPAM SN/型号补采，可选依赖）
+impacket==0.12.0
+# Windows WinRM 硬件资产采集（WMI 不通时的兜底通路，可选依赖）
+pywinrm==0.5.0
 
 # Security
 cryptography==41.0.7

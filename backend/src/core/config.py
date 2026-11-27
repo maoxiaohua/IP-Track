@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     COLLECTION_JOB_HARD_TIMEOUT_SECONDS: int = 360  # Per-job hard deadline (6 min)
     STALE_JOB_RECLAIM_MINUTES: int = 15  # Reclaim RUNNING jobs older than this
     CONSECUTIVE_FAILURE_AUTO_RESOLVE: int = 10  # Auto-resolve alarm after N failures
+    # Netmiko banner/auth 握手超时。慢链路或并发登录时远超默认 15s，
+    # 不放宽会把"网络慢"误判成"认证失败"（与 CONFIG_BACKUP_HANDSHAKE_TIMEOUT_SECONDS 同因）。
+    CLI_HANDSHAKE_TIMEOUT_SECONDS: int = Field(default=90, ge=5, le=600)
 
     # IPAM Settings
     IPAM_OFFLINE_THRESHOLD_HOURS: int = 6  # Hours without response before marking as offline
@@ -168,6 +171,37 @@ class Settings(BaseSettings):
         ge=600,
         le=14400,
         description="Hard timeout for a single enrichment pass"
+    )
+    HARDWARE_WMI_SWEEP_INTERVAL_MINUTES: int = Field(
+        default=360,
+        ge=60,
+        le=1440,
+        description="Interval between Windows WMI hardware inventory sweeps"
+    )
+    # Windows WinRM 硬件采集（WMI 兜底通路），默认值对应 Windows 默认配置
+    WINRM_PORT: int = Field(
+        default=5985,
+        ge=1,
+        le=65535,
+        description="WinRM (WSMan) port; 5985 for HTTP, 5986 for HTTPS"
+    )
+    WINRM_USE_SSL: bool = Field(
+        default=False,
+        description="Connect to WinRM over HTTPS (required for port 5986)"
+    )
+    WINRM_TRANSPORT: str = Field(
+        default='ntlm',
+        description="pywinrm transport: ntlm, basic, kerberos, credssp, plaintext, ssl"
+    )
+    WINRM_TIMEOUT_SECONDS: int = Field(
+        default=30,
+        ge=5,
+        le=300,
+        description="WinRM read timeout in seconds per host"
+    )
+    WINRM_SERVER_CERT_VALIDATION: bool = Field(
+        default=False,
+        description="Validate WinRM HTTPS server certificate (disable for self-signed)"
     )
     IP_SCAN_HISTORY_RECORD_ALL: bool = Field(
         default=True,

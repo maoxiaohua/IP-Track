@@ -31,6 +31,7 @@ class NetworkCollectionScheduler:
         self.is_running = False
         self._ipam_scan_lock = asyncio.Lock()
         self._ipam_enrichment_lock = asyncio.Lock()
+        self._hardware_wmi_lock = asyncio.Lock()
         self._current_ipam_scan_context: str | None = None
         self._startup_ipam_catchup_task: asyncio.Task | None = None
 
@@ -736,6 +737,26 @@ class NetworkCollectionScheduler:
             elapsed = (datetime.now() - start_time).total_seconds()
             logger.info(f"IPAM enrichment finished in {elapsed:.1f}s")
 
+    async def _run_hardware_wmi_sweep(self):
+        """Windows WMI 硬件补采：仅在线、os_type=windows 且尚无 SN 的 IP"""
+        if self._hardware_wmi_lock.locked():
+            logger.info("Skipping WMI hardware sweep because a previous sweep is still running")
+            return
+
+        async with self._hardware_wmi_lock:
+            try:
+                from services import hardware_inventory_service
+
+                async with AsyncSessionLocal() as db:
+                    try:
+                        collected = await hardware_inventory_service.run_wmi_sweep(db)
+                        logger.info(f"Scheduled WMI hardware sweep completed: {collected} IP(s)")
+                    except Exception as e:
+                        await db.rollback()
+                        logger.error(f"WMI hardware sweep failed: {str(e)}", exc_info=True)
+            except Exception as e:
+                logger.error(f"WMI hardware sweep error: {str(e)}", exc_info=True)
+
     async def _run_optical_module_collection(self):
         """Run optical module collection from all switches via worker pool"""
         logger.info("Scheduled optical module collection started - creating jobs for worker pool")
@@ -1007,10 +1028,21 @@ async def start_ipam_scheduler():
                 max_instances=1
             )
 
+            # Windows WMI 硬件补采（SN/型号），与扫描解耦，默认串行
+            scheduler.add_job(
+                network_scheduler._run_hardware_wmi_sweep,
+                trigger=IntervalTrigger(minutes=settings.HARDWARE_WMI_SWEEP_INTERVAL_MINUTES),
+                id='hardware_wmi_sweep',
+                name='Hardware WMI Sweep',
+                replace_existing=True,
+                max_instances=1
+            )
+
             scheduler.start()
             network_scheduler.is_running = True
             logger.info(f"IPAM scheduler started (interval: {settings.IPAM_SCAN_INTERVAL_MINUTES} min)")
             logger.info(f"IPAM enrichment scheduler started (interval: {settings.IPAM_ENRICHMENT_INTERVAL_MINUTES} min)")
+            logger.info(f"Hardware WMI sweep scheduled (interval: {settings.HARDWARE_WMI_SWEEP_INTERVAL_MINUTES} min)")
             asyncio.create_task(
                 network_scheduler.trigger_startup_catchup(include_ipam=True)
             )

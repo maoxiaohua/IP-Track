@@ -107,6 +107,68 @@
         </div>
       </el-card>
 
+      <!-- Hardware Inventory (IPAM SN / model) -->
+      <el-card class="section-card" style="margin-top: 20px">
+        <template #header>
+          <div class="section-header">
+            <h3>Hardware Inventory (IPAM)</h3>
+          </div>
+        </template>
+
+        <el-form label-width="220px" v-loading="hardwareLoading">
+          <el-form-item label="自动采集开关">
+            <el-switch v-model="hardwareForm.enabled" />
+            <span class="hardware-hint">关闭后停止自动采集，已采集的 SN 不会被清空</span>
+          </el-form-item>
+          <el-form-item label="失败重试间隔（小时）">
+            <el-input-number v-model="hardwareForm.retry_hours" :min="1" :max="720" />
+          </el-form-item>
+          <el-form-item label="默认 SNMP Community">
+            <el-input
+              v-model="hardwareForm.default_community"
+              type="password"
+              show-password
+              clearable
+              style="max-width: 320px"
+              :placeholder="hardwareSettings.default_community_configured ? '已配置，留空保持不变' : '未配置'"
+            />
+          </el-form-item>
+          <el-form-item label="WMI / WinRM 域">
+            <el-input
+              v-model="hardwareForm.wmi_domain"
+              clearable
+              style="max-width: 320px"
+              placeholder="留空表示本机账号"
+            />
+          </el-form-item>
+          <el-form-item label="WMI / WinRM 用户名">
+            <el-input v-model="hardwareForm.wmi_username" clearable style="max-width: 320px" />
+          </el-form-item>
+          <el-form-item label="WMI / WinRM 口令">
+            <el-input
+              v-model="hardwareForm.wmi_password"
+              type="password"
+              show-password
+              clearable
+              style="max-width: 320px"
+              :placeholder="hardwareSettings.wmi_password_configured ? '已配置，留空保持不变' : '未配置'"
+            />
+          </el-form-item>
+          <el-form-item label="WMI 并发数">
+            <el-input-number v-model="hardwareForm.wmi_concurrency" :min="1" :max="8" />
+            <span class="hardware-hint">建议保持 1，避免连续失败导致账号锁定</span>
+          </el-form-item>
+          <el-form-item label="每轮 WMI 采集上限">
+            <el-input-number v-model="hardwareForm.wmi_max_per_sweep" :min="1" :max="1000" />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :loading="hardwareSaving" @click="saveHardwareSettings">
+              保存硬件盘点设置
+            </el-button>
+          </el-form-item>
+        </el-form>
+      </el-card>
+
       <!-- Additional settings placeholder -->
       <el-empty
         description="More settings coming soon"
@@ -117,15 +179,96 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { ElMessage } from 'element-plus'
 import { SuccessFilled, WarningFilled, CircleCloseFilled, QuestionFilled } from '@element-plus/icons-vue'
+import { hardwareApi, type HardwareInventorySettings, type HardwareInventorySettingsUpdate } from '@/api/ipam'
 
 const settingsStore = useSettingsStore()
 
+const hardwareLoading = ref(false)
+const hardwareSaving = ref(false)
+const hardwareSettings = ref<HardwareInventorySettings>({
+  enabled: true,
+  retry_hours: 24,
+  wmi_concurrency: 1,
+  wmi_max_per_sweep: 50,
+  default_community_configured: false,
+  wmi_domain: '',
+  wmi_username: '',
+  wmi_password_configured: false
+})
+// 口令字段只提交用户新填的值，留空不覆盖
+const hardwareForm = reactive({
+  enabled: true,
+  retry_hours: 24,
+  wmi_concurrency: 1,
+  wmi_max_per_sweep: 50,
+  default_community: '',
+  wmi_domain: '',
+  wmi_username: '',
+  wmi_password: ''
+})
+
+const loadHardwareSettings = async () => {
+  hardwareLoading.value = true
+  try {
+    const data = await hardwareApi.getSettings()
+    hardwareSettings.value = data
+    hardwareForm.enabled = data.enabled
+    hardwareForm.retry_hours = data.retry_hours
+    hardwareForm.wmi_concurrency = data.wmi_concurrency
+    hardwareForm.wmi_max_per_sweep = data.wmi_max_per_sweep
+    hardwareForm.wmi_domain = data.wmi_domain || ''
+    hardwareForm.wmi_username = data.wmi_username || ''
+    hardwareForm.default_community = ''
+    hardwareForm.wmi_password = ''
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(detail || '加载硬件盘点设置失败')
+  } finally {
+    hardwareLoading.value = false
+  }
+}
+
+const saveHardwareSettings = async () => {
+  if (hardwareSaving.value) return
+  hardwareSaving.value = true
+  try {
+    const payload: HardwareInventorySettingsUpdate = {
+      enabled: hardwareForm.enabled,
+      retry_hours: hardwareForm.retry_hours,
+      wmi_concurrency: hardwareForm.wmi_concurrency,
+      wmi_max_per_sweep: hardwareForm.wmi_max_per_sweep
+    }
+    // 非敏感字段按差异提交，避免误清空；口令仅在填写时覆盖
+    if (hardwareForm.wmi_domain !== (hardwareSettings.value.wmi_domain || '')) {
+      payload.wmi_domain = hardwareForm.wmi_domain
+    }
+    if (hardwareForm.wmi_username !== (hardwareSettings.value.wmi_username || '')) {
+      payload.wmi_username = hardwareForm.wmi_username
+    }
+    if (hardwareForm.default_community) {
+      payload.default_community = hardwareForm.default_community
+    }
+    if (hardwareForm.wmi_password) {
+      payload.wmi_password = hardwareForm.wmi_password
+    }
+    await hardwareApi.updateSettings(payload)
+    ElMessage.success('硬件盘点设置已保存')
+    await loadHardwareSettings()
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(detail || '保存硬件盘点设置失败')
+  } finally {
+    hardwareSaving.value = false
+  }
+}
+
 onMounted(async () => {
   await settingsStore.loadSettings()
+  await loadHardwareSettings()
 })
 
 const formatTime = (date: Date): string => {
@@ -268,5 +411,11 @@ const handleSave = async () => {
   margin-top: 24px;
   padding-top: 24px;
   border-top: 1px solid #ebeef5;
+}
+
+.hardware-hint {
+  margin-left: 12px;
+  font-size: 12px;
+  color: #909399;
 }
 </style>

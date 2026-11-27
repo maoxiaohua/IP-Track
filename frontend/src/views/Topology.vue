@@ -173,6 +173,12 @@
             {{ formatTime(selectedNode.last_collection_at) }}
           </el-descriptions-item>
           <el-descriptions-item v-if="selectedNode.kind === 'unknown'" label="设备类别">{{ deviceClassLabel(selectedNode.device_class) }}</el-descriptions-item>
+          <el-descriptions-item v-if="selectedNode.kind === 'unknown'" label="置信度">
+            {{ selectedNode.device_confidence != null ? `${selectedNode.device_confidence}%` : '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item v-if="selectedNode.kind === 'unknown'" label="判定依据">
+            {{ selectedNode.device_reasons && selectedNode.device_reasons.length ? selectedNode.device_reasons.join('；') : '-' }}
+          </el-descriptions-item>
           <el-descriptions-item v-if="selectedNode.kind === 'unknown'" label="节点键">{{ selectedNode.id }}</el-descriptions-item>
           <el-descriptions-item label="链路数">{{ selectedNode.degree }}</el-descriptions-item>
         </el-descriptions>

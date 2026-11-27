@@ -18,6 +18,7 @@ class IPLookupResult(BaseModel):
     switch_ip: Optional[str] = None
     port_name: Optional[str] = None
     vlan_id: Optional[int] = None
+    port_device: Optional[dict] = None
     query_time_ms: int
     query_mode: Optional[str] = None  # 'cache', 'realtime', 'auto_fallback'
     data_age_seconds: Optional[int] = None  # Only for cache mode - how old is the data

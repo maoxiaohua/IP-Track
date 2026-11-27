@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, cast, Text, delete, not_
 from sqlalchemy.dialects.postgresql import insert
 from utils.logger import logger
+from core.config import settings
 
 from models.switch import Switch
 from models.arp_table import ARPTable
@@ -248,7 +249,9 @@ class NetworkDataCollector:
             'cli_transport': switch.cli_transport,
             'ssh_port': switch.ssh_port,
             'connection_timeout': switch.connection_timeout,
-            'enable_password_encrypted': switch.enable_password_encrypted
+            'enable_password_encrypted': switch.enable_password_encrypted,
+            # 慢链路/并发登录时 Netmiko 默认 15s 握手会误报认证超时（与配置备份同因）
+            'handshake_timeout': settings.CLI_HANDSHAKE_TIMEOUT_SECONDS
         }
 
     async def collect_chassis_serial(self, db: AsyncSession, switch: Switch) -> Optional[str]:
@@ -270,7 +273,7 @@ class NetworkDataCollector:
                     str(switch.ip_address), self._get_snmp_config(switch)
                 )
             except Exception as serial_err:
-                logger.debug(f"  SNMP serial collection failed for {switch.name}: {serial_err}")
+                logger.warning(f"  SNMP serial collection failed for {switch.name}: {serial_err}")
 
         if not serial and switch.cli_enabled and switch.password_encrypted:
             try:
@@ -286,15 +289,54 @@ class NetworkDataCollector:
                     cli_serial_config,
                 )
             except Exception as cli_err:
-                logger.debug(f"  CLI serial collection failed for {switch.name}: {cli_err}")
+                logger.warning(f"  CLI serial collection failed for {switch.name}: {cli_err}")
 
         if serial and serial != switch.serial_number:
             switch.serial_number = serial
             db.add(switch)
             logger.info(f"  Serial number for {switch.name}: {serial}")
         elif not serial:
-            logger.debug(f"  No serial number collected for {switch.name} ({switch.ip_address})")
+            logger.warning(f"  No serial number collected for {switch.name} ({switch.ip_address})")
         return serial
+
+    async def collect_device_model(self, db: AsyncSession, switch: Switch) -> Optional[str]:
+        """回填交换机型号（仅当型号为空/Unknown 时）。
+
+        型号只在手动「刷新设备信息」时才会写入，新加的交换机在第一次手动点击前一直是
+        Unknown，IPAM/拓扑都拿不到准确型号。这里与 collect_chassis_serial 一样走 CLI，
+        **只更新 model，绝不改 name**（改名影响查询和展示，必须保持手动）。
+        """
+        current = (switch.model or '').strip()
+        if current and current.lower() != 'unknown':
+            return switch.model
+
+        if not (switch.cli_enabled and switch.password_encrypted):
+            logger.warning(f"  Skip model collection for {switch.name}: CLI credentials missing")
+            return None
+
+        model = None
+        try:
+            cli_model_config = self._build_cli_config(switch)
+            cli_model_config['device_type'] = cli_service._resolve_device_type(
+                switch.vendor or '', switch.model or '', switch.name or ''
+            )
+            info = await asyncio.to_thread(
+                cli_service.get_device_info_cli,
+                str(switch.ip_address),
+                cli_model_config,
+            )
+            if info:
+                model = (info.get('model') or '').strip() or None
+        except Exception as cli_err:
+            logger.warning(f"  CLI model collection failed for {switch.name}: {cli_err}")
+
+        if model and model.lower() != 'unknown' and model != switch.model:
+            switch.model = model
+            db.add(switch)
+            logger.info(f"  Model for {switch.name}: {model}")
+        elif not model:
+            logger.warning(f"  No model collected for {switch.name} ({switch.ip_address})")
+        return model
 
     def _set_optical_collection_state(
         self,
@@ -1261,7 +1303,8 @@ class NetworkDataCollector:
             'cli_transport': switch.cli_transport,
             'ssh_port': switch.ssh_port,
             'connection_timeout': switch.connection_timeout,
-            'enable_password_encrypted': switch.enable_password_encrypted
+            'enable_password_encrypted': switch.enable_password_encrypted,
+            'handshake_timeout': settings.CLI_HANDSHAKE_TIMEOUT_SECONDS
         }
 
         from config.collection_strategy import CollectionStrategy, CollectionMethod
@@ -2016,6 +2059,8 @@ class NetworkDataCollector:
                     # Vendor-specific timeout (Alcatel needs longer)
                     vendor_lower = switch.vendor.lower() if switch.vendor else ''
                     timeout = 300.0 if vendor_lower in ['alcatel', 'nokia'] else 90.0
+                    # 握手超时放宽后，外层等待必须大于握手，否则会被外层先杀掉
+                    timeout = max(timeout, float(settings.CLI_HANDSHAKE_TIMEOUT_SECONDS) + 60.0)
 
                     optical_modules = await asyncio.wait_for(
                         asyncio.to_thread(
@@ -2023,7 +2068,8 @@ class NetworkDataCollector:
                             str(switch.ip_address),
                             cli_config,
                             switch.vendor,
-                            switch.model
+                            switch.model,
+                            True  # raise_on_error: 区分“连不上”与“真的 0 个模块”
                         ),
                         timeout=timeout
                     )
@@ -2038,6 +2084,7 @@ class NetworkDataCollector:
                             switch.optical_collection_method = 'cli'  # Learn preference
                             logger.info(f"Learned: {switch.name} prefers CLI for optical collection")
                     else:
+                        # 只有正常返回 0 才是“确认无光模块”，异常走 except 不算
                         method_used = 'cli'
                         empty_collection_confirmed = True
 
@@ -2047,6 +2094,37 @@ class NetworkDataCollector:
                 except Exception as e:
                     logger.error(f"CLI optical collection failed for {switch.name}: {str(e)}")
                     failure_reasons.append(f"CLI failed: {str(e)}")
+
+        # CLI 异常后补一次 SNMP：学到的 cli 偏好可能来自一次并发登录失败，不兜底会永久锁死在 CLI
+        if (
+            len(optical_modules) == 0
+            and not empty_collection_confirmed
+            and preferred_method == 'cli'
+            and not switch.optical_method_override
+            and failure_reasons
+            and switch_has_snmp_credentials(switch)
+        ):
+            logger.warning(f"CLI optical failed on {switch.name}; retrying via SNMP")
+            try:
+                snmp_config = self._get_snmp_config(switch)
+                optical_modules = await asyncio.wait_for(
+                    snmp_service.collect_optical_modules(str(switch.ip_address), snmp_config),
+                    timeout=60.0
+                )
+                if len(optical_modules) > 0:
+                    method_used = 'snmp'
+                    switch.optical_collection_success_count += 1
+                    if switch.optical_collection_method != 'snmp':
+                        switch.optical_collection_method = 'snmp'
+                        logger.info(f"Learned: {switch.name} prefers SNMP for optical collection")
+                    failure_reasons.clear()
+                    logger.info(f"✅ SNMP fallback optical successful: {len(optical_modules)} modules from {switch.name}")
+                else:
+                    failure_reasons.append("SNMP fallback returned 0 modules")
+            except asyncio.TimeoutError:
+                failure_reasons.append("SNMP fallback timeout")
+            except Exception as e:
+                failure_reasons.append(f"SNMP fallback failed: {str(e)}")
 
         if len(optical_modules) > 0:
             stored_count = await self._store_optical_modules_snapshot(

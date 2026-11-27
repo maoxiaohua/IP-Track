@@ -43,6 +43,17 @@
           <el-tag type="warning">VLAN {{ result.vlan_id }}</el-tag>
         </el-descriptions-item>
 
+        <el-descriptions-item v-if="result.port_device" label="对端设备">
+          <el-tag :type="peerTagType(result.port_device.device_class)" effect="dark">
+            {{ peerClassLabel(result.port_device.device_class) }}
+          </el-tag>
+          <span class="peer-confidence">置信度 {{ result.port_device.confidence }}%</span>
+        </el-descriptions-item>
+
+        <el-descriptions-item v-if="result.port_device?.reasons?.length" label="判定依据" :span="2">
+          {{ result.port_device.reasons.join('；') }}
+        </el-descriptions-item>
+
         <el-descriptions-item label="Query Time">
           {{ result.query_time_ms }} ms
         </el-descriptions-item>
@@ -119,6 +130,25 @@ const getDataAgeType = (seconds: number) => {
   if (seconds < 3600) return 'warning' // < 1 hour
   return 'danger'  // > 1 hour
 }
+
+// 与后端 device_classifier 的取值一一对应
+const PEER_CLASS_LABEL: Record<string, string> = {
+  switch: '交换机',
+  router: '路由器',
+  'wlan-ap': '无线 AP',
+  hub: '集线器',
+  phone: 'IP 话机',
+  host: 'PC / 服务器',
+  unknown: '未识别'
+}
+
+const peerClassLabel = (value: string) => PEER_CLASS_LABEL[value] || '未识别'
+
+const peerTagType = (value: string) => {
+  if (value === 'switch' || value === 'router') return 'success'
+  if (value === 'hub' || value === 'wlan-ap') return 'warning'
+  return 'info'
+}
 </script>
 
 <style scoped>
@@ -147,5 +177,11 @@ const getDataAgeType = (seconds: number) => {
 
 .el-descriptions {
   margin-top: 16px;
+}
+
+.peer-confidence {
+  margin-left: 8px;
+  color: #606266;
+  font-size: 12px;
 }
 </style>

@@ -156,6 +156,12 @@ class CollectionWorker:
             elif job.job_type == JobType.OPTICAL:
                 entries = await self.collector.collect_optical_single_switch(db, switch)
                 job.entries_collected = len(entries) if entries else 0
+                # 以前 CLI 连不上也被当成“0 个模块”记为 success，告警和 UI 都看不到失败。
+                if getattr(switch, 'last_optical_collection_status', None) == 'failed':
+                    raise RuntimeError(
+                        getattr(switch, 'last_optical_collection_message', None)
+                        or 'optical collection failed'
+                    )
 
             elif job.job_type == JobType.TOPOLOGY:
                 result = await collect_switch_topology(db, switch)
@@ -171,14 +177,15 @@ class CollectionWorker:
                 await derive_links(db)
 
             elif job.job_type == JobType.ALL:
-                # 序列号回填：ALL 任务以前只跑 MAC/ARP/光模块，新加的交换机 SN 永远是空的。
-                # 这里复用采集器的统一实现（非 Dell 走 SNMP，Dell 走 CLI show inventory），
+                # 序列号/型号回填：ALL 任务以前只跑 MAC/ARP/光模块，新加的交换机 SN 和型号
+                # 永远是空的。这里复用采集器的统一实现（非 Dell 走 SNMP，Dell 走 CLI），
                 # 失败不影响整轮采集，仅记日志。
                 try:
                     await self.collector.collect_chassis_serial(db, switch)
+                    await self.collector.collect_device_model(db, switch)
                 except Exception as serial_err:
                     logger.warning(
-                        f"Serial number collection failed for {switch.name}: {serial_err}"
+                        f"Serial/model collection failed for {switch.name}: {serial_err}"
                     )
 
                 mac_entries = await self.collector.collect_mac_single_switch(db, switch)
@@ -348,11 +355,22 @@ class CollectionWorker:
 
                 if switch:
                     is_topology = job.job_type == JobType.TOPOLOGY
+                    is_optical = job.job_type == JobType.OPTICAL
                     if is_topology:
                         # 拓扑失败只更新拓扑状态，不能覆盖 ARP/MAC 的采集时间与结果。
                         switch.last_topology_collection_at = start_time
                         switch.last_topology_collection_status = 'failed'
                         switch.last_topology_collection_message = error_text[:2000]
+                        db.add(switch)
+                    elif is_optical:
+                        # 光模块单独任务同理：rollback 会丢掉采集器写入的失败状态，这里补回，
+                        # 且不能覆盖 MAC/ARP 的采集状态。
+                        switch.last_optical_collection_at = start_time
+                        switch.last_optical_collection_status = 'failed'
+                        switch.last_optical_collection_message = error_text[:2000]
+                        switch.optical_collection_fail_count = (
+                            (switch.optical_collection_fail_count or 0) + 1
+                        )
                         db.add(switch)
                     else:
                         await self.collector._mark_switch_collection_failed(

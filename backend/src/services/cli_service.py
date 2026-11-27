@@ -2209,7 +2209,9 @@ class CLIService:
                 port=switch_config.get('ssh_port'),
                 timeout=switch_config.get('connection_timeout', 30),
                 enable_secret=enable_secret,
-                transport=transport
+                transport=transport,
+                banner_timeout=switch_config.get('handshake_timeout'),
+                auth_timeout=switch_config.get('handshake_timeout')
             )
 
             if not connection:
@@ -2309,7 +2311,9 @@ class CLIService:
                     port=switch_config.get('ssh_port'),
                     timeout=switch_config.get('connection_timeout', 30),
                     enable_secret=enable_secret,
-                    transport=transport
+                    transport=transport,
+                    banner_timeout=switch_config.get('handshake_timeout'),
+                    auth_timeout=switch_config.get('handshake_timeout')
                 )
                 if os10_conn:
                     connection = os10_conn  # For cleanup in finally
@@ -2613,7 +2617,9 @@ class CLIService:
                 port=switch_config.get('ssh_port'),
                 timeout=switch_config.get('connection_timeout', 30),
                 enable_secret=enable_secret,
-                transport=transport
+                transport=transport,
+                banner_timeout=switch_config.get('handshake_timeout'),
+                auth_timeout=switch_config.get('handshake_timeout')
             )
 
             if not connection:
@@ -2723,7 +2729,9 @@ class CLIService:
                     port=switch_config.get('ssh_port'),
                     timeout=switch_config.get('connection_timeout', 30),
                     enable_secret=enable_secret,
-                    transport=transport
+                    transport=transport,
+                    banner_timeout=switch_config.get('handshake_timeout'),
+                    auth_timeout=switch_config.get('handshake_timeout')
                 )
                 if os10_conn:
                     connection = os10_conn  # For cleanup in finally
@@ -2846,7 +2854,9 @@ class CLIService:
                 port=switch_config.get('ssh_port'),
                 timeout=switch_config.get('connection_timeout', 30),
                 enable_secret=enable_secret,
-                transport=transport
+                transport=transport,
+                banner_timeout=switch_config.get('handshake_timeout'),
+                auth_timeout=switch_config.get('handshake_timeout')
             )
 
             if not connection:
@@ -3008,6 +3018,8 @@ class CLIService:
                 timeout=switch_config.get('connection_timeout', 30),
                 enable_secret=enable_secret,
                 transport=transport,
+                banner_timeout=switch_config.get('handshake_timeout'),
+                auth_timeout=switch_config.get('handshake_timeout'),
             )
             if not connection:
                 return None
@@ -3690,6 +3702,8 @@ class CLIService:
                     enable_secret=enable_secret,
                     transport=transport,
                     raise_on_error=True,
+                    banner_timeout=switch_config.get('handshake_timeout'),
+                    auth_timeout=switch_config.get('handshake_timeout'),
                 )
             except Exception as connect_error:
                 # netmiko 异常是多行带排查建议的大段文本，压成一行便于在告警页阅读。
@@ -3973,17 +3987,20 @@ class CLIService:
         switch_ip: str,
         cli_config: Dict,
         vendor: str,
-        model: str
+        model: str,
+        raise_on_error: bool = False
     ) -> List[Dict]:
         """
         Collect optical module information via CLI
-        
+
         Args:
             switch_ip: IP address of the switch
             cli_config: CLI configuration (username, password, etc.)
             vendor: Vendor name (cisco, dell, alcatel, etc.)
             model: Model name
-            
+            raise_on_error: 连接/命令失败时抛异常而不是返回 []，
+                让调用方能区分"连不上"和"设备上确实没有光模块"
+
         Returns:
             List of optical module dictionaries with keys:
             - port_name: Interface name
@@ -4013,10 +4030,15 @@ class CLIService:
                 cli_config.get('ssh_port'),
                 cli_config.get('connection_timeout', 30),
                 decrypt_password(cli_config.get('enable_password_encrypted')) if cli_config.get('enable_password_encrypted') else None,
-                cli_config.get('cli_transport', 'ssh')
+                cli_config.get('cli_transport', 'ssh'),
+                raise_on_error=raise_on_error,
+                banner_timeout=cli_config.get('handshake_timeout'),
+                auth_timeout=cli_config.get('handshake_timeout')
             )
-            
+
             if not connection:
+                if raise_on_error:
+                    raise RuntimeError(f"CLI connection failed to {switch_ip}")
                 logger.error(f"Failed to establish CLI connection to {switch_ip}")
                 return []
             
@@ -4104,6 +4126,8 @@ class CLIService:
             
         except Exception as e:
             logger.error(f"Failed to collect optical modules via CLI from {switch_ip}: {str(e)}", exc_info=True)
+            if raise_on_error:
+                raise
             return []
     
     def _parse_dell_inventory_media(self, output: str) -> List[Dict]:

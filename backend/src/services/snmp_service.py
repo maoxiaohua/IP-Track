@@ -261,6 +261,58 @@ def normalize_snmp_config(config: Any) -> Dict[str, Any]:
     }
 
 
+def build_ipam_snmp_profile(profile: Any) -> Optional[Dict[str, Any]]:
+    """
+    把 IPAM 子网绑定的 SNMP 模板归一化成采集侧可直接使用的配置字典。
+
+    ipam_service 此前在两处手工拼字典，既漏了 ``snmp_version``（v2c 模板会被当作
+    SNMPv3 构造，静默超时），也漏了 ``community_encrypted`` 的换算。这里统一走
+    normalize_snmp_config()，并补上模板上的 timeout / retries。
+
+    返回的字典同时保留带前缀的标准键和采集入口沿用的裸键，调用点两种写法都能读。
+    """
+    if profile is None:
+        return None
+    config = normalize_snmp_config(profile)
+    config['timeout'] = _read_snmp_field(profile, 'timeout') or 5
+    config['retries'] = _read_snmp_field(profile, 'retries')
+    if config['retries'] is None:
+        config['retries'] = 2
+    # 兼容既有采集入口读取的裸键写法
+    config['username'] = config['snmp_username']
+    config['auth_protocol'] = config['snmp_auth_protocol']
+    config['auth_password_encrypted'] = config['snmp_auth_password_encrypted']
+    config['priv_protocol'] = config['snmp_priv_protocol']
+    config['priv_password_encrypted'] = config['snmp_priv_password_encrypted']
+    config['port'] = config['snmp_port']
+    return config
+
+
+# SNMP 设备普遍用这些值填充「无 SN / 无型号」，直接展示会误导资产核对
+_HARDWARE_PLACEHOLDER_VALUES = {
+    '', 'null', 'none', 'na', 'n/a', 'n.a.', 'unknown', 'not available',
+    'not specified', 'to be filled by o.e.m.', 'to be filled by oem',
+    'default string', 'system serial number', 'chassis serial number',
+    'no serial number', 'sn', '-', '--',
+}
+
+
+def clean_hardware_value(value: Any) -> Optional[str]:
+    """清洗 SNMP/WMI 取到的 SN、型号、厂商；空值与占位值一律返回 None。"""
+    if value is None:
+        return None
+    text = ''.join(c for c in str(value) if c.isprintable()).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in _HARDWARE_PLACEHOLDER_VALUES:
+        return None
+    # 全零/全 F 之类明显占位（如 0000000000、FFFFFFFFFFFF）
+    if set(lowered.replace(':', '').replace('-', '')) <= {'0'}:
+        return None
+    return text[:200]
+
+
 def _load_switch_snmp_profile(switch: Any) -> Any:
     """
     安全地取出交换机引用的 SNMP 模板，取不到一律返回 None。
@@ -425,6 +477,10 @@ class SNMPService:
     OID_ENTITY_PHYS_CONTAINED_IN = '1.3.6.1.2.1.47.1.1.1.1.4'  # entPhysicalContainedIn
     OID_ENTITY_PHYS_CLASS = '1.3.6.1.2.1.47.1.1.1.1.5'  # entPhysicalClass
     OID_IF_HIGH_SPEED = '1.3.6.1.2.1.31.1.1.1.15'  # ifHighSpeed (in Mbps)
+
+    # ---- 硬件资产：无 ENTITY-MIB 设备（打印机/终端）的 SN、型号来源 ----
+    OID_PRT_GENERAL_SERIAL = '1.3.6.1.2.1.43.5.1.1.17.1'   # prtGeneralSerialNumber
+    OID_HR_DEVICE_DESCR = '1.3.6.1.2.1.25.3.2.1.3.1'       # hrDeviceDescr（型号描述）
 
     # ---- Topology: IF-MIB interface inventory ----
     OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2'           # ifDescr
@@ -1707,9 +1763,8 @@ class SNMPService:
         """
         Collect chassis serial number via SNMP ENTITY-MIB.
 
-        Walks entPhysicalClass to find the chassis entity (class=3),
-        then GETs entPhysicalSerialNum at that index.
-        Falls back to entPhysicalSerialNum.1 if the walk returns nothing.
+        实际采集已统一到 get_entity_hardware()；这里只保留交换机侧既有的返回语义
+        （拿到 SN 返回字符串，否则 None），对外行为不变。
         """
         try:
             auth_password = decrypt_password(switch_config['snmp_auth_password_encrypted'])
@@ -1718,7 +1773,7 @@ class SNMPService:
             )
             auth_data = self._create_snmp_auth(
                 username=switch_config.get('snmp_username'),
-                auth_protocol=switch_config.get('snmp_auth_protocol', 'SHA'),
+                auth_protocol=switch_config.get('snmp_auth_protocol') or 'SHA',
                 auth_password=auth_password,
                 priv_protocol=switch_config.get('snmp_priv_protocol'),
                 priv_password=priv_password,
@@ -1727,50 +1782,191 @@ class SNMPService:
             if not auth_data:
                 return None
 
-            port = switch_config.get('snmp_port', 161)
-
-            # Walk entPhysicalClass to find chassis index
-            class_oid = self.OID_ENTITY_PHYS_CLASS
-            chassis_index = None
-
-            try:
-                entries = await asyncio.wait_for(
-                    self._walk_oid(switch_ip, class_oid, auth_data, port, timeout=5),
-                    timeout=7.0
-                )
-                if entries:
-                    for oid_str, value in entries:
-                        if value == 3:  # chassis
-                            chassis_index = oid_str.split('.')[-1]
-                            break
-            except asyncio.TimeoutError:
-                logger.debug(f"ENTITY-MIB walk timed out for {switch_ip}, trying fallback")
-            except Exception as e:
-                logger.debug(f"ENTITY-MIB walk failed for {switch_ip}: {e}")
-
-            # Fallback: try index 1
-            if chassis_index is None:
-                chassis_index = '1'
-
-            serial_oid = f'{self.OID_ENTITY_PHYS_SERIAL}.{chassis_index}'
-            serial = await self._get_oid(
-                switch_ip, serial_oid, auth_data, port,
-                timeout=5, retries=1, log_errors=False
+            hardware = await self.get_entity_hardware(
+                switch_ip,
+                auth_data,
+                port=switch_config.get('snmp_port', 161),
+                timeout=5,
             )
-
-            if serial is not None:
-                serial_str = str(serial).strip()
-                if serial_str and serial_str.lower() not in (
-                    '', 'null', 'none', 'na', 'n/a', 'n.a.', 'unknown', 'not available',
-                ):
-                    logger.info(f"Chassis serial for {switch_ip}: {serial_str}")
-                    return serial_str
-
+            serial = (hardware or {}).get('serial_number')
+            if serial:
+                logger.info(f"Chassis serial for {switch_ip}: {serial}")
+                return serial
             return None
 
         except Exception as e:
             logger.debug(f"Serial collection failed for {switch_ip}: {e}")
             return None
+
+    async def get_entity_hardware(
+        self,
+        target_ip: str,
+        auth_data: Any,
+        port: int = 161,
+        timeout: int = 5,
+    ) -> Optional[Dict[str, Optional[str]]]:
+        """
+        通过 ENTITY-MIB 读取机框 SN / 型号 / 厂商。
+
+        先 walk entPhysicalClass 找 class=3(chassis) 的索引，再 GET 该索引的
+        serial/model/mfg；walk 无结果或找不到机框时回退到索引 1。占位值已过滤，
+        全部为空时返回 None。绝不抛异常。
+        """
+        if not auth_data:
+            return None
+
+        chassis_index = None
+        try:
+            entries = await asyncio.wait_for(
+                self._walk_oid(
+                    target_ip, self.OID_ENTITY_PHYS_CLASS, auth_data, port, timeout=timeout
+                ),
+                timeout=timeout + 2.0,
+            )
+            for oid_str, value in entries or []:
+                if value == 3:  # chassis
+                    chassis_index = oid_str.split('.')[-1]
+                    break
+        except asyncio.TimeoutError:
+            logger.debug(f"ENTITY-MIB walk timed out for {target_ip}, falling back to index 1")
+        except Exception as e:
+            logger.debug(f"ENTITY-MIB walk failed for {target_ip}: {e}")
+
+        candidates: List[str] = [chassis_index] if chassis_index else []
+        if '1' not in candidates:
+            candidates.append('1')
+
+        best: Optional[Dict[str, Optional[str]]] = None
+        for idx in candidates:
+            serial = clean_hardware_value(await self._get_oid(
+                target_ip, f'{self.OID_ENTITY_PHYS_SERIAL}.{idx}', auth_data,
+                port, timeout=timeout, retries=1, log_errors=False
+            ))
+            model = clean_hardware_value(await self._get_oid(
+                target_ip, f'{self.OID_ENTITY_PHYS_MODEL}.{idx}', auth_data,
+                port, timeout=timeout, retries=1, log_errors=False
+            ))
+            vendor = clean_hardware_value(await self._get_oid(
+                target_ip, f'{self.OID_ENTITY_PHYS_MFG}.{idx}', auth_data,
+                port, timeout=timeout, retries=1, log_errors=False
+            ))
+            if not model:
+                # 部分设备只在描述里写型号
+                model = clean_hardware_value(await self._get_oid(
+                    target_ip, f'{self.OID_ENTITY_PHYS_DESCR_TABLE}.{idx}', auth_data,
+                    port, timeout=timeout, retries=1, log_errors=False
+                ))
+
+            if not (serial or model or vendor):
+                continue
+
+            found = {
+                'serial_number': serial,
+                'device_model': model,
+                'hardware_vendor': vendor,
+                'hardware_source': 'entity',
+            }
+            if serial:
+                return found
+            if best is None:
+                best = found
+
+        return best
+
+    async def get_host_hardware(
+        self,
+        target_ip: str,
+        auth_data: Any,
+        port: int = 161,
+        timeout: int = 5,
+        sys_descr: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
+        """
+        IPAM 侧硬件采集入口：ENTITY-MIB → Printer-MIB → HOST-RESOURCES → sysDescr。
+
+        任一级拿到 SN 即返回；后级只补型号/厂商。sys_descr 由调用方传入，避免重复 GET。
+        绝不抛异常，取不到就是空值（hardware_source 为 None）。
+        """
+        result: Dict[str, Optional[str]] = {
+            'serial_number': None,
+            'device_model': None,
+            'hardware_vendor': None,
+            'hardware_source': None,
+        }
+        if not auth_data:
+            return result
+
+        # 1. ENTITY-MIB：交换机 / 路由器 / 服务器 / 带机框的设备
+        entity = await self.get_entity_hardware(target_ip, auth_data, port, timeout)
+        if entity:
+            result['serial_number'] = entity.get('serial_number')
+            result['device_model'] = entity.get('device_model')
+            result['hardware_vendor'] = entity.get('hardware_vendor')
+            result['hardware_source'] = entity.get('hardware_source')
+            if result['serial_number']:
+                return result
+
+        # 2. Printer-MIB：打印机普遍不实现 ENTITY-MIB
+        printer_serial = clean_hardware_value(await self._get_oid(
+            target_ip, self.OID_PRT_GENERAL_SERIAL, auth_data,
+            port, timeout=timeout, retries=1, log_errors=False
+        ))
+        if printer_serial:
+            result['serial_number'] = printer_serial
+            result['hardware_source'] = 'printer'
+            if not result['device_model']:
+                result['device_model'] = clean_hardware_value(await self._get_oid(
+                    target_ip, self.OID_HR_DEVICE_DESCR, auth_data,
+                    port, timeout=timeout, retries=1, log_errors=False
+                ))
+            return result
+
+        # 3. HOST-RESOURCES：Linux/Unix 主机常只提供设备描述
+        hr_descr = clean_hardware_value(await self._get_oid(
+            target_ip, self.OID_HR_DEVICE_DESCR, auth_data,
+            port, timeout=timeout, retries=1, log_errors=False
+        ))
+        if hr_descr and not result['device_model']:
+            result['device_model'] = hr_descr
+            result['hardware_source'] = 'host-resources'
+            return result
+
+        # 4. sysDescr：只补型号，SN 留空
+        descr_model = clean_hardware_value((sys_descr or '').split('\n')[0][:200])
+        if descr_model and not result['device_model']:
+            result['device_model'] = descr_model
+            result['hardware_source'] = 'sysdescr'
+
+        return result
+
+    async def probe_sys_descr(
+        self,
+        target_ip: str,
+        auth_data: Any,
+        port: int = 161,
+        timeout: int = 3,
+    ) -> Optional[str]:
+        """
+        轻量存活探测：短超时、不重试地 GET sysDescr。
+
+        用途：硬件采集前先确认该 IP 到底有没有 SNMP 应答。没有 agent 的主机
+        （典型是 Windows PC）若直接进 ENTITY-MIB 全表 walk，单个 IP 会空等
+        近一分钟；预检把这种情况压缩到数秒。绝不抛异常，无应答返回 None。
+        """
+        if not auth_data:
+            return None
+        try:
+            value = await self._get_oid(
+                target_ip, self.OID_SYS_DESCR, auth_data,
+                port, timeout=timeout, retries=0, log_errors=False
+            )
+        except Exception as e:
+            logger.debug(f"sysDescr probe failed for {target_ip}: {e}")
+            return None
+        if value is None:
+            return None
+        text_value = clean_hardware_value(str(value))
+        return text_value or None
 
 
     def _extract_os_from_sysdescr(self, sys_descr: str) -> Dict[str, Optional[str]]:

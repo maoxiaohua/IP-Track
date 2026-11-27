@@ -90,6 +90,14 @@ class IPAddressUpdate(BaseModel):
     hostname: Optional[str] = Field(None, max_length=255)
     mac_address: Optional[str] = None
     description: Optional[str] = None
+    # 手工录入兜底（自动采集会覆盖）
+    serial_number: Optional[str] = Field(None, max_length=200)
+    device_model: Optional[str] = Field(None, max_length=200)
+
+
+class UIPreferenceUpdate(BaseModel):
+    """按账号保存的界面偏好值（如可见列列表），任意 JSON。"""
+    value: Any
 
 
 class IPAddressResponse(IPAddressBase):
@@ -102,6 +110,13 @@ class IPAddressResponse(IPAddressBase):
     dns_name: Optional[str] = None
     system_name: Optional[str] = None
     machine_type: Optional[str] = None
+    # 硬件资产（SNMP / WMI 采集）
+    serial_number: Optional[str] = None
+    device_model: Optional[str] = None
+    hardware_vendor: Optional[str] = None
+    hardware_source: Optional[str] = None
+    hardware_collected_at: Optional[datetime] = None
+    hardware_attempted_at: Optional[datetime] = None
     vendor: Optional[str] = None
     contact: Optional[str] = None
     location: Optional[str] = None
@@ -112,6 +127,10 @@ class IPAddressResponse(IPAddressBase):
     switch_id: Optional[int]
     switch_port: Optional[str]
     vlan_id: Optional[int]
+    # 端口↔设备联动（由 services/port_device_service 填充，失败时为 None）
+    port_device_class: Optional[str] = None
+    port_device_confidence: Optional[int] = None
+    port_device_reasons: Optional[str] = None
     last_seen_at: Optional[datetime]
     last_boot_time: Optional[datetime]
     last_scan_at: Optional[datetime]
@@ -293,6 +312,44 @@ class OSTypeStatisticsResponse(BaseModel):
     archived_classified: int = 0
     include_archived: bool = False
     data_as_of: Optional[datetime] = None
+
+
+# Hardware Inventory Schemas
+class HardwareInventorySettingsUpdate(BaseModel):
+    """硬件盘点设置更新（口令类字段有值才覆盖）"""
+    enabled: Optional[bool] = None
+    retry_hours: Optional[int] = Field(None, ge=1, le=720)
+    wmi_concurrency: Optional[int] = Field(None, ge=1, le=8)
+    wmi_max_per_sweep: Optional[int] = Field(None, ge=1, le=1000)
+    default_community: Optional[str] = Field(None, max_length=255)
+    wmi_domain: Optional[str] = Field(None, max_length=255)
+    wmi_username: Optional[str] = Field(None, max_length=255)
+    wmi_password: Optional[str] = Field(None, max_length=255)
+
+
+class HardwareInventorySettingsResponse(BaseModel):
+    """硬件盘点设置（绝不返回明文/密文，只返回是否已配置）"""
+    enabled: bool
+    retry_hours: int
+    wmi_concurrency: int
+    wmi_max_per_sweep: int
+    default_community_configured: bool
+    wmi_domain: Optional[str] = None
+    wmi_username: Optional[str] = None
+    wmi_password_configured: bool = False
+
+
+class HardwareCollectRequest(BaseModel):
+    """手动触发硬件采集"""
+    ip_address_ids: Optional[List[int]] = None
+    subnet_id: Optional[int] = None
+    force: bool = True
+
+
+class HardwareCollectResponse(BaseModel):
+    """手动采集结果"""
+    queued: int
+    message: str
 
 
 # Batch Import Schemas

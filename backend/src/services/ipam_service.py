@@ -13,6 +13,7 @@ from services.port_lookup_policy_service import (
     load_port_lookup_policy_map,
     resolve_port_lookup_from_map,
 )
+from services.port_device_service import load_port_devices, port_key
 from core.config import settings
 from core.database import AsyncSessionLocal
 from utils.logger import logger
@@ -324,6 +325,27 @@ class IPAMService:
                         arp_overlay.get('vlan_id') if arp_overlay else None
                     )
                 }
+
+        # 端口↔设备联动：同一 (switch, port) 只查一次；失败不影响地址列表。
+        try:
+            pairs = {
+                (int(o['switch_id']), o['switch_port'])
+                for o in overlays.values()
+                if o.get('switch_id') is not None and o.get('switch_port')
+            }
+            device_records = await load_port_devices(db, pairs) if pairs else {}
+            for overlay in overlays.values():
+                if overlay.get('switch_id') is None or not overlay.get('switch_port'):
+                    continue
+                record = device_records.get(
+                    (int(overlay['switch_id']), port_key(overlay['switch_port']))
+                )
+                if record:
+                    overlay['port_device_class'] = record['port_device_class']
+                    overlay['port_device_confidence'] = record['port_device_confidence']
+                    overlay['port_device_reasons'] = record['port_device_reasons']
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Load port devices for IPAM overlays failed: {exc}")
 
         return overlays
 
@@ -678,7 +700,9 @@ class IPAMService:
         status: Optional[IPStatus] = None,
         hostname: Optional[str] = None,
         mac_address: Optional[str] = None,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        serial_number: Optional[str] = None,
+        device_model: Optional[str] = None,
     ) -> Optional[IPAddress]:
         """Update IP address"""
         ip_addr = await self.get_ip_address(db, ip_id)
@@ -693,6 +717,12 @@ class IPAMService:
             ip_addr.mac_address = mac_address
         if description is not None:
             ip_addr.description = description
+        # 手工录入兜底：来源记为 manual，自动采集成功时会覆盖
+        if serial_number is not None:
+            ip_addr.serial_number = serial_number
+            ip_addr.hardware_source = 'manual'
+        if device_model is not None:
+            ip_addr.device_model = device_model
 
         await db.commit()
         await db.refresh(ip_addr)
@@ -708,6 +738,8 @@ class IPAMService:
             'switch_id': ip_addr.switch_id,
             'switch_port': ip_addr.switch_port,
             'last_seen_at': ip_addr.last_seen_at,
+            'serial_number': ip_addr.serial_number,
+            'device_model': ip_addr.device_model,
         }
 
     @staticmethod
@@ -756,23 +788,18 @@ class IPAMService:
 
             # Get SNMP profile if configured for this subnet
             snmp_profile = None
+            profile = None
             if subnet.snmp_profile_id:
                 from models.ipam import SNMPProfile
+                from services.snmp_service import build_ipam_snmp_profile
                 result = await db.execute(
                     select(SNMPProfile).where(SNMPProfile.id == subnet.snmp_profile_id)
                 )
                 profile = result.scalar_one_or_none()
                 if profile and profile.enabled:
-                    # Prepare SNMP profile dictionary for scanning
-                    snmp_profile = {
-                        'username': profile.username,
-                        'auth_protocol': profile.auth_protocol,
-                        'auth_password_encrypted': profile.auth_password_encrypted,
-                        'priv_protocol': profile.priv_protocol,
-                        'priv_password_encrypted': profile.priv_password_encrypted,
-                        'port': profile.port,
-                        'timeout': profile.timeout
-                    }
+                    # 统一走归一化入口：v2c 团体字换算成 auth_password，并补齐
+                    # snmp_version（否则会被当作 SNMPv3 构造，静默超时）
+                    snmp_profile = build_ipam_snmp_profile(profile)
                     logger.info(f"Using SNMP profile '{profile.name}' for subnet {subnet_id}")
 
             # Get all IP addresses
@@ -929,11 +956,29 @@ class IPAMService:
                         }
                     )
 
+                # 硬件资产（SN/型号）采集：仅在线、暂无 SN、且已过重试窗口的 IP
+                hardware_attempts_map = {}
+                try:
+                    from services import hardware_inventory_service
+                    if await hardware_inventory_service.is_enabled(db):
+                        hw_attempts = await hardware_inventory_service.resolve_snmp_attempts(db, profile)
+                        if hw_attempts:
+                            hw_retry_hours = await hardware_inventory_service.get_retry_hours(db)
+                            hardware_attempts_map = hardware_inventory_service.build_hardware_attempts_map(
+                                ip_addresses,
+                                hw_attempts,
+                                hw_retry_hours,
+                                reachable_ips=set(reachable_ip_list),
+                            )
+                except Exception as hw_err:
+                    logger.warning(f"Hardware inventory gating failed for subnet {subnet_id}: {hw_err}")
+
                 enrichment_results = await ip_scan_service.enrich_multiple_ips(
                     reachable_ip_list,
                     snmp_profile,
                     dns_servers,
-                    progress_callback=on_enrichment_progress
+                    progress_callback=on_enrichment_progress,
+                    hardware_attempts_map=hardware_attempts_map
                 )
 
                 for enrichment_result in enrichment_results:
@@ -1014,6 +1059,16 @@ class IPAMService:
                     ip_addr.machine_type = scan_result.get('machine_type')  # SNMP sysDescr parsed
                 if scan_result.get('vendor') is not None:
                     ip_addr.vendor = scan_result.get('vendor')  # SNMP vendor parsed
+
+                # 硬件资产（SN / 型号）：attempted_at 记录本轮尝试（用于退避），
+                # collected_at 只在真正采到 SN 时更新
+                if scan_result.get('hardware_attempted_at'):
+                    ip_addr.hardware_attempted_at = scan_result['hardware_attempted_at']
+                for hw_field in ('serial_number', 'device_model', 'hardware_vendor', 'hardware_source'):
+                    if scan_result.get(hw_field):
+                        setattr(ip_addr, hw_field, scan_result[hw_field])
+                if scan_result.get('serial_number'):
+                    ip_addr.hardware_collected_at = datetime.now(timezone.utc)
 
                 # Update MAC address
                 if mac_to_lookup:
@@ -1754,22 +1809,17 @@ class IPAMService:
                     return None
 
                 snmp_profile = None
+                profile = None
                 if subnet.snmp_profile_id:
                     from models.ipam import SNMPProfile
+                    from services.snmp_service import build_ipam_snmp_profile
                     prof_result = await enrich_db.execute(
                         select(SNMPProfile).where(SNMPProfile.id == subnet.snmp_profile_id)
                     )
                     profile = prof_result.scalar_one_or_none()
                     if profile and profile.enabled:
-                        snmp_profile = {
-                            'username': profile.username,
-                            'auth_protocol': profile.auth_protocol,
-                            'auth_password_encrypted': profile.auth_password_encrypted,
-                            'priv_protocol': profile.priv_protocol,
-                            'priv_password_encrypted': profile.priv_password_encrypted,
-                            'port': profile.port,
-                            'timeout': profile.timeout,
-                        }
+                        # 与 scan_subnet 同一条归一化入口，保证 v2c 模板能真正生效
+                        snmp_profile = build_ipam_snmp_profile(profile)
 
                 dns_servers = None
                 if subnet.dns_servers:
@@ -1797,11 +1847,29 @@ class IPAMService:
                     f"Enriching subnet {subnet_name}: {len(reachable_ip_list)} reachable IPs"
                 )
 
+                # 硬件资产（SN/型号）采集门控，与 scan_subnet 一致
+                hardware_attempts_map = {}
+                try:
+                    from services import hardware_inventory_service
+                    if await hardware_inventory_service.is_enabled(enrich_db):
+                        hw_attempts = await hardware_inventory_service.resolve_snmp_attempts(enrich_db, profile)
+                        if hw_attempts:
+                            hw_retry_hours = await hardware_inventory_service.get_retry_hours(enrich_db)
+                            hardware_attempts_map = hardware_inventory_service.build_hardware_attempts_map(
+                                reachable_ips,
+                                hw_attempts,
+                                hw_retry_hours,
+                                reachable_ips=set(reachable_ip_list),
+                            )
+                except Exception as hw_err:
+                    logger.warning(f"Hardware inventory gating failed for subnet {subnet_name}: {hw_err}")
+
                 enrichment_results = await ip_scan_service.enrich_multiple_ips(
                     reachable_ip_list,
                     snmp_profile,
                     dns_servers,
                     progress_callback=None,
+                    hardware_attempts_map=hardware_attempts_map,
                 )
 
                 for enr in enrichment_results:
@@ -1834,6 +1902,14 @@ class IPAMService:
                         ip_addr.machine_type = enr['machine_type']
                     if enr.get('vendor'):
                         ip_addr.vendor = enr['vendor']
+                    # 硬件资产（SN / 型号）
+                    if enr.get('hardware_attempted_at'):
+                        ip_addr.hardware_attempted_at = enr['hardware_attempted_at']
+                    for hw_field in ('serial_number', 'device_model', 'hardware_vendor', 'hardware_source'):
+                        if enr.get(hw_field):
+                            setattr(ip_addr, hw_field, enr[hw_field])
+                    if enr.get('serial_number'):
+                        ip_addr.hardware_collected_at = datetime.now(timezone.utc)
                     if enr.get('os_type'):
                         ip_addr.os_type = enr['os_type']
                     if enr.get('os_name'):

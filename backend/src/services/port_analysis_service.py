@@ -13,6 +13,24 @@ from enum import Enum
 from utils.logger import logger
 
 
+# 跨厂商端口名前缀归一：H3C/Huawei 的 GE、Alcatel 的 ethernet-1/15、
+# Dell 的 ethernet1/1/5 与 Cisco 的 GigabitEthernet 1/1 视为同一物理口。
+_PORT_ALIAS_PATTERN = re.compile(
+    r'^(hundredgigabitethernet|hundredgige|twentyfivegigabitethernet|twentyfivegige|'
+    r'fortygigabitethernet|fortygige|tengigabitethernet|tengige|gigabitethernet|'
+    r'fastethernet|ethernet|gige|ge|gi|te|fo|fa|hu|twe|eth|xe|xge)(?=[\d/-])'
+)
+_PORT_ALIAS_MAP = {
+    'hundredgigabitethernet': 'hu', 'hundredgige': 'hu', 'hu': 'hu',
+    'twentyfivegigabitethernet': 'twe', 'twentyfivegige': 'twe', 'twe': 'twe',
+    'fortygigabitethernet': 'fo', 'fortygige': 'fo', 'fo': 'fo',
+    'tengigabitethernet': 'te', 'tengige': 'te', 'te': 'te', 'xe': 'te', 'xge': 'te',
+    'gigabitethernet': 'gi', 'gige': 'gi', 'ge': 'gi', 'gi': 'gi',
+    'fastethernet': 'fa', 'fa': 'fa',
+    'ethernet': 'et', 'eth': 'et',
+}
+
+
 class PortType(str, Enum):
     """Port type classifications"""
     ACCESS = "access"  # End device connected (single MAC only)
@@ -53,6 +71,20 @@ class PortAnalysisService:
                 return f"{canonical_prefix} {suffix}"
 
         return cleaned
+
+    def normalize_port_key(self, port_name: str) -> str:
+        """用于跨表匹配的端口键：在 normalize_port_name 基础上再消歧前缀/分隔符。
+
+        只用于「端口 ↔ 设备」匹配，不改变 normalize_port_name 的既有行为。
+        """
+        name = self.normalize_port_name(port_name)
+        if not name:
+            return ''
+        key = re.sub(r'[\s\-_]+', '', name.lower())
+        match = _PORT_ALIAS_PATTERN.match(key)
+        if match:
+            key = _PORT_ALIAS_MAP[match.group(1)] + key[match.end():]
+        return key
 
     def classify_port(
         self,

@@ -34,4 +34,6 @@ ENV PYTHONPATH=/app/src
 EXPOSE 8100
 
 # Run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8100"]
+# 用 python -m 启动：uvicorn console script 启动时 sys.path[0]=/usr/local/bin，
+# 若依赖把同名模块（如 impacket 的 services.py）装到该目录会遮蔽 /app/src/services
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8100"]

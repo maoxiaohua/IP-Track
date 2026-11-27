@@ -26,77 +26,29 @@
         </template>
       </el-input>
 
-      <el-table
-        :data="ipList"
-        v-loading="loading"
-        stripe
-        style="width: 100%"
+      <div class="table-toolbar">
+        <span class="table-count">共 {{ total }} 条记录（当前页 {{ ipList.length }} 条）</span>
+        <ColumnSettings
+          :columns="columns"
+          :is-visible="isVisible"
+          :saving="columnSaving"
+          @toggle="toggle"
+          @reset="resetColumns"
+          @save="saveColumns"
+        />
+      </div>
+
+      <IPAddressTable
+        :rows="ipList"
+        :columns="visibleColumns"
+        :loading="loading"
+        loading-text="正在加载设备清单..."
+        wrapper-max-height="70vh"
+        default-sort-prop="ip_address"
+        row-clickable
         @row-click="handleRowClick"
-        :row-style="{ cursor: 'pointer' }"
-      >
-        <el-table-column prop="ip_address" label="IP 地址" width="160" sortable="custom" />
-        <el-table-column label="主机名" min-width="200">
-          <template #default="{ row }">
-            {{ row.hostname || row.dns_name || row.system_name || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="MAC 地址" width="160">
-          <template #default="{ row }">
-            {{ row.mac_address || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="os_name" label="操作系统" width="140">
-          <template #default="{ row }">
-            {{ row.os_name || row.os_type || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="90">
-          <template #default="{ row }">
-            <el-tag
-              :type="row.status === 'used' ? 'success' : row.status === 'offline' ? 'danger' : row.status === 'reserved' ? 'warning' : 'info'"
-              size="small"
-            >
-              {{ statusLabel(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="subnet_name" label="子网" min-width="180">
-          <template #default="{ row }">
-            <router-link
-              v-if="row.subnet_id"
-              :to="`/ipam/subnets/${row.subnet_id}`"
-              style="color: var(--primary-color); text-decoration: none"
-              @click.stop
-            >
-              {{ row.subnet_name || row.subnet_id }}
-            </router-link>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="switch_name" label="交换机" min-width="180">
-          <template #default="{ row }">
-            <router-link
-              v-if="row.switch_id"
-              :to="`/switches/${row.switch_id}`"
-              style="color: var(--primary-color); text-decoration: none"
-              @click.stop
-            >
-              {{ row.switch_name || row.switch_id }}
-            </router-link>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="switch_port" label="端口" width="100">
-          <template #default="{ row }">
-            {{ row.switch_port || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column label="最后扫描" width="140">
-          <template #default="{ row }">
-            {{ row.last_scan_at ? formatTime(row.last_scan_at) : '-' }}
-          </template>
-        </el-table-column>
-      </el-table>
+        @ip-click="handleRowClick"
+      />
 
       <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 16px">
         <span style="font-size: 13px; color: #909399">共 {{ total }} 条记录</span>
@@ -120,6 +72,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Download, Search } from '@element-plus/icons-vue'
 import { ipamApi, type IPAddressDetail } from '@/api/ipam'
+import IPAddressTable from '@/components/ipam/IPAddressTable.vue'
+import ColumnSettings from '@/components/ipam/ColumnSettings.vue'
+import { buildIPExportRows } from '@/components/ipam/ipColumns'
+import { useColumnPreferences } from '@/composables/useColumnPreferences'
 
 const route = useRoute()
 const router = useRouter()
@@ -147,6 +103,31 @@ const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(100)
 const searchText = ref('')
+
+// 列显示偏好（按账号保存）；与子网详情使用同一套列和默认显示，保证两处参数完全一致
+const {
+  columns,
+  visibleColumns,
+  isVisible,
+  saving: columnSaving,
+  load: loadColumnPreferences,
+  save: handleColumnSave,
+  toggle,
+  reset
+} = useColumnPreferences('ipam.os-type-ip-list')
+
+const saveColumns = async () => {
+  try {
+    await handleColumnSave()
+  } catch (error) {
+    ElMessage.error('列设置保存失败')
+  }
+}
+
+const resetColumns = async () => {
+  reset()
+  await saveColumns()
+}
 
 async function loadData() {
   loading.value = true
@@ -191,53 +172,14 @@ function handleRowClick(row: IPAddressDetail) {
   router.push(`/ipam/subnets/${row.subnet_id}`)
 }
 
-function statusLabel(status: string): string {
-  const map: Record<string, string> = {
-    used: '在线',
-    available: '可用',
-    reserved: '保留',
-    offline: '离线'
-  }
-  return map[status] || status || '-'
-}
-
-function formatTime(dateStr: string): string {
-  try {
-    const date = new Date(dateStr)
-    const now = new Date()
-    const diffMs = now.getTime() - date.getTime()
-    const diffMins = Math.floor(diffMs / 60000)
-    const diffHours = Math.floor(diffMs / 3600000)
-    const diffDays = Math.floor(diffMs / 86400000)
-
-    if (diffMins < 1) return '刚刚'
-    if (diffMins < 60) return `${diffMins} 分钟前`
-    if (diffHours < 24) return `${diffHours} 小时前`
-    if (diffDays < 7) return `${diffDays} 天前`
-
-    return date.toLocaleDateString('zh-CN')
-  } catch {
-    return dateStr
-  }
-}
-
 function exportToCSV() {
   if (ipList.value.length === 0) {
     ElMessage.warning('没有数据可导出')
     return
   }
 
-  const exportData = ipList.value.map(row => ({
-    'IP 地址': row.ip_address,
-    '主机名': row.hostname || row.dns_name || row.system_name || '',
-    'MAC 地址': row.mac_address || '',
-    '操作系统': row.os_name || row.os_type || '',
-    '状态': statusLabel(row.status),
-    '子网': row.subnet_name || '',
-    '交换机': row.switch_name || '',
-    '端口': row.switch_port || '',
-    '最后扫描': row.last_scan_at ? formatTime(row.last_scan_at) : ''
-  }))
+  // 与表格共用同一套列定义，页面新增列后导出自动跟随
+  const exportData = buildIPExportRows(ipList.value)
 
   import('@/utils/export').then(({ exportToCSV: doExport }) => {
     doExport(exportData, `${label.value}_${new Date().toISOString().slice(0, 10)}`)
@@ -247,11 +189,25 @@ function exportToCSV() {
 
 onMounted(() => {
   loadData()
+  void loadColumnPreferences()
 })
 </script>
 
 <style scoped>
 .os-type-ip-list {
   padding: 20px;
+}
+
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.table-count {
+  color: #909399;
+  font-size: 13px;
 }
 </style>

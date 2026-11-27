@@ -368,6 +368,9 @@ const option = computed(() => {
     const moved = userPositions.value[node.id]
     const isSelected = props.selectedId === node.id
     const isSwitch = node.kind === 'switch'
+    const unknownClass = node.kind === 'unknown' ? node.device_class : null
+    // 终端（PC/话机）只降透明度，不隐藏；unknown 始终可见。
+    const isTerminal = unknownClass === 'host' || unknownClass === 'phone'
     const [nodeWidth, nodeHeight] = nodeSize(node)
     const labelStyle: Record<string, unknown> = {
       show: showLabel,
@@ -394,7 +397,7 @@ const option = computed(() => {
         borderColor: isSelected ? '#303133' : isSwitch ? '#ffffff' : '#e6a23c',
         borderWidth: isSelected ? 3 : isSwitch ? 1 : 2,
         borderType: isSwitch ? 'solid' : 'dashed',
-        opacity: isSwitch ? 1 : 0.9
+        opacity: isSwitch ? 1 : isTerminal ? 0.45 : 0.9
       },
       label: labelStyle,
       tooltip: {
@@ -402,6 +405,12 @@ const option = computed(() => {
           `<b>${node.label}</b>`,
           node.kind === 'switch' ? `管理 IP：${node.mgmt_ip || '-'}` : `未知节点：${node.id}`,
           node.kind === 'switch' ? `厂商：${node.vendor || '-'}` : null,
+          node.kind === 'unknown'
+            ? `设备类别：${unknownClass || '未识别'}${node.device_confidence != null ? `（置信度 ${node.device_confidence}%）` : ''}`
+            : null,
+          node.kind === 'unknown' && node.device_reasons?.length
+            ? `判定依据：${node.device_reasons.join('；')}`
+            : null,
           statusText,
           `邻居/链路数：${node.degree}`
         ].filter(Boolean).join('<br/>')
